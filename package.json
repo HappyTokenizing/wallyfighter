@@ -1,0 +1,20 @@
+{
+  "name": "wally-crypto-smackdown",
+  "private": true,
+  "version": "2.1.0",
+  "description": "WALLY: CRYPTO SMACKDOWN — a retro low-poly 3D crypto-parody arena fighter. 10 fighters, 10 arenas, ragdoll physics, procedural everything. It was not financial advice.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.166.1",
+    "cannon-es": "^0.20.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
