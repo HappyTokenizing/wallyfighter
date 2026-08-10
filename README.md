@@ -123,6 +123,42 @@ npm run preview  # serve the production build
 
 Open the dev URL, press any button, lose money responsibly.
 
+## Deploying to Vercel
+
+The repo is deploy-ready — no environment variables, no backend, no external
+services. Push it to GitHub and import the repo at
+[vercel.com/new](https://vercel.com/new); `vercel.json` already pins everything:
+
+| Setting | Value |
+|---|---|
+| Framework preset | Vite (auto-detected) |
+| Build command | `npm run build` |
+| Output directory | `dist` |
+| Install command | `npm install` |
+| Node version | 18+ |
+
+Hashed asset bundles under `/assets/` are served `immutable` for a year while
+`index.html` is revalidated every request, so a redeploy takes effect instantly
+without stale chunks.
+
+Or from the CLI:
+
+```bash
+npx vercel --prod
+```
+
+**Notes for the deployed build**
+
+- `dist/` is gitignored on purpose. Vercel builds from source.
+- The `?cap=1` visual-QA rig and the `/__shot` screenshot sink are **dev-only**
+  (the Vite plugin is `apply: 'serve'`), so neither ships in the bundle.
+- Everything is generated at runtime — geometry, textures, animation, music,
+  SFX. There are no binary assets, so the whole game is ~1 MB gzipped of JS.
+- First load generates procedural textures on the main thread; the loading
+  screen covers it. Subsequent arena entries are time-sliced.
+- WebGL2 required. Quality auto-selects `low` on touch devices; users can
+  override in Settings.
+
 ## Controls (summary)
 
 | Action       | Keyboard   | Gamepad | Touch (v2.1 simplified) |

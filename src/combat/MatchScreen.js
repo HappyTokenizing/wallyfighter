@@ -165,10 +165,36 @@ const STRIKE_LIMBS = [
   ['armR', 'torso', 0.0], ['armL', 'torso', 0.0],
 ]
 const _tipV = new THREE.Vector3()
-// Clip phases probed for the widest silhouette during the extension hold, as
-// fractions of the [contact, active-end + overshoot] window. Five samples: the
-// search runs once per landed hit, inside a frame the sim has already frozen.
+// Clip phases probed during the extension hold, as fractions of the
+// [contact, active-end + overshoot] window. Seven samples: the search runs once
+// per landed hit, inside a frame the sim has already frozen.
 const EXT_PROBES = [0, 0.2, 0.38, 0.55, 0.72, 0.86, 1]
+// How far the held strike tip may sit from the hitbox contact point, along the
+// attacker->victim axis. The acceptance for the extension hold is "within
+// 0.15 m of the contact point", so that is the number, not a taste call: a pose
+// that reaches further is no longer showing the frame where the limb met the
+// victim, it is showing the follow-through past him. It is a HARD GATE rather than a penalty term, because the acceptance is a
+// hard bound: a soft penalty lets a probe 1 cm outside the band outscore one
+// comfortably inside it, which is a measured fail for a rounding's worth of
+// extra reach.
+const EXT_OVERSHOOT = 0.15
+// Two reaches within this (metres) are the same pose as far as the objective is
+// concerned, and the silhouette width breaks the tie.
+const EXT_REACH_EPS = 0.004
+
+// --- foot bones -------------------------------------------------------------
+// The ladder lighting.js's own discoverFeet() uses to turn a CharacterDef bone
+// map into "the node closest to the sole", mirrored here so MatchScreen can
+// tell whether a character HAS such a node before it hands the map over — and
+// so it can say out loud which characters do not. Keys are matched, not node
+// names; the roster is legL/legR (+ shinL/shinR on most) with no foot or ankle
+// bone anywhere, so this normally resolves to the shin or leg rung.
+const FOOT_BONE_RANK = [
+  [/^(foot|toe|sole|paw|hoof|shoe|boot)/i, 3],
+  [/^(ankle)/i, 3],
+  [/^(shin|calf)/i, 2],
+  [/^(leg|thigh)/i, 1],
+]
 
 export class MatchScreen {
   constructor() {
@@ -694,8 +720,38 @@ export class MatchScreen {
     try { this.particles?.clearSwings?.() } catch { /* pool is optional */ }
   }
 
+  // ---------------------------------------------------------------------------
   // A contact-shadow disc under each fighter so nobody floats (contract §6).
-  // Best-effort and idempotent: called once, after the fighters exist.
+  //
+  // ROUND 13 — THE HERO CHARACTER WAS THE LEAST GROUNDED THING IN THE GAME, and
+  // this call site is why. It used to hand lighting.js `{ radius, groundY }` and
+  // NO BONE MAP. addContactShadow() passes `o.bones` straight to discoverFeet(),
+  // which without one falls back to a purely geometric probe: the two lowest
+  // meshes in the subject's local space, clustered laterally. On WALLY that
+  // picks `merged-0` and `tailSeg3` — a merged static mesh and a TAIL segment —
+  // and probes a sole at 0.4334 m. Everything downstream is then correct about
+  // the wrong number: the sole probe re-bases the disc plane upward, the crevice
+  // term paints on his shins and as a band near the horizon, and the discs
+  // measured 43.8-45.9 cm off the floor in ALL TEN arenas.
+  //
+  // The fix is one option. Every CharacterDef exposes legL/legR (CONTRACTS.md
+  // §4 guarantees them) and most also expose shinL/shinR; lighting's FOOT_RANK
+  // prefers the shin because it is nearer the sole, then localContactPoint()
+  // measures only the bottom SOLE_BAND of that node's subtree, so a leg-rung
+  // bone still yields a true sole. Nothing in the roster has a foot or ankle
+  // bone and nothing needs one.
+  //
+  // We pass a FILTERED map (the best-ranked node per side under the same
+  // ladder) rather than the whole bone map, for two reasons: it keeps a future
+  // accessory bone that happens to start with "leg"/"shin" out of the probe,
+  // and it lets us detect the genuine no-foot-bone case HERE, log it by
+  // character id, and fall through to the geometric probe deliberately instead
+  // of by accident.
+  //
+  // Idempotent by construction on lighting's side too (addContactShadow returns
+  // the existing handle for a target it already knows), so the `_contactsDone`
+  // latch is belt-and-braces.
+  // ---------------------------------------------------------------------------
   _attachContactShadows() {
     const rig = this.arena?.rig
     if (!rig || typeof rig.addContactShadow !== 'function' || this._contactsDone) return
@@ -703,8 +759,45 @@ export class MatchScreen {
     for (const f of this.fighters || []) {
       const obj = f?.root
       if (!obj) continue
-      try { rig.addContactShadow(obj, { radius: 0.68, groundY: this.arena?.floorY ?? 0 }) } catch { /* optional */ }
+      const bones = this._soleBoneMap(f)
+      if (!bones) {
+        // Not a warning about a broken rig — a statement about which characters
+        // are running on the geometric probe, which is the thing that was
+        // silently true for the whole roster until now.
+        console.warn(`[combat] contact shadows: no foot/shin/leg bone on '${f?.def?.id ?? '(unknown)'}' — falling back to the geometric sole probe`)
+      }
+      const opts = { radius: 0.68, groundY: this.arena?.floorY ?? 0 }
+      if (bones) opts.bones = bones
+      try { rig.addContactShadow(obj, opts) } catch { /* optional */ }
     }
+  }
+
+  /**
+   * The sole-bearing bone per side, under FOOT_BONE_RANK, in the shape
+   * lighting.js's discoverFeet() wants: a plain `{ boneName: Object3D }` map
+   * whose keys end in 'L'/'R'. Returns null when the rig genuinely exposes no
+   * such bone, which is the caller's cue to log and let the geometric probe
+   * have it. Original key names are kept so the rig's own diagnostics
+   * (`feetVia`, `rank`, `nodeName`) stay truthful about which rung resolved.
+   */
+  _soleBoneMap(f) {
+    const bones = f && f.bones
+    if (!bones) return null
+    const out = {}
+    let n = 0
+    for (const side of ['L', 'R']) {
+      let bestKey = null
+      let bestRank = 0
+      for (const k of Object.keys(bones)) {
+        if (!k.endsWith(side) || !bones[k]) continue
+        for (let i = 0; i < FOOT_BONE_RANK.length; i++) {
+          const rank = FOOT_BONE_RANK[i][1]
+          if (rank > bestRank && FOOT_BONE_RANK[i][0].test(k)) { bestKey = k; bestRank = rank }
+        }
+      }
+      if (bestKey) { out[bestKey] = bones[bestKey]; n++ }
+    }
+    return n ? out : null
   }
 
   update(dt) {
@@ -1148,8 +1241,38 @@ export class MatchScreen {
    *
    * Best-effort throughout — a stub rig, a clipless move or a missing camera
    * all fall through to the old behaviour.
+   *
+   * ROUND 13 — IT WAS OPTIMISING THE WRONG THING. The probe used to score
+   * SCREEN-SPACE SILHOUETTE WIDTH, and the feel critic's read of the result was
+   * exact: "in h4-impact that picks a bent-over torso with the trailing arm
+   * flung AWAY from the victim; there is no limb anywhere near the flash. The
+   * frame is wide, but it does not read as a strike — I cannot tell who hit
+   * whom." A silhouette is wide when the limbs are spread ACROSS the frame,
+   * which on a punch thrown roughly down the camera axis is maximised by the
+   * arm that is NOT throwing it. Worse, the measurement said the probe was
+   * doing nothing at all: the frozen pose beat the pose that would have been
+   * frozen by a median factor of 1.002.
+   *
+   * The right objective was already one function down. `_strikeTip` scores
+   * `(x-hx)*fx + (z-hz)*fz` — reach along facing — to decide WHICH limb is
+   * striking. Reach is also what "full extension" means. So the probe now
+   * scores the strike tip's REACH ALONG THE ATTACKER->VICTIM AXIS, measured
+   * from the attacker's root, and keeps silhouette width only as a tie-break
+   * between poses whose reach is within EXT_REACH_EPS.
+   *
+   * Bounded by the contact point, not unbounded. Maximising raw reach would
+   * happily pick the follow-through two frames past the victim; `pt` (the
+   * hitbox contact point the caller already computed) is projected onto the
+   * same axis and any probe that reaches more than EXT_OVERSHOOT past it is
+   * penalised. So the search reads: "the fullest extension that still lands on
+   * the man" — which is the acceptance test, and which also puts the tip inside
+   * the impact flash, because the flash is spawned at `pt`.
+   *
+   * `pt` and `victim` are optional. Without them the axis degrades to the
+   * attacker's facing and the bound is dropped, which is still reach rather
+   * than width.
    */
-  _holdExtension(a, move) {
+  _holdExtension(a, move, pt = null, victim = null) {
     const an = a && a.animator
     const clip = an && an.clip
     if (!clip || !move || typeof an.update !== 'function') return
@@ -1178,12 +1301,32 @@ export class MatchScreen {
       an.fadeTime = an.fadeDur
     }
 
-    // Silhouette width is scored in SCREEN space, which is the space the
-    // acceptance test ("40%+ wider than idle") is measured in. World-axis
-    // width would rank a punch thrown toward the lens as narrow when on screen
-    // it is the widest thing the clip does; perspective is exactly the term
-    // that matters here.
+    // Silhouette width is now only the TIE-BREAK, but it is still scored in
+    // SCREEN space: the width acceptance ("40%+ wider than idle") is measured
+    // there, and world-axis width would rank a punch thrown toward the lens as
+    // narrow when on screen it is the widest thing the clip does.
     this._extViewProj()
+
+    // --- the objective axis: attacker -> victim, planar, unit ---------------
+    // Origin is the attacker's ROOT, not the hips bone: the hips animate across
+    // the probes and an origin that moves with the pose is not an origin. The
+    // root is frozen for the whole search (root motion is snapshotted below).
+    const ox = a.pos ? a.pos.x : 0
+    const oz = a.pos ? a.pos.z : 0
+    let ux = 0, uz = 0
+    const tgt = victim && victim.pos ? victim.pos : pt
+    if (tgt) { ux = tgt.x - ox; uz = tgt.z - oz }
+    const ulen = Math.hypot(ux, uz)
+    if (ulen > 1e-4) { ux /= ulen; uz /= ulen } else {
+      ux = a.dirX ? a.dirX() : (a.facingSign || 1)
+      uz = a.dirZ ? a.dirZ() : 0
+      const fl = Math.hypot(ux, uz) || 1
+      ux /= fl; uz /= fl
+    }
+    // Where the hit actually happened, on that axis. No `pt` -> no bound, and
+    // the search degrades to "reach as far as the clip goes".
+    const targetReach = pt ? (pt.x - ox) * ux + (pt.z - oz) * uz : Infinity
+    const bounded = Number.isFinite(targetReach)
 
     // Probe with secondary motion off: springs integrate nothing at dt 0 but
     // they do rewrite their parent-rotation history every call, and there is
@@ -1203,8 +1346,23 @@ export class MatchScreen {
     const rm = an._rootMotion
     const rmx = rm ? rm.x : 0, rmy = rm ? rm.y : 0, rmz = rm ? rm.z : 0
     let bestT = t0
+    // Lexicographic: tier first (1 = the tip lands within EXT_OVERSHOOT of the
+    // contact point, 0 = it does not), then score, then silhouette width.
+    // In tier 1 the score is REACH — the fullest extension that still lands on
+    // the man. In tier 0 (nothing in band at all) it is -|error|, i.e. the
+    // closest miss, so the hold still points at the victim.
+    let bestTier = -1
+    let bestScore = -Infinity
     let bestW = -1
+    let bestReach = NaN
     let baseW = -1
+    let baseReach = NaN
+    // The pose the OLD objective (max silhouette width) would have frozen, kept
+    // so the verifier can measure the gain of the swap directly rather than
+    // inferring it.
+    let widthW = -1
+    let widthReach = NaN
+    let widthT = t0
     try {
       for (let i = 0; i < EXT_PROBES.length; i++) {
         const t = t0 + (tEnd - t0) * EXT_PROBES[i]
@@ -1214,8 +1372,26 @@ export class MatchScreen {
         // reads are stale until the subtree is refreshed.
         a.root?.updateMatrixWorld?.(true)
         const w = this._silhouetteWidth(a)
-        if (i === 0) baseW = w   // probe 0 IS the pose the old code froze
-        if (w > bestW) { bestW = w; bestT = t }
+        // Reach of the striking limb along the attacker->victim axis. Limb
+        // SELECTION uses the same axis, so a cross-up does not keep scoring the
+        // arm that is furthest along a stale facing sign.
+        const tip = this._strikeTip(a, ux, uz)
+        const reach = tip ? (tip.x - ox) * ux + (tip.z - oz) * uz : -Infinity
+        const err = bounded ? Math.abs(reach - targetReach) : 0
+        const tier = (!bounded || err <= EXT_OVERSHOOT) ? 1 : 0
+        const score = tier === 1 ? reach : -err
+        if (i === 0) { baseW = w; baseReach = reach }   // probe 0 = no scrub at all
+        if (w > widthW) { widthW = w; widthReach = reach; widthT = t }
+        // Width is the tie-break ONLY, inside EXT_REACH_EPS of the leader, and
+        // it can never promote a probe out of a lower tier.
+        const better = Number.isFinite(score) && (
+          tier > bestTier ||
+          (tier === bestTier && (score > bestScore + EXT_REACH_EPS ||
+            (score > bestScore - EXT_REACH_EPS && w > bestW))))
+        if (better) {
+          bestScore = tier === bestTier ? Math.max(bestScore, score) : score
+          bestTier = tier; bestW = w; bestT = t; bestReach = reach
+        }
       }
     } catch {
       an.secondaryOn = secondary
@@ -1224,6 +1400,10 @@ export class MatchScreen {
       if (rm) { rm.x = rmx; rm.y = rmy; rm.z = rmz }
       return
     }
+    // No probe produced a usable strike tip at all (a stub rig, or a character
+    // with none of STRIKE_LIMBS). Reach cannot rank anything, so fall back to
+    // the old width objective rather than holding the contact pose.
+    if (bestTier < 0) { bestT = widthT; bestW = widthW; bestReach = NaN }
     an.secondaryOn = secondary
     an.time = bestT
     try {
@@ -1235,15 +1415,38 @@ export class MatchScreen {
     // its head would stop short of the fist the freeze is about to hold. One
     // more sample lands the blade on the extended limb.
     if (a._ribbonMove) {
-      const tip = this._strikeTip(a)
+      const tip = this._strikeTip(a, ux, uz)
       if (tip) {
         try { this.particles?.swing?.(a.slot, tip.x, tip.y, tip.z) } catch { /* pool optional */ }
       }
     }
-    // Diagnostics for the verifier. Nothing in the sim reads either field.
+    // Diagnostics for the verifier. Nothing in the sim reads any of these.
+    //   _extHoldReach   reach of the pose actually held
+    //   _extWidthReach  reach of the pose the OLD width objective would have
+    //                   frozen — `_extHoldReach / _extWidthReach` IS the gain
+    //                   of the swap, and it was measuring 1.002 before it
+    //   _extBaseReach   reach at probe 0, i.e. no scrub at all
+    //   _extProjErr     |held tip - contact point| along the objective axis;
+    //                   the acceptance is < 0.15 m
+    // Measured on the pose that is actually being held, AFTER secondary motion
+    // was switched back on and the final update ran — not on the probe's
+    // reading, which was taken with the springs off.
+    const heldTip = this._strikeTip(a, ux, uz)
+    const heldReach = heldTip ? (heldTip.x - ox) * ux + (heldTip.z - oz) * uz : NaN
     a._extHoldT = bestT
     a._extHoldWidth = bestW
     a._extBaseWidth = baseW
+    a._extWidthWidth = widthW
+    a._extHoldReach = Number.isFinite(heldReach) ? heldReach : bestReach
+    a._extWidthReach = widthReach
+    a._extBaseReach = baseReach
+    a._extTargetReach = targetReach
+    a._extProjErr = (Number.isFinite(heldReach) && bounded)
+      ? Math.abs(heldReach - targetReach) : NaN
+    a._extInBand = bestTier === 1
+    a._extAxis = { x: ux, z: uz }
+    a._extContact = pt ? { x: pt.x, y: pt.y, z: pt.z } : null
+    a._extTip = heldTip ? { x: heldTip.x, y: heldTip.y, z: heldTip.z } : null
   }
 
   /** Cache projection * viewInverse for _silhouetteWidth. Called once per
@@ -1325,7 +1528,13 @@ export class MatchScreen {
   // attacker's own facing direction is the one doing the striking, which picks
   // the right limb for punches, kicks and mirrored rigs without any per-move
   // or per-character authoring.
-  _strikeTip(f) {
+  //
+  // `axX`/`axZ` optionally override that direction with a caller-supplied
+  // planar unit axis — the extension hold passes attacker->victim, so on a
+  // cross-up the limb reaching toward the man who is actually being hit wins
+  // instead of the limb furthest along a facing sign that has not flipped yet.
+  // Omitted, behaviour is exactly as before.
+  _strikeTip(f, axX, axZ) {
     const B = f.bones
     if (!B) return null
     const root = f.root
@@ -1336,8 +1545,9 @@ export class MatchScreen {
     if (!hips || !hips.matrixWorld) return null
     const hm = hips.matrixWorld.elements
     const hx = hm[12], hy = hm[13], hz = hm[14]
-    const fx = f.dirX ? f.dirX() : (f.facingSign || 1)
-    const fz = f.dirZ ? f.dirZ() : 0
+    const useAxis = Number.isFinite(axX) && Number.isFinite(axZ) && Math.hypot(axX, axZ) > 1e-4
+    const fx = useAxis ? axX : (f.dirX ? f.dirX() : (f.facingSign || 1))
+    const fz = useAxis ? axZ : (f.dirZ ? f.dirZ() : 0)
     let best = null
     let bestReach = -Infinity
     for (const pair of STRIKE_LIMBS) {
@@ -1461,7 +1671,10 @@ export class MatchScreen {
     this.game.events.emit('fighter:hit', { slot: d.slot, damage: dmg, move: move.id, counter: false, combo: a.comboHits, dirX: kickDir, otg: true })
     if (a.comboHits >= 2) this.game.events.emit('combo', { slot: a.slot, hits: a.comboHits })
     this.hitStop(move.hitStop || 3)
-    this._holdExtension(a, move)
+    // OTG only: `d.pos` is the launch spot, not the prone body, so the victim
+    // is NOT handed over — `pt` (built from the real prone XZ in _scanHits) is
+    // the only trustworthy point here.
+    this._holdExtension(a, move, pt, null)
     try { this.cam.kick(kickDir, Math.min(1, 0.06 + dmg * 0.04)) } catch { /* stub */ }
     this.game.audio.sfx(move.sfx || KIND_SFX[move.kind] || 'punch_light')
     this.particles.burst('impact', pt, { dirX: kickDir })
@@ -1521,7 +1734,7 @@ export class MatchScreen {
       d.squash(0.1)
       a.gainMeter((move.meterGain || 5) * 0.5)
       this.hitStop(2)
-      this._holdExtension(a, move)
+      this._holdExtension(a, move, pt, d)
       this.game.audio.sfx('thud', { pitch: 0.7 })
       this.particles.burst('impact', pt, { n: 4 })
       this.game.events.emit('fighter:hit', { slot: d.slot, damage: dmg, move: move.id, counter: false, combo: 0, dirX: kickDir })
@@ -1553,7 +1766,7 @@ export class MatchScreen {
     this.hitStop((move.hitStop || 3) + (counter ? 2 : 0))
     // The freeze starts on the NEXT tick, so this is the last chance to decide
     // which pose it holds. See _holdExtension().
-    this._holdExtension(a, move)
+    this._holdExtension(a, move, pt, d)
     // directional camera kick along the real hit axis (attacker -> victim, so
     // cross-ups shove the right way), magnitude scaled by damage. cam.kick is
     // idempotent per frame — this call carries better data than the camera's

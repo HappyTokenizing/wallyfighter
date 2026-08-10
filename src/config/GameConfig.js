@@ -3,7 +3,7 @@
 export const GameConfig = {
   title: 'WALLY: CRYPTO SMACKDOWN',
   subtitle: '10 FIGHTERS. 1 RESERVE. TOTAL CHAOS.',
-  version: '2.1.1', // keep in sync with package.json
+  version: '3.0.0', // keep in sync with package.json
 
   fixedStep: 1 / 60,
   gravity: -22,

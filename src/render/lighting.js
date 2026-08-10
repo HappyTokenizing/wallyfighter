@@ -960,6 +960,92 @@ const RIM_UNIFORMS = {
   uRimParams: { value: new THREE.Vector3(0.6, 6.0, 0.0) },
   uRimDirView: { value: new THREE.Vector3(0, 0, 1) },
 }
+
+// ---------------------------------------------------------------------------
+// BODY-TO-BODY CONTACT OCCLUSION — ROUND 13, defect 9.
+//
+// The critic, three rounds running: "one plush body driving into another with a
+// razor-clean albedo seam, no AO, no darkening, no deformation." Two bodies in
+// this engine interpenetrate at the moment of a hit and NOTHING in the frame
+// says they are touching — the floor now has a crevice term under every sole
+// (round 12) but the fighters have none against each other, so the one contact
+// the player is actually watching is the only unshaded one in the shot.
+//
+// WHY A ZONE AND NOT A PER-BODY OCCLUDER. The honest formulation is "darken
+// fighter A by fighter B's solid angle", which needs a per-DRAW occluder and
+// therefore either per-material uniforms (a program per fighter, and the whole
+// point of RIM_UNIFORMS being module-global is that it is ONE program) or an
+// onBeforeRender hook on 100+ meshes per fighter per frame. Neither is worth it
+// for a term that is only visible for the ~8 frames a strike is in contact.
+//
+// So the term is a CONTACT ZONE: one world-space sphere parked at the midpoint
+// between the two rig roots, which only exists while the two bodies are within
+// CO_FAR of each other, and which darkens BOTH of them. That is not a shortcut
+// around the physics, it is the physics restated: the region between two close
+// bodies is exactly the region where each one is stealing the other's sky, and
+// both surfaces facing into it lose light. It has three properties the naive
+// version does not:
+//   - it cannot self-occlude, because it does not exist until there is a second
+//     body to occlude against;
+//   - it is symmetric, so the seam darkens from BOTH sides and reads as one
+//     shared crevice rather than as a decal stuck on one fighter;
+//   - it is one shared uniform pair, so it rides the existing rim program and
+//     costs zero extra draw calls and zero extra programs.
+//
+// THE NORMAL TERM IS NOT OPTIONAL. Without dot(N, toZone) this is a ball of
+// fog centred on the clash that dims a fighter's back and the top of his head —
+// which is precisely the "orb hanging in empty air" failure mode the flash is
+// being pulled up on this round. Only a surface FACING the other body may lose
+// light, which restricts the whole term to the two facing flanks: the seam.
+//
+// Cost: ~16 ALU plus one mat4*vec4 in the fighters' fragment shaders, behind a
+// uniform branch that is false on every frame where the fighters are apart —
+// coherent across the whole warp, so it is free when it is off. The fighters
+// are ~2 % of the shaded pixels in a match frame.
+// ---------------------------------------------------------------------------
+const PROX_UNIFORMS = {
+  // xyz = WORLD centre of the contact zone, w = radius (m).
+  uProxZone: { value: new THREE.Vector4(0, -9999, 0, 0.5) },
+  // x = strength (0 disables the entire block), y = inner-plateau fraction of
+  // the radius, z = how much of the normal-facing mask to apply, w = reserved.
+  uProxParams: { value: new THREE.Vector4(0, 0.2, 0.7, 0) },
+}
+
+const PROX_PARS = /* glsl */`
+uniform vec4 uProxZone;    // xyz = world centre, w = radius
+uniform vec4 uProxParams;  // x = strength, y = inner plateau, z = facing mix
+`
+
+// The zone is handed over in WORLD space and folded into view space here rather
+// than on the CPU, for one reason: viewMatrix is already in three's fragment
+// prefix on every material, so this needs no camera plumbing into the rig and
+// stays correct for a second camera, a mirror pass or a screenshot rig that
+// renders the same scene from somewhere else in the same frame.
+//
+// This block runs LAST — after the rim and after the specular key — and it
+// MULTIPLIES. An occlusion term that only attenuated the diffuse would leave
+// the rim and the highlight burning brightly inside the crevice, which is the
+// exact tell that separates "shaded contact" from "sticker".
+const PROX_BODY = /* glsl */`
+{
+  float pxS = uProxParams.x;
+  if ( pxS > 0.0001 && uProxZone.w > 0.0001 ) {
+    vec3 pxFrag = -vViewPosition;
+    vec3 pxC = ( viewMatrix * vec4( uProxZone.xyz, 1.0 ) ).xyz;
+    vec3 pxD = pxC - pxFrag;
+    float pxLen = length( pxD );
+    float pxW = 1.0 - smoothstep( uProxZone.w * uProxParams.y, uProxZone.w, pxLen );
+    if ( pxW > 0.0001 ) {
+      vec3 pxN = normalize( normal );
+      float pxF = clamp( dot( pxN, pxD / max( pxLen, 1e-4 ) ), 0.0, 1.0 );
+      pxF = mix( 1.0, pxF, uProxParams.z );
+      // Squared falloff: contact occlusion is short-range or it is a fog ball.
+      outgoingLight *= 1.0 - clamp( pxS * pxW * pxW * pxF, 0.0, 0.9 );
+    }
+  }
+}
+`
+
 // Shared for exactly the same reason as RIM_UNIFORMS: the patch is permanent
 // per material, so whichever rig is rendering owns the values and pushes them
 // from its own onBeforeRender hook.
@@ -1085,6 +1171,8 @@ export function makeFresnelRim(o = {}) {
       shader.uniforms.uRimColor = uniforms.uRimColor
       shader.uniforms.uRimParams = uniforms.uRimParams
       shader.uniforms.uRimDirView = uniforms.uRimDirView
+      shader.uniforms.uProxZone = PROX_UNIFORMS.uProxZone
+      shader.uniforms.uProxParams = PROX_UNIFORMS.uProxParams
       if (withSpec) {
         shader.uniforms.uSpecColor = spec.uSpecColor
         shader.uniforms.uSpecParams = spec.uSpecParams
@@ -1105,15 +1193,17 @@ export function makeFresnelRim(o = {}) {
         rimGeoAnchorFailed = true
         console.warn('[lighting] fresnel rim: no normal_fragment_begin anchor; falling back to the shaded normal')
       }
-      const block = rimBody(geoVar) + (withSpec ? '\n' + SPEC_BODY : '')
-      shader.fragmentShader = RIM_PARS + (withSpec ? SPEC_PARS : '') +
+      // PROX_BODY is appended LAST so it multiplies the rim and the spec key
+      // as well as the diffuse — see the note above PROX_BODY.
+      const block = rimBody(geoVar) + (withSpec ? '\n' + SPEC_BODY : '') + '\n' + PROX_BODY
+      shader.fragmentShader = RIM_PARS + (withSpec ? SPEC_PARS : '') + PROX_PARS +
         frag.replace(anchor, block + '\n' + anchor)
     }
     // A material with a different onBeforeCompile must not share a compiled
     // program with an unpatched twin — three keys programs on the cache key,
     // not on the callback identity.
     const prevKey = typeof m.customProgramCacheKey === 'function' ? m.customProgramCacheKey.bind(m) : null
-    m.customProgramCacheKey = () => (prevKey ? prevKey() : '') + (withSpec ? '|wcsRimSpec' : '|wcsRim')
+    m.customProgramCacheKey = () => (prevKey ? prevKey() : '') + (withSpec ? '|wcsRimSpec2' : '|wcsRim2')
     m.needsUpdate = true
     return true
   }
@@ -3392,6 +3482,144 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     autoDiscs = autoSlots.length
   }
 
+  // ---------------------------------------------------------------------------
+  // WHERE THE FLOOR ACTUALLY IS — ROUND 13, defect 3.
+  //
+  // Two arenas measured EXACTLY ZERO changed pixels from the contact set on a
+  // correctly seated fighter: calm-before-liquidation (5-7 px) and
+  // mountain-node-village (0). The verifier ruled out every placement failure —
+  // the three decals are present, visible, at world y 0.006/0.008 directly under
+  // the sole, with alpha 0.57-0.60. They are being DEPTH-REJECTED.
+  //
+  // Round 12 fixed the case where the plane was resolved too LOW by measuring it
+  // from the soles instead of trusting the caller's groundY. That fix assumes
+  // the sole is ON the surface. It is not, on either of these two arenas: a snow
+  // field and a liquid deck are authored as a slab whose TOP sits a centimetre
+  // or three above the plane the fighter's transform is placed on, so the soles
+  // resolve to (correctly) y = 0 while the surface the decal has to darken is at
+  // y = 0.02, and a decal at 0.006 is INSIDE the slab. polygonOffset -2/-2 buys
+  // sub-millimetre, not centimetres, so every fragment fails the depth test —
+  // which is exactly "the quads draw, the pixels do not change".
+  //
+  // So the plane is now MEASURED, by raycasting down onto the arena's own floor
+  // meshes at the contact centroid. The candidate set is the same conservative
+  // geometric test addGroundReceivers() already uses (flat, big, at the fight
+  // plane, opaque, depth-writing) so this cannot latch onto a prop, a banner or
+  // a crowd riser, and the lift it is allowed to apply is capped at SURF_LIFT_MAX
+  // so a mis-identified receiver can shift a disc by at most a few centimetres
+  // rather than parking it in the air.
+  //
+  // Cost: the candidate list is scanned once every FLOOR_SCAN_EVERY frames and
+  // the ray is cast once per subject per STATIC_RECHECK_FRAMES — about eight
+  // raycasts a second against at most four meshes, versus a whole arena's
+  // contact set being invisible.
+  // ---------------------------------------------------------------------------
+  const _fRay = new THREE.Raycaster()
+  const _fDown = new THREE.Vector3(0, -1, 0)
+  const _fOrigin = new THREE.Vector3()
+  const FLOOR_SCAN_EVERY = 240
+  const SURF_LIFT_MAX = 0.12   // m — the most the measured surface may lift a disc
+  const SURF_DROP = 1.2        // m — how far above the plane the ray starts
+  // Deliberately looser than addGroundReceivers GR_MIN_SPAN (3.5 m): a snow
+  // patch, a water pool or a mat laid over the fight area can be smaller than a
+  // shadow-receiving floor and still be the surface the decal has to sit on.
+  const SURF_MIN_SPAN = 2.0
+  let floorMeshes = null
+  let floorScanAt = -1e9
+
+  function floorMeshList() {
+    if (floorMeshes && contactFrame - floorScanAt < FLOOR_SCAN_EVERY) return floorMeshes
+    const root = scene || group.parent || null
+    if (!root || typeof root.traverse !== 'function') return null
+    floorScanAt = contactFrame
+    const found = []
+    root.traverse((n) => {
+      if (!n.isMesh && !n.isInstancedMesh) return
+      if (n === group || !n.visible) return
+      if (n.userData?.contactShadow || n.userData?.noContact) return
+      if (n.name && /shadow|contact|decal|glow|halo|spill|pool|beam|shaft|sky|dome|cyclorama/i.test(n.name)) return
+      const mats = Array.isArray(n.material) ? n.material : [n.material]
+      for (const m of mats) {
+        if (!m) return
+        // A decal, a fog card or an additive sheet is not the surface a shadow
+        // lands on, and it is also not what the depth test is rejecting against.
+        if (m.depthWrite === false) return
+        if (m.blending != null && m.blending !== THREE.NormalBlending) return
+      }
+      _abox.makeEmpty()
+      _abox.setFromObject(n)
+      if (_abox.isEmpty()) return
+      const sx = _abox.max.x - _abox.min.x
+      const sz = _abox.max.z - _abox.min.z
+      const sy = _abox.max.y - _abox.min.y
+      if (sy > GR_MAX_H || sx < SURF_MIN_SPAN || sz < SURF_MIN_SPAN) return
+      if (Math.abs(_abox.max.y - groundY) > GR_EPS) return
+      const cx = (_abox.min.x + _abox.max.x) * 0.5
+      const cz = (_abox.min.z + _abox.max.z) * 0.5
+      if (Math.hypot(cx, cz) > GR_RANGE) return
+      found.push({ n, area: sx * sz })
+    })
+    found.sort((a, b) => b.area - a.area)
+    if (found.length > 4) found.length = 4
+    floorMeshes = found.map((f) => f.n)
+    return floorMeshes
+  }
+
+  /**
+   * World-space top of the arena surface at (x, z), or null if nothing was hit.
+   * Only hits inside [planeY - 1 mm, planeY + SURF_LIFT_MAX] count: below that
+   * the round-12 sole-derived plane is already the better answer, and above it
+   * the ray has found something that is not the floor this fighter stands on.
+   */
+  function surfaceTopAt(x, z, planeY) {
+    const list = floorMeshList()
+    if (!list || !list.length) return null
+    _fOrigin.set(x, planeY + SURF_DROP, z)
+    _fRay.set(_fOrigin, _fDown)
+    _fRay.near = 0
+    _fRay.far = SURF_DROP + SURF_LIFT_MAX + 0.01
+    let hits = null
+    try { hits = _fRay.intersectObjects(list, false) } catch (e) { return null }
+    if (!hits || !hits.length) return null
+    let best = null
+    for (const h of hits) {
+      const y = h.point.y
+      if (y < planeY - 0.001 || y > planeY + SURF_LIFT_MAX) continue
+      if (best === null || y > best) best = y
+    }
+    return best
+  }
+
+  // ---------------------------------------------------------------------------
+  // IS THIS PROBE ACTUALLY A SOLE? — ROUND 13, defect 2.
+  //
+  // discoverFeet() is a geometric guess whenever the caller hands over no bone
+  // map, and on WALLY it guesses wrong: it picks the nodes named merged-0 and
+  // tailSeg3, whose "sole" probe sits at 0.4334 m instead of ~0. Round 12's
+  // upward re-base then believed it, and because that branch wrote
+  // c.groundY = qFloor(soleMin) with no clamp at all, one bad probe moved the
+  // anchor that everything else is relative to — permanently. That is the whole
+  // distance between "defect 1 is a wrong number" and "defect 1 is a STUCK 44 cm
+  // in all ten arenas".
+  //
+  // The subject's own world box is the check. A fighter genuinely standing on a
+  // deck has nothing below the deck; a fighter whose probe is a tail segment has
+  // 43 cm of himself underneath it. SOLE_TRUST is deliberately loose (16 cm) so
+  // a crouch, a low kick or a trailing limb dipping below the toe box cannot
+  // trip it. A single veto arms the correction, and the very next recheck
+  // re-measures and clears it if the probe has come good — a pose lasts frames,
+  // a bad bone map lasts the whole match.
+  // ---------------------------------------------------------------------------
+  const SOLE_TRUST = 0.16
+  function soleProbeBias(c, rawSoleMin) {
+    if (!c.target) return 0
+    let fpv = null
+    try { fpv = worldFootprint(c.target) } catch (e) { fpv = null }
+    if (!fpv) return 0
+    const b = rawSoleMin - fpv.minY
+    return b > SOLE_TRUST ? b : 0
+  }
+
   const wp = new THREE.Vector3()
   const _dead = []
   function updateContacts() {
@@ -3543,6 +3771,26 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         footSumX += wp.x; footSumZ += wp.z; footN++
         if (wp.y < soleMin) soleMin = wp.y
       }
+      // --- A BAD SOLE PROBE IS NO LONGER STICKY (round 13, defect 2) --------
+      // Once the upward re-base has vetoed this subject's probe, the
+      // probe is not a sole and never will be, so the constant offset between
+      // it and the subject's own world box is measured and subtracted — from
+      // the plane AND from every foot mark, so the crevice term sees real
+      // heights instead of a constant 40 cm. Re-measured on the static recheck
+      // cadence, which is also how it RECOVERS: the frame the bias falls back
+      // inside SOLE_TRUST (a transient crouch that tripped the veto once, a
+      // re-rigged subject, a corrected bone map arriving from the caller) it is
+      // cleared and the ordinary machinery resumes within one recheck.
+      if ((c.soleBad || 0) >= 1 && soleMin < Infinity &&
+          (recheck || c.soleBias === undefined)) {
+        const b = soleProbeBias(c, soleMin)
+        c.soleBias = b
+        if (b === 0) { c.soleBad = 0; c.soleRecovered = (c.soleRecovered || 0) + 1 }
+      }
+      if (c.soleBias > 0 && soleMin < Infinity) {
+        soleMin -= c.soleBias
+        for (const f of c.feet) if (Number.isFinite(f.soleY)) f.soleY -= c.soleBias
+      }
       // --- low-water mark + consensus (see THE FLOOR PLANE above) ----------
       // `probe` is this frame's candidate, clamped into the band above the
       // arena's nominal ground so an airborne fighter can never lift its own
@@ -3579,6 +3827,13 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
       // over the fighter's head. `groundBase` is the caller's authored floor and
       // is the hard limit on how far down a re-base may go.
       const HOLD_EPS = 0.02, HOLD_FRAMES = 40
+      // ROUND 13, defect 2. The downward branch below has always been clamped
+      // to the caller's authored ground; the upward branch had NO clamp of any
+      // kind. MAX_RISE is the hard net — the tallest deck any arena in the
+      // roster puts a fighter on is under a metre, and past 2 m the probe is
+      // not a floor, it is a bug, and the disc it strands is stranded for the
+      // whole match.
+      const MAX_RISE = 2.0
       // A re-based plane is QUANTISED TO 1 cm, and downward, for one reason:
       // floorConsensus() buckets subjects by `Math.round(groundY * 1000)`, so
       // two fighters standing on the same deck whose sole probes differ by a
@@ -3596,14 +3851,36 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
       } else if (soleMin < Infinity && soleMin > c.groundY + FLOOR_BAND) {
         if (Math.abs(soleMin - (c.holdY ?? Infinity)) < HOLD_EPS) {
           if (++c.holdN >= HOLD_FRAMES) {
-            // Re-base. `groundY` is the anchor everything else is relative to
-            // (the band, the consensus group key, the seed), so it is the thing
-            // that has to move — not just the mark.
-            c.groundY = qFloor(soleMin)
-            c.floorLow = c.groundY
-            c.floorSeed = true
-            c.holdN = 0
-            c.groundRebases = (c.groundRebases || 0) + 1
+            // THE VETO. A sole probe that has 16 cm or more of its own subject
+            // hanging below it is not a sole, and a re-base onto it moves the
+            // anchor EVERYTHING is relative to. Forty frames of a rock-steady
+            // reading is exactly what a wrongly-discovered bone gives you, so
+            // time alone cannot separate the two cases — the subject's own
+            // world box can. See soleProbeBias().
+            const badBias = soleProbeBias(c, soleMin)
+            if (badBias > 0) {
+              c.holdN = 0
+              c.holdY = undefined
+              c.soleBad = (c.soleBad || 0) + 1
+              // ACCUMULATE: badBias was measured against a soleMin that already had
+              // any previous correction subtracted, so it is a delta, not the
+              // absolute offset. The periodic refresh below re-measures it from
+              // the RAW probe and overwrites this with the true absolute value.
+              c.soleBias = (c.soleBias || 0) + badBias
+              c.groundVetoes = (c.groundVetoes || 0) + 1
+            } else {
+              // Re-base. `groundY` is the anchor everything else is relative to
+              // (the band, the consensus group key, the seed), so it is the thing
+              // that has to move — not just the mark. CLAMPED, symmetrically with
+              // the downward branch: that one may not go below groundBase, this
+              // one may not go more than MAX_RISE above it.
+              c.groundY = Math.min(qFloor(soleMin), qFloor(c.groundBase + MAX_RISE))
+              c.floorLow = c.groundY
+              c.floorSeed = true
+              c.holdN = 0
+              c.soleBad = 0
+              c.groundRebases = (c.groundRebases || 0) + 1
+            }
           }
         } else {
           c.holdY = soleMin
@@ -3694,6 +3971,19 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         c.az += (az - c.az) * 0.35
       }
 
+      // ROUND 13, defect 3 — the disc is lifted onto the surface that was
+      // MEASURED under the contact centroid, not onto the plane the soles
+      // resolved to. See surfaceTopAt(). Only the PLACEMENT uses it: `h` and the
+      // per-foot `fh` stay on `floorY` so the height fades that round 12 tuned are
+      // bit-for-bit unchanged, and on the eight arenas where the surface and the
+      // sole plane already agree `deckY === floorY` and nothing moves at all.
+      if (recheck || c.surfY === undefined || c.surfFrom === undefined ||
+          Math.abs(floorY - c.surfFrom) > 0.02) {
+        c.surfFrom = floorY
+        const sTop = surfaceTopAt(c.ax, c.az, floorY)
+        c.surfY = (sTop != null && sTop > floorY) ? sTop : floorY
+      }
+      const deckY = c.surfY > floorY ? c.surfY : floorY
       const h = soleMin < Infinity ? Math.max(0, soleMin - floorY) : Math.max(0, wp.y - floorY)
       const t = THREE.MathUtils.clamp(h / c.fadeHeight, 0, 1)
       // Rising off the ground: wider, weaker — the real penumbra behaviour, and
@@ -3713,7 +4003,7 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         // live) and only then dropped into the rig's parent space.
         wp.set(
           c.ax + keyGround.x * h * 0.28,
-          floorY + 0.006,
+          deckY + 0.006,
           c.az + keyGround.y * h * 0.28,
         )
         c.mesh.position.copy(toRigSpace(wp))
@@ -3750,12 +4040,85 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         // the offset only has to beat depth precision, and polygonOffset is
         // already doing that job — a 2 cm lift on a plane resolved this
         // accurately is visible parallax on a low camera.
-        wp.set(f.wx + keyGround.x * fh * 0.3, floorY + 0.008, f.wz + keyGround.y * fh * 0.3)
+        wp.set(f.wx + keyGround.x * fh * 0.3, deckY + 0.008, f.wz + keyGround.y * fh * 0.3)
         f.mesh.position.copy(toRigSpace(wp))
       }
     }
+    updateContactOcclusion()
     for (const d of _dead) removeContactShadow(d)
     _dead.length = 0
+  }
+
+  // ---------------------------------------------------------------------------
+  // THE CONTACT ZONE — the CPU half of PROX_BODY. See the note above
+  // PROX_UNIFORMS for why this is a zone between the bodies rather than a
+  // per-body occluder.
+  //
+  // The two rig roots sit at the hips on every fighter in the roster (the same
+  // fact the round-5 anchor fix turned on), so the midpoint of the two roots
+  // lifted by CO_LIFT lands at chest height between them — where a strike, a
+  // throw, a clash and a corner pin all actually happen. The zone is driven by
+  // the HORIZONTAL gap only: two fighters at the same spot with one airborne
+  // above the other are still in contact, and using the 3D distance would
+  // switch the term off exactly during a jump-in.
+  //
+  // Strength rides the rig dimmer, so a KO fade takes the crevice with it, and
+  // it is exactly 0 whenever the gap is past CO_FAR — a uniform-branch off
+  // switch on ~99 % of frames.
+  // ---------------------------------------------------------------------------
+  const CO_ENABLED = opts.contactOcclusion !== false
+  const CO_NEAR = opts.contactOccludeNear ?? 0.60      // m — full strength at/below
+  const CO_FAR = opts.contactOccludeFar ?? 1.20        // m — nothing at/above
+  const CO_RADIUS = opts.contactOccludeRadius ?? 0.52  // m
+  const CO_STRENGTH = opts.contactOccludeStrength ?? 0.40
+  const CO_LIFT = opts.contactOccludeLift ?? 0.18      // m above the rig roots
+  const CO_FACING = opts.contactOccludeFacing ?? 0.7
+  const _coA = new THREE.Vector3()
+  const _coB = new THREE.Vector3()
+  // PROX_UNIFORMS is module-global (same reason RIM_UNIFORMS is), so a rig that
+  // is built AFTER a match — the menu backdrop, a results screen — would inherit
+  // whatever strength the last match frame left behind and darken a scene that
+  // has no fighters in it. Every rig zeroes it on construction; whichever rig is
+  // rendering owns it from its own updateContacts().
+  PROX_UNIFORMS.uProxParams.value.x = 0
+  let coStrength = 0
+  let coGap = Infinity
+
+  function updateContactOcclusion() {
+    const P = PROX_UNIFORMS
+    coStrength = 0
+    coGap = Infinity
+    if (!CO_ENABLED) { P.uProxParams.value.x = 0; return }
+    // The first two LIVE, non-prop subjects. In a match that is p1 and p2; on a
+    // screen with one subject or none there is nothing to occlude against and
+    // the term stays off rather than falling back to something invented.
+    let a = null, b = null
+    for (const c of contacts) {
+      if (c.prop || c.static) continue
+      if (!c.target || !c.target.parent) continue
+      if (a === null) { a = c; continue }
+      b = c
+      break
+    }
+    if (a === null || b === null) { P.uProxParams.value.x = 0; return }
+    a.target.getWorldPosition(_coA)
+    b.target.getWorldPosition(_coB)
+    const dx = _coA.x - _coB.x
+    const dz = _coA.z - _coB.z
+    const gap = Math.sqrt(dx * dx + dz * dz)
+    coGap = gap
+    const t = 1 - THREE.MathUtils.clamp((gap - CO_NEAR) / Math.max(1e-4, CO_FAR - CO_NEAR), 0, 1)
+    if (!(t > 0.002)) { P.uProxParams.value.x = 0; return }
+    coStrength = CO_STRENGTH * t * dim
+    P.uProxZone.value.set(
+      (_coA.x + _coB.x) * 0.5,
+      (_coA.y + _coB.y) * 0.5 + CO_LIFT,
+      (_coA.z + _coB.z) * 0.5,
+      CO_RADIUS,
+    )
+    P.uProxParams.value.x = coStrength
+    P.uProxParams.value.y = 0.2
+    P.uProxParams.value.z = CO_FACING
   }
 
   /**
@@ -3983,6 +4346,37 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
      */
     setSubjects(list, o) { return setContactTargets(list, o) },
 
+    /**
+     * Body-to-body contact occlusion (round 13, defect 9). Read the live state
+     * or override the zone by hand — a cinematic, a throw animation or a test
+     * rig can park a crevice anywhere without a second subject.
+     *
+     *   rig.contactOcclusion()                       -> { on, gap, strength, ... }
+     *   rig.contactOcclusion({ strength: 0.5 })      -> retune
+     *   rig.contactOcclusion({ world: v3, radius: 0.4, strength: 0.4 })
+     */
+    contactOcclusion(o) {
+      const P = PROX_UNIFORMS
+      if (o && typeof o === 'object') {
+        if (o.world) P.uProxZone.value.set(o.world.x, o.world.y, o.world.z, o.radius ?? P.uProxZone.value.w)
+        else if (o.radius != null) P.uProxZone.value.w = o.radius
+        if (o.strength != null) P.uProxParams.value.x = Math.max(0, o.strength)
+        if (o.facing != null) P.uProxParams.value.z = THREE.MathUtils.clamp(o.facing, 0, 1)
+        if (o.plateau != null) P.uProxParams.value.y = THREE.MathUtils.clamp(o.plateau, 0, 0.95)
+      }
+      return {
+        enabled: CO_ENABLED,
+        on: P.uProxParams.value.x > 0.0001,
+        gap: coGap,
+        strength: P.uProxParams.value.x,
+        radius: P.uProxZone.value.w,
+        facing: P.uProxParams.value.z,
+        near: CO_NEAR,
+        far: CO_FAR,
+        zone: P.uProxZone.value.clone(),
+      }
+    },
+
     /** A/B switch for the contact decals — used to prove what is masking what. */
     setContactEnabled(v) {
       contactsEnabled = v !== false
@@ -4106,6 +4500,14 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
           name: c.target.name || '(unnamed)',
           kind: c.prop ? 'prop' : 'subject',
           groundY: c.groundY,
+          // ROUND 13 — the three numbers that say whether defects 2 and 3 are
+          // actually closed on this subject, per arena.
+          groundBase: c.groundBase,
+          groundRebases: c.groundRebases || 0,
+          groundVetoes: c.groundVetoes || 0,
+          soleBias: c.soleBias || 0,
+          surfY: c.surfY,
+          surfLift: (c.surfY != null && c.floorY != null) ? (c.surfY - c.floorY) : 0,
           // Non-zero means the raised-plate detector re-based this subject's
           // ground: it was standing on something more than FLOOR_BAND above the
           // nominal floor and its decals were being depth-rejected under it.
