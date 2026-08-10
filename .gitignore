@@ -1,3 +1,9 @@
 node_modules/
 dist/
 .shots/
+
+# Agent scratch: one-off measurement probes written during the v3 critic rounds.
+# Kept on disk because several are handy, but they are throwaway, not source.
+/*.mjs
+.cam-framecheck.mjs
+*.bak
