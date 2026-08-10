@@ -5,6 +5,7 @@
 // Options: Watch Replay, Save Card, Rematch, Character Select, Main Menu.
 import { el, MenuList, UIState, ensureMusic, charName, charTitle, drawPortrait, toast } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
+import { heroPortrait, portraitMaster } from './PortraitStudio.js'
 import { GameConfig } from '../../config/GameConfig.js'
 
 // Meme caption pool — one caption stamps the card, a different one jabs the
@@ -172,6 +173,13 @@ export class ResultsScreen {
     ]
   }
 
+  // Which costume that corner fought in — the card should show the fighter the
+  // player just watched, not the floor model.
+  _costumeOf(slot) {
+    const side = slot === 1 ? this.result.p2 : this.result.p1
+    return side?.costume ? 1 : 0
+  }
+
   _buildCard() {
     const card = el('div', 'res-card')
     card.innerHTML = `
@@ -189,8 +197,18 @@ export class ResultsScreen {
       <div class="res-card-foot"><span>${this.dateStr}</span><span>${GameConfig.title}</span></div>
       <div class="res-card-save">SAVE CARD</div>
     `
-    drawPortrait(card.querySelector('.cw'), this.winnerId)
-    drawPortrait(card.querySelector('.cl'), this.loserId)
+    // The photo on the polaroid is a real photograph now: the winner in their
+    // victory pose under a gold hero key, the loser in their loss pose under a
+    // dead, desaturated one. Two different lighting designs on the same card is
+    // the whole gag, and it only costs two cached bakes.
+    heroPortrait(this.game, card.querySelector('.cw'), this.winnerId, {
+      framing: 'hero', pose: 'win', look: 'gold',
+      costume: this._costumeOf(this.winnerSlot), px: 448, priority: true,
+    })
+    heroPortrait(this.game, card.querySelector('.cl'), this.loserId, {
+      framing: 'hero', pose: 'lose', look: 'defeat',
+      costume: this._costumeOf(this.winnerSlot === 0 ? 1 : 0), px: 256, priority: true,
+    })
     card.querySelector('.res-card-save').addEventListener('click', () => this._saveCard())
     this.root.appendChild(card)
   }
@@ -208,6 +226,25 @@ export class ResultsScreen {
       console.warn('[results] card save failed', e)
       toast(this.game, 'SAVE FAILED')
     }
+  }
+
+  // The saved PNG must be the same photo the player is looking at. Prefer the
+  // baked 3D render; fall back to the flat doodle if the bake never landed
+  // (no WebGL2, a build that threw, a save fired within the first frames).
+  // `__hero` tells the caller whether to smooth on downscale — a 512px render
+  // must, a 96px doodle must not.
+  _photo(id, pose, look, slot) {
+    const master = portraitMaster(id, {
+      framing: 'hero', pose, look, costume: this._costumeOf(slot),
+    })
+    if (master) {
+      master.__hero = true
+      return master
+    }
+    const c = document.createElement('canvas')
+    drawPortrait(c, id)
+    c.__hero = false
+    return c
   }
 
   // Hand-drawn <canvas> twin of the DOM card — intentionally simpler, but same
@@ -255,17 +292,17 @@ export class ResultsScreen {
       g.lineTo(cx + Math.cos(a) * 460, cy + Math.sin(a) * 460)
       g.stroke()
     }
-    g.imageSmoothingEnabled = false
     // winner portrait, big and proud
-    const winP = document.createElement('canvas')
-    drawPortrait(winP, this.winnerId)
+    const winP = this._photo(this.winnerId, 'win', 'gold', this.winnerSlot)
+    g.imageSmoothingEnabled = winP.__hero === true
+    g.imageSmoothingQuality = 'high'
     g.drawImage(winP, px + 44, py + 30, 300, 300)
     g.strokeStyle = '#000'
     g.lineWidth = 6
     g.strokeRect(px + 44, py + 30, 300, 300)
     // loser portrait, tipped over in the corner
-    const loseP = document.createElement('canvas')
-    drawPortrait(loseP, this.loserId)
+    const loseP = this._photo(this.loserId, 'lose', 'defeat', this.winnerSlot === 0 ? 1 : 0)
+    g.imageSmoothingEnabled = loseP.__hero === true
     g.save()
     g.translate(px + pw - 100, py + ph - 110)
     g.rotate(1.78)
@@ -482,5 +519,5 @@ export class ResultsScreen {
     this.list?.update()
   }
 
-  render(renderer) { this.backdrop.render(renderer) }
+  render(renderer, dt) { this.backdrop.render(renderer, dt) }
 }

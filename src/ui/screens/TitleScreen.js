@@ -1,6 +1,6 @@
 // Title screen — big animated split-color logo over the 3D backdrop,
 // PRESS ANY BUTTON pulse, title music. Any input advances to the menu.
-import { el, ensureMusic } from '../uiKit.js'
+import { el, ensureMusic, touchUI } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 import { GameConfig } from '../../config/GameConfig.js'
 
@@ -27,7 +27,7 @@ export class TitleScreen {
         </div>
         <div class="title-sub">${GameConfig.subtitle}</div>
       </div>
-      <div class="title-press">- PRESS ANY BUTTON -</div>
+      <div class="title-press">${touchUI(this.game) ? '- TAP TO START -' : '- PRESS ANY BUTTON -'}</div>
       <div class="title-footer">v${GameConfig.version} · © 2009 SATOSHI NAKAMOTO · NO REFUNDS · NOT FINANCIAL ADVICE</div>
     `
     this.game.ui.appendChild(this.root)
@@ -67,5 +67,5 @@ export class TitleScreen {
     }
   }
 
-  render(renderer) { this.backdrop.render(renderer) }
+  render(renderer, dt) { this.backdrop.render(renderer, dt) }
 }

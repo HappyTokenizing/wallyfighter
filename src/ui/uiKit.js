@@ -19,6 +19,28 @@ export const UIState = {
 }
 
 // ---------------------------------------------------------------------------
+// Touch-aware UI mode + hint bars (v2.1 mobile sweep)
+// ---------------------------------------------------------------------------
+
+// Is the UI running in touch mode? Mirrors TouchControls.wanted: game.isTouch,
+// overridable for desktop testing via localStorage wcs-touch = '1' / '0'.
+export function touchUI(game) {
+  let flag = null
+  try { flag = localStorage.getItem('wcs-touch') } catch { /* storage blocked */ }
+  if (flag === '1') return true
+  if (flag === '0') return false
+  return !!game?.isTouch
+}
+
+// ONE helper for every bottom hint bar: keyboard-glyph html on desktop, plain
+// touch wording on touch devices. An empty touchText hides the bar entirely —
+// no keyboard glyphs ever reach a touch screen.
+export function hintHTML(game, keyboardHtml, touchText = '') {
+  const inner = touchUI(game) ? touchText : keyboardHtml
+  return inner ? `<div class="wcs-hintbar">${inner}</div>` : ''
+}
+
+// ---------------------------------------------------------------------------
 // Character info lookups (tolerant of locked / missing fighters)
 // ---------------------------------------------------------------------------
 

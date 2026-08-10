@@ -1,7 +1,9 @@
 import { defineConfig } from 'vite'
+import { shotSink } from './tools/shot-sink.js'
 
 export default defineConfig({
   base: './',
+  plugins: [shotSink()],
   server: { port: 5173, strictPort: true },
   build: {
     chunkSizeWarningLimit: 900,

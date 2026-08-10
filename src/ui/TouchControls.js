@@ -4,10 +4,7 @@
 //   LEFT  — drag-anywhere virtual stick (left/right/fwd/back), plus a crouch
 //           TAP when the stick is flicked straight down to full deflection
 //           (that keeps the hidden joke move — down, down, light — reachable).
-//         — BLOCK ZONE: hold anywhere on the left half ABOVE the stick zone
-//           to block. A one-time "HOLD HERE TO BLOCK" hint outlines the zone
-//           on the player's first match (persisted in the save).
-//   RIGHT — exactly 4 buttons:
+//   RIGHT — exactly 5 buttons:
 //           ATTACK  (light — chains cover the old kick's role; no kick button)
 //           HEAVY
 //           SPECIAL (long-press 600ms fires SUPER when meter is full — a gold
@@ -15,6 +12,9 @@
 //                    or a hold without meter is a normal special)
 //           GRAB/ITEM (contextual: shows the held item's icon and acts as USE
 //                    while holding one, plain GRAB otherwise)
+//           BLOCK   (hold-to-block; replaces the old hold-left-half block
+//                    zone. A one-time "HOLD TO BLOCK" hint pulses the button
+//                    on the player's first match, persisted in the save.)
 //           + a small JUMP button, present ONLY while settings.jumpEnabled
 //           (§27 — toggled live from Settings), and the little PAUSE chip.
 //
@@ -35,7 +35,7 @@
 //
 // Enabled when `game.isTouch`, or forced for desktop testing via
 // localStorage: wcs-touch = '1' forces ON, '0' forces OFF.
-import { el } from './uiKit.js'
+import { el, touchUI } from './uiKit.js'
 import { drawItemIcon } from './Hud.js'
 
 const STICK_ACTIONS = ['left', 'right', 'fwd', 'back']
@@ -46,13 +46,10 @@ const SUPER_HOLD_MS = 600 // long-press on SPECIAL -> SUPER (meter full only)
 const TAP_RELEASE_MS = 90 // synthetic tap: press edge now, code released after
 
 export class TouchControls {
-  // Should the overlay exist at all this session?
+  // Should the overlay exist at all this session? (shared logic in uiKit —
+  // the hint bars key off the same touchUI() check)
   static wanted(game) {
-    let flag = null
-    try { flag = localStorage.getItem('wcs-touch') } catch { /* storage blocked */ }
-    if (flag === '1') return true
-    if (flag === '0') return false
-    return !!game.isTouch
+    return touchUI(game)
   }
 
   constructor(game) {
@@ -60,7 +57,6 @@ export class TouchControls {
     this.input = game.input
     this._heldCodes = new Map() // action -> key code we injected (release-safe across remaps)
     this._btnPointers = new Map() // pointerId -> { action, node, release? }
-    this._blockPointers = new Set() // pointers currently holding the block zone
     this._stickId = null
     this._stickBaseX = 0
     this._stickBaseY = 0
@@ -140,36 +136,17 @@ export class TouchControls {
       })
     }
 
-    // left, above the stick zone: the hold-to-block area (any touch in the
-    // left half that isn't the stick = block). Multi-touch safe: block stays
-    // held while ANY pointer rests in the zone.
-    const block = el('div', 'wcs-touch-blockzone', '<span class="bz-tag">BLOCK</span>')
-    root.appendChild(block)
-    block.addEventListener('pointerdown', (e) => {
-      e.preventDefault()
-      try { block.setPointerCapture(e.pointerId) } catch { /* stale pointer */ }
-      this._blockPointers.add(e.pointerId)
-      block.classList.add('active')
-      this._setAction('block', true)
-    })
-    const blockRelease = (e) => {
-      if (!this._blockPointers.delete(e.pointerId)) return
-      if (this._blockPointers.size === 0) {
-        block.classList.remove('active')
-        this._setAction('block', false)
-      }
-    }
-    block.addEventListener('pointerup', blockRelease)
-    block.addEventListener('pointercancel', blockRelease)
-    block.addEventListener('lostpointercapture', blockRelease)
-    this._blockNode = block
-
-    // right: the simplified 4-button cluster (+ small jump)
+    // right: the simplified 5-button cluster (+ small jump). BLOCK is a plain
+    // hold button — press to guard, release to drop it (the old hold-left-half
+    // block zone is gone; this is clearer and frees the left half for the
+    // stick).
     const cluster = el('div', 'wcs-touch-cluster')
     cluster.appendChild(this._buildHoldButton({ action: 'light', label: 'ATTACK', cls: 'tb-attack primary big' }))
     cluster.appendChild(this._buildHoldButton({ action: 'heavy', label: 'HEAVY', cls: 'tb-heavy primary' }))
     cluster.appendChild(this._buildSpecialButton())
     cluster.appendChild(this._buildGrabItemButton())
+    this._blockBtn = this._buildHoldButton({ action: 'block', label: 'BLOCK', cls: 'tb-block primary' })
+    cluster.appendChild(this._blockBtn)
     this._jumpBtn = this._buildHoldButton({ action: 'jump', label: 'JUMP', cls: 'tb-jump small' })
     cluster.appendChild(this._jumpBtn)
     root.appendChild(cluster)
@@ -406,8 +383,6 @@ export class TouchControls {
     this._heldCodes.clear()
     for (const { node } of this._btnPointers.values()) node.classList.remove('active')
     this._btnPointers.clear()
-    this._blockPointers.clear()
-    this._blockNode?.classList.remove('active')
     if (this._sp) { cancelAnimationFrame(this._sp.raf); this._sp = null }
     this.root.querySelector('.sp-ring')?.classList.remove('charging')
     if (this._stickId != null) this._stickEnd()
@@ -428,12 +403,14 @@ export class TouchControls {
     if (!on) this._releaseAll()
   }
 
-  // One-time block-zone tutorial hint (first match only, persisted).
+  // One-time BLOCK-button tutorial hint (first match only, persisted). Fresh
+  // save key: players who saw the old block-ZONE hint still get shown the new
+  // button once.
   _maybeBlockHint() {
     const save = this.game.save
-    if (!save || save.get('ui.touchBlockHintSeen', false)) return
-    save.set('ui.touchBlockHintSeen', true)
-    this._blockNode?.classList.add('hint')
-    setTimeout(() => this._blockNode?.classList.remove('hint'), 5200)
+    if (!save || save.get('ui.touchBlockBtnHintSeen', false)) return
+    save.set('ui.touchBlockBtnHintSeen', true)
+    this._blockBtn?.classList.add('hint')
+    setTimeout(() => this._blockBtn?.classList.remove('hint'), 5200)
   }
 }

@@ -2,7 +2,7 @@
 // table below: every move's name, kind, input glyphs, damage and S·A·R frames,
 // specials + super + finisher included. Hidden joke moves print as '???'.
 import { RosterOrder } from '../../characters/index.js'
-import { el, ensureMusic, charDef, PortraitRail } from '../uiKit.js'
+import { el, ensureMusic, charDef, PortraitRail, hintHTML } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 
 const GLYPHS = {
@@ -36,7 +36,9 @@ export class MovelistScreen {
       <div class="wcs-rail mv-rail"></div>
       <div class="mv-tablewrap wcs-panel"></div>
       <div class="mv-legend">L LIGHT &middot; H HEAVY &middot; K KICK &middot; G GRAB &middot; SP SPECIAL &middot; ★ SUPER &middot; B BLOCK &middot; ARROWS ARE FACING-RELATIVE &middot; S&middot;A&middot;R = STARTUP&middot;ACTIVE&middot;RECOVERY FRAMES @60</div>
-      <div class="wcs-hintbar"><b>&larr;&rarr;</b> FIGHTER &nbsp; <b>&uarr;&darr;</b> SCROLL &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game,
+        '<b>&larr;&rarr;</b> FIGHTER &nbsp; <b>&uarr;&darr;</b> SCROLL &nbsp; <b>ESC</b> BACK',
+        'TAP A FIGHTER TO BROWSE')}
     `
     this.game.ui.appendChild(this.root)
     this.wrap = this.root.querySelector('.mv-tablewrap')
@@ -113,5 +115,5 @@ export class MovelistScreen {
     }
   }
 
-  render(renderer) { this.backdrop.render(renderer) }
+  render(renderer, dt) { this.backdrop.render(renderer, dt) }
 }

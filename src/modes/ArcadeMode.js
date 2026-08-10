@@ -7,7 +7,7 @@
 // one-fighter picker built from uiKit portraits.
 import { Characters, RosterOrder } from '../characters/index.js'
 import { Arenas } from '../arenas/index.js'
-import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, statBarsHTML } from '../ui/uiKit.js'
+import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, statBarsHTML, hintHTML } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 const COLS = 5
@@ -145,7 +145,7 @@ export class ArcadeScreen {
     this.cues = []
   }
 
-  render(renderer) { this.backdrop?.render(renderer) }
+  render(renderer, dt) { this.backdrop?.render(renderer, dt) }
 
   update(dt) {
     ensureMusic(this.game, this.musicId)
@@ -224,7 +224,7 @@ export class ArcadeScreen {
           <div class="pc"></div>
         </div>
       </div>
-      <div class="wcs-hintbar"><b>←→↑↓</b> MOVE &nbsp; <b>J / ENTER</b> LOCK IN &nbsp; <b>K</b> COSTUME &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game, '<b>←→↑↓</b> MOVE &nbsp; <b>J / ENTER</b> LOCK IN &nbsp; <b>K</b> COSTUME &nbsp; <b>ESC</b> BACK', 'TAP A FIGHTER TO LOCK IN')}
     `, 'select')
 
     this.cursor = Math.max(0, RosterOrder.indexOf('wally'))
@@ -356,7 +356,7 @@ export class ArcadeScreen {
         <div class="rungs"></div>
         <div class="streak">STREAK: ${run.streak}</div>
       </div>
-      <div class="wcs-hintbar"><b>J / ENTER</b> FIGHT &nbsp; <b>ESC</b> ABANDON RUN</div>
+      ${hintHTML(this.game, '<b>J / ENTER</b> FIGHT &nbsp; <b>ESC</b> ABANDON RUN', 'TAP TO SELECT')}
     `, 'menu')
 
     drawPortrait(this.stage.querySelector('.arc-card canvas'), rung.charId)
@@ -420,7 +420,7 @@ export class ArcadeScreen {
         <div class="sub">STREAK LOST. RUNG ${this.run.rung + 1} STILL STANDS. THE BULL IS LAUGHING.</div>
         <div class="arc-menu"></div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM</div>
+      ${hintHTML(this.game, '<b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM', 'TAP TO SELECT')}
     `, 'menu')
     this.game.audio.announcer('CONTINUE?')
     this.list = new MenuList(this.game, this.stage.querySelector('.arc-menu'), [
@@ -455,7 +455,7 @@ export class ArcadeScreen {
         <div class="sub">ABSOLUTELY REKT AT RUNG ${this.run ? this.run.rung + 1 : 1}. BEST STREAK: ${this._best()}.</div>
         <div class="sub">THE LADDER REMAINS. YOUR DIGNITY DOES NOT.</div>
       </div>
-      <div class="wcs-hintbar"><b>J / ENTER</b> MENU</div>
+      ${hintHTML(this.game, '<b>J / ENTER</b> MENU')}
     `, 'results')
     this.game.audio.sfx('ko')
     this.game.audio.announcer('GAME OVER!')
@@ -475,7 +475,7 @@ export class ArcadeScreen {
         <div class="sub">THE LEADERBOARD IS YOURS. IT WAS A WHITEBOARD THE WHOLE TIME.</div>
         <div class="arc-menu"></div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> MENU</div>
+      ${hintHTML(this.game, '<b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> MENU', 'TAP TO SELECT')}
     `, 'results')
     this.game.audio.announcer(`${charName(run.charId)} clears the ladder!`)
     this.game.audio.sfx('coins_burst')

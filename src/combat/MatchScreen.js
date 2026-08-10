@@ -22,6 +22,15 @@ import { ItemSystem } from '../items/ItemSystem.js'
 import { GoreSystem } from './Gore.js'
 // v2.0 parallel-build module (§21 KO executions) — stub-guarded at every use.
 import { ExecutionPool } from './Executions.js'
+// v3.0 render layer (GRAPHICS_CONTRACT §8): the single render entry point.
+import { renderScene } from '../render/index.js'
+// v3.1: the teardown sweep uses ArenaBase's node freer rather than a second,
+// weaker hand-rolled copy. `collectSubtree` snapshots a subtree BEFORE the
+// systems that own it start detaching parts of themselves; `disposeNode` frees
+// one node's geometry/materials/textures/shadow map while skipping every asset
+// that belongs to a global cache and is already promised to the next match.
+// (Import direction is safe: ArenaBase pulls in three + src/render only.)
+import { collectSubtree, disposeNode } from '../arenas/ArenaBase.js'
 
 // System announcer pools. Character move captions carry per-fighter flavor;
 // these carry the broadcast desk. Every pool is drawn through a shuffle bag
@@ -127,6 +136,39 @@ const COS_HALF_CONE = Math.cos((70 * Math.PI / 180) / 2)
 // §17: arena z bounds default when the arena doesn't specify them
 const DEFAULT_MIN_Z = -5.5
 const DEFAULT_MAX_Z = 5.5
+// OTG hits (v2.1 mobile-feel pass): a downed fighter (grounded/settled ragdoll
+// or knockdown — never ko/finisher, both live outside phase 'fight') becomes
+// hittable OTG_FRAMES (1.5s) after the fall started. Attacks connect against a
+// low wide prone hurtbox, deal normal damage, and the FIRST OTG hit of a fall
+// forces an immediate getup with OTG_GETUP_INVULN frames of invulnerability —
+// the otgHit latch guarantees a knockdown can never eat two OTG hits.
+const OTG_FRAMES = 90
+const OTG_GETUP_INVULN = 45
+const OTG_PRONE_HEIGHT = 1.0      // prone hurtbox vertical band (y0=0..this) —
+                                  // tall enough that standard jab/kick bands
+                                  // (band bottom ~0.3-0.95 across the roster)
+                                  // connect; genuinely high swings still whiff
+const OTG_PRONE_RADIUS_MULT = 1.5 // a body on the floor is wide, not tall
+const _otgV = new THREE.Vector3()
+
+// ---- presentation-only constants (swing ribbon + extension hold) ----------
+// Fixed frames BEFORE the active window that the ribbon starts tracking. The
+// feel critic asked for "the 3-4 startup frames"; 4 is the top of that range
+// and gives a 5-6 sample arc once the active frames are included.
+const RIBBON_LEAD = 4
+// [tipBone, parentBone, overshoot] — see _strikeTip(). The overshoot extends
+// past the elbow/knee by a fraction of the parent segment, because the roster
+// has no hand or foot bones to read directly.
+const STRIKE_LIMBS = [
+  ['forearmR', 'armR', 1.0], ['forearmL', 'armL', 1.0],
+  ['shinR', 'legR', 0.85], ['shinL', 'legL', 0.85],
+  ['armR', 'torso', 0.0], ['armL', 'torso', 0.0],
+]
+const _tipV = new THREE.Vector3()
+// Clip phases probed for the widest silhouette during the extension hold, as
+// fractions of the [contact, active-end + overshoot] window. Five samples: the
+// search runs once per landed hit, inside a frame the sim has already frozen.
+const EXT_PROBES = [0, 0.2, 0.38, 0.55, 0.72, 0.86, 1]
 
 export class MatchScreen {
   constructor() {
@@ -145,28 +187,68 @@ export class MatchScreen {
     this.mode = KNOWN_MODES.has(params.mode) ? params.mode : 'versus'
     this.rules = { ...game.config.rules, ...(params.rules || {}) }
 
+    // P0 (v3.1) ORDERING — THIS MUST BE THE FIRST THING enter() DOES.
+    // When a match ends with replay footage the visual teardown is DEFERRED: the
+    // frozen KO scene is handed to the results screen and swept here. It used to
+    // be swept two hundred lines down, i.e. AFTER the next arena had already
+    // built, dressed the new scene and claimed the module-level arena state — so
+    // arena N-1's teardown ran on top of arena N's setup. That is one of the two
+    // ways a previous venue's mood could bleed into the next match. Arena N-1 is
+    // now completely gone before arena N is even conceived.
+    try { game.__lastReplay?.dispose?.() } catch { /* stale */ }
+    game.__lastReplay = null
+
+    // Per-MATCH latches. ScreenManager reuses this MatchScreen instance for every
+    // match, so anything set once and never cleared silently disables itself for
+    // the rest of the session — `_contactsDone` meant only the first match of a
+    // session ever got contact shadows under its fighters.
+    this._contactsDone = false
+    this._rigWarned = false
+    this._shadowRadius = 0
+
     // --- scene & camera ---
     this.scene = new THREE.Scene()
+    // Explicit, unconditional atmosphere. Nothing is inherited and nothing is
+    // restored-from-previous: the arena build clears and re-applies environment
+    // and fog on top of this (ArenaBase.resetSceneRenderState).
     this.scene.background = new THREE.Color(0x181c38)
+    this.scene.environment = null
+    this.scene.fog = null
     this.camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 400)
     this.camera.position.set(0, 2.7, 11.5)
     this.camera.lookAt(0, 1.4, 0)
 
-    // bright arcade lighting
-    this.scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x54381e, 0.85))
-    const sun = new THREE.DirectionalLight(0xfff2d0, 1.6)
-    sun.position.set(6, 12, 7)
-    if (game.quality.shadows) {
-      sun.castShadow = true
-      sun.shadow.mapSize.set(game.quality.shadowSize, game.quality.shadowSize)
-      sun.shadow.camera.left = -14
-      sun.shadow.camera.right = 14
-      sun.shadow.camera.top = 14
-      sun.shadow.camera.bottom = -2
-      sun.shadow.camera.near = 1
-      sun.shadow.camera.far = 40
+    // Bright arcade lighting — v3.0: now a FALLBACK, not an always-on layer.
+    //
+    // Every arena builds a composed key/fill/rim/bounce rig with a shadow
+    // camera fitted to the action (ArenaBase.makeLightRig -> makeCinematicRig).
+    // Leaving this second hemisphere + second shadow-casting sun in the scene
+    // on top of it would (a) flatten every arena's deliberate lighting design
+    // back into the old uniform wash, and (b) cost a second full shadow map
+    // whose fixed ±14 frustum fights the rig's tight one. So it is built here
+    // and only BUILT BELOW, after the arena build, if the arena gave us no rig
+    // (stub arenas, a build that threw, the fallback floor path). v3.1: it is
+    // CONSTRUCTED lazily too — building a shadow-casting DirectionalLight and
+    // then dropping it on the floor every match was a small per-match leak of a
+    // shadow camera and map-size allocation for nine matches out of ten.
+    const buildFallbackLights = () => {
+      const hemi = new THREE.HemisphereLight(0xcfe0ff, 0x54381e, 0.85)
+      const sun = new THREE.DirectionalLight(0xfff2d0, 1.6)
+      sun.position.set(6, 12, 7)
+      if (game.quality.shadows) {
+        sun.castShadow = true
+        sun.shadow.mapSize.set(game.quality.shadowSize, game.quality.shadowSize)
+        sun.shadow.camera.left = -14
+        sun.shadow.camera.right = 14
+        sun.shadow.camera.top = 14
+        sun.shadow.camera.bottom = -2
+        sun.shadow.camera.near = 1
+        sun.shadow.camera.far = 40
+      }
+      this.scene.add(hemi)
+      this.scene.add(sun)
+      this.scene.add(sun.target)
     }
-    this.scene.add(sun)
 
     // --- physics + arena ---
     const presetName = game.save.get('settings.physicsPreset', 'standard')
@@ -213,9 +295,20 @@ export class MatchScreen {
       arena = arenaDef.build({
         scene: this.scene, physics: this.physics, quality: game.quality,
         events: game.events, audio: game.audio, fighterColors: this.fighterColors,
+        // v3.0: ArenaBase needs the id (to pick its env.js mood) and the
+        // renderer (to build the PMREM environment). Both are additive — an
+        // arena that ignores them behaves exactly as before.
+        arenaId: this.arenaId, renderer: game.renderer,
       })
     } catch (e) { console.error('[combat] arena build threw', e) }
     this.arena = arena || { group: null, bounds: { minX: -9, maxX: 9, wallBounce: 0.55 }, floorY: 0, spawnPoints: [-3, 3], update() {}, dispose() {} }
+    // P0 (v3.1) — the arena group must be the SINGLE root everything hangs from,
+    // or teardown cannot be exhaustive and dressing carries into the next venue
+    // (the reserve-core floor decal that turned up on the swamp pier). This is
+    // the only safe moment to reconcile that: the arena has finished building
+    // and NOTHING else has been added to the scene yet — fighters, particles,
+    // props, items and the fallback lights all come after this line.
+    try { this.arena.adoptSceneStrays?.() } catch (e) { console.warn('[combat] adoptSceneStrays threw', e) }
     if (this.arena.group && !this.arena.group.parent) this.scene.add(this.arena.group)
     // §17: bounds cover the whole floor — z walls default in when the arena
     // only declares the v1 x-lane bounds.
@@ -231,8 +324,20 @@ export class MatchScreen {
     } catch { /* physics bounds are optional */ }
     if (arenaDef?.stub || !this.arena.group) this._buildFallbackFloor()
 
+    // See the "bright arcade lighting" note above: only light the scene
+    // ourselves when the arena did not.
+    if (!this.arena.rig) buildFallbackLights()
+    // The rim light is camera-relative this round — hand the rig the camera once
+    // at setup so the very first rendered frame is already composed, instead of
+    // waiting for the first _updatePresentation.
+    try { this.arena.rig?.setCamera?.(this.camera) } catch { /* optional */ }
+
     // --- pools ---
     this.particles = new ParticleSystem(this.scene, game.quality)
+    // Presentation only. The pool uses the lens for two things: pushing the
+    // contact cluster in front of the victim instead of into his chest, and
+    // keeping the swing ribbons broadside. Neither touches the sim.
+    try { this.particles.setCamera(this.camera) } catch { /* pool is defensive */ }
     this.props = new PropManager(this.scene, this.physics)
 
     // --- fighters ---
@@ -317,9 +422,8 @@ export class MatchScreen {
     } catch (e) { console.warn('[combat] camera setup failed', e) }
 
     // --- instant replay recorder (src/replay) ---
-    // a new match invalidates any clip preserved by the previous one
-    try { game.__lastReplay?.dispose?.() } catch { /* stale */ }
-    game.__lastReplay = null
+    // (the previous match's preserved clip was already swept at the top of
+    // enter(), before the arena built — see the P0 ORDERING note there)
     this.replay = null
     try {
       this.replay = new ReplayManager(game)
@@ -393,6 +497,9 @@ export class MatchScreen {
 
     game.audio.music(arenaDef?.music || 'battle_meme_market')
     this.active = true
+    // #6: brand new scene, brand new arena, brand new camera. Whatever the
+    // pipeline is holding from the last screen is a ghost of a different venue.
+    this._cut()
     this.startRound(1)
   }
 
@@ -436,23 +543,40 @@ export class MatchScreen {
     const scene = this.scene
     const { fighters, props, particles, arena } = this
     const visualTeardown = () => {
+      // P1 (v3.1) GEOMETRY/TEXTURE LEAK ON RESTART — SNAPSHOT BEFORE ANYONE
+      // DETACHES ANYTHING. The old sweep read `scene.children` AFTER the
+      // fighters, props, particles and arena had all torn themselves down, and
+      // every one of those legitimately detaches part of its tree on the way
+      // out (Fighter.dispose removes its root, ParticleSystem empties its pools,
+      // ArenaBase clears the rig group). Anything detached before the walk is
+      // unreachable by a traverse, so its geometry stayed resident and unfreed
+      // — draw calls flat, geometry count climbing, forever. Take the flat
+      // snapshot first; dispose the snapshot, not the survivors.
+      const owned = []
+      if (scene) { try { collectSubtree(scene, owned) } catch { /* best effort */ } }
+
       for (const f of fighters || []) { try { f.dispose(scene) } catch { /* gone */ } }
       try { props?.dispose() } catch { /* gone */ }
       try { particles?.dispose() } catch { /* gone */ }
       try { arena?.dispose?.() } catch (e) { console.warn('[combat] arena dispose threw', e) }
+
       // sweep whatever is left (lights, fallback floor, stray props)
       if (scene) {
         const leftovers = [...scene.children]
         for (const o of leftovers) scene.remove(o)
-        for (const o of leftovers) {
-          o.traverse?.((c) => {
-            if (c.isMesh) {
-              c.geometry?.dispose?.()
-              const list = Array.isArray(c.material) ? c.material : [c.material]
-              for (const m of list) m?.dispose?.()
-            }
-          })
-        }
+        for (const o of leftovers) { try { collectSubtree(o, owned) } catch { /* fine */ } }
+        // disposeNode() is ArenaBase's node freer and it closes three holes the
+        // hand-rolled walk here had:
+        //   * it frees geometry on Points / Line / Sprite / InstancedMesh too,
+        //     not only `isMesh` — the particle and debris pools are Points;
+        //   * it frees the TEXTURES a material exclusively owns (the old walk
+        //     disposed materials but never their maps — that is the "+3
+        //     textures per restart" half of the bug);
+        //   * it frees light shadow maps, and it skips shared assets (pbr()
+        //     cache materials, surfaceMaps() textures, PMREM environments, the
+        //     shared crowd geometry) which the NEXT match is already using.
+        // It latches `userData.__disposed`, so overlapping snapshots are free.
+        for (const o of owned) { try { disposeNode(o) } catch { /* fine */ } }
       }
     }
     if (!preserve) {
@@ -471,10 +595,116 @@ export class MatchScreen {
     this.fighters = []
     this.fxList = []
     this.timers = []
+    // #6 + hygiene: this screen is gone. Drop the focus targets (they point at
+    // fighters that no longer exist, and the pipeline would keep easing toward
+    // them under the next screen) and clear the temporal history so the results
+    // screen never inherits a ghost of the KO frame.
+    try { this.game?.pipeline?.autoFocus?.(null) } catch { /* optional */ }
+    this._focusA = this._focusB = this._focusMid = null
+    this._cut()
   }
 
-  render(renderer) {
-    if (this.scene && this.camera) renderer.render(this.scene, this.camera)
+  // GRAPHICS_CONTRACT §8. Exactly one composer render per frame: Game's loop
+  // calls screens.render() once, this is the only draw in it, and renderScene()
+  // routes it through game.pipeline (falling back to a direct render if the
+  // post stack ever fails).
+  render(renderer, dt = 1 / 60) {
+    if (this.scene && this.camera) renderScene(this.game || renderer, this.scene, this.camera, dt)
+  }
+
+  // ------------------------------------------------------------ presentation
+  // Everything here is post/lighting only — it touches no simulation state and
+  // runs on the RENDER cadence, not the fixed clock, so it is frame-rate
+  // independent and cannot change a single gameplay outcome.
+  _updatePresentation(dt) {
+    const [a, b] = this.fighters || []
+    const mid = this._focusMid || (this._focusMid = new THREE.Vector3())
+    if (a && b) mid.copy(a.pos).add(b.pos).multiplyScalar(0.5)
+    else if (a) mid.copy(a.pos)
+    else mid.set(0, 1, 0)
+    mid.y += 1.05   // chest height reads better than the floor for both DoF and shadows
+
+    // Depth of field (contract §7 pass 5). TWO targets, not the midpoint: the
+    // Pipeline fits the in-focus band to span both fighters plus a margin, so
+    // the far fighter is never the blurry one at long range — which is exactly
+    // what a midpoint-only focus does as the pair separates. Both vectors are
+    // persistent and rewritten in place; the pipeline holds the references.
+    const pipeline = this.game?.pipeline
+    if (pipeline) {
+      try {
+        if (a && b) {
+          const fa = this._focusA || (this._focusA = new THREE.Vector3())
+          const fb = this._focusB || (this._focusB = new THREE.Vector3())
+          fa.copy(a.pos); fa.y += 1.05
+          fb.copy(b.pos); fb.y += 1.05
+          pipeline.autoFocus(fa, fb)
+        } else {
+          pipeline.autoFocus(mid)
+        }
+      } catch { /* pipeline is optional */ }
+    }
+
+    // Fit the shadow frustum and swing the rim onto the action. The rig is a
+    // makeCinematicRig handle parked by ArenaBase.makeLightRig; arenas that
+    // never built one simply skip this.
+    //
+    // P0 (v3.1) — DO NOT DEFEAT THE TEXEL SNAP. Two rules, both learned the
+    // hard way:
+    //  1. This runs on the RENDER cadence, once per frame — never per fixed
+    //     step. Driving the shadow frustum 1-5 times per frame with different
+    //     radii re-snaps the box mid-frame for nothing.
+    //  2. `fitTo(a, b)` is the ONE call that sets focus AND radius, and
+    //     lighting.js quantises the radius inside its `shadowRadius` setter
+    //     (0.5 m steps + hysteresis) precisely so the texel grid holds still.
+    //     Passing `mid` to update() as well would immediately overwrite the
+    //     focus fitTo just computed with a slightly different, unquantised
+    //     point — so update() gets a null focus here and only the camera.
+    //     Solo/edge cases (a fighter missing) still hand update() the midpoint.
+    const rig = this.arena?.rig
+    if (rig && typeof rig.update === 'function') {
+      try {
+        if (a && b) {
+          rig.fitTo(a.pos, b.pos)
+          rig.update(dt, null, this.camera)
+        } else {
+          rig.update(dt, mid, this.camera)
+        }
+      } catch (e) {
+        if (!this._rigWarned) { this._rigWarned = true; console.warn('[combat] light rig update threw — disabling', e) }
+        this.arena.rig = null
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // _cut() — v3.1 (#6). Tell the post pipeline that the NEXT frame has no
+  // relationship to the last one, so the afterimage/motion-blur history and the
+  // ultra accumulator are cleared instead of smearing the old shot across the
+  // cut. Pipeline.resetHistory() only sets a flag (the GL clear happens once, at
+  // the top of the next render), so calling it on every candidate cut is free.
+  //
+  // Call sites, all of them hard cuts: arena/scene change (enter), round
+  // transitions (startRound), the KO cinematic, the execution cinematic, and
+  // both ends of the instant replay — the replay camera teleports to its orbit
+  // rig and teleports back to live.
+  // -------------------------------------------------------------------------
+  _cut() {
+    try { this.game?.pipeline?.resetHistory?.() } catch { /* pipeline is optional */ }
+    // A swing ribbon that survives a camera teleport is a smear across the cut.
+    try { this.particles?.clearSwings?.() } catch { /* pool is optional */ }
+  }
+
+  // A contact-shadow disc under each fighter so nobody floats (contract §6).
+  // Best-effort and idempotent: called once, after the fighters exist.
+  _attachContactShadows() {
+    const rig = this.arena?.rig
+    if (!rig || typeof rig.addContactShadow !== 'function' || this._contactsDone) return
+    this._contactsDone = true
+    for (const f of this.fighters || []) {
+      const obj = f?.root
+      if (!obj) continue
+      try { rig.addContactShadow(obj, { radius: 0.68, groundY: this.arena?.floorY ?? 0 }) } catch { /* optional */ }
+    }
   }
 
   update(dt) {
@@ -488,11 +718,16 @@ export class MatchScreen {
         console.error('[combat] replay playback threw', e)
         this._abortInstantReplay()
       }
+      try { this._updatePresentation(dt) } catch { /* presentation only */ }
       return
     }
     if (this.paused) return
     if (!Number.isFinite(dt) || dt <= 0) dt = FIXED_STEP
     try { this.cam.update(dt) } catch { /* stub */ }
+    // Post + lighting follow the camera, so they run right after it and before
+    // the fixed-step sim below (which must stay untouched by any of this).
+    try { this._attachContactShadows() } catch { /* optional */ }
+    try { this._updatePresentation(dt) } catch { /* presentation only */ }
     // Real elapsed time accumulates into fixed 60 Hz ticks, so hit-stop and
     // slow-mo counters measure identical wall time whether the caller runs at
     // 60, 120 or 144 Hz — a 4-frame hit-stop is ALWAYS ~67 ms of freeze.
@@ -553,6 +788,11 @@ export class MatchScreen {
     // items itself in full 2D (§17 'fetch' state via items.nearestGroundItem),
     // and the nudge would clobber its world-X intent while leaving Z intact.
     for (const f of this.fighters) f.update(dt, allow)
+
+    // Presentation: the striking limb's trail. Fed here, one step after the
+    // fighters have posed themselves and one step before particles.update()
+    // builds the strip, so the ribbon head is never a frame behind the fist.
+    try { this._feedSwingRibbons() } catch { /* presentation only */ }
 
     if (this.phase === 'fight') {
       this._scanHits()
@@ -669,6 +909,9 @@ export class MatchScreen {
     }
     this.game.events.emit('timer', { value: this.rules.roundTime })
     this.game.audio.crowd('idle')
+    // #6: both fighters were just teleported back to their spawns and the
+    // camera re-framed — a hard cut in everything but name.
+    this._cut()
 
     const final = this.wins[0] === this.rules.roundsToWin - 1 || this.wins[1] === this.rules.roundsToWin - 1
     let t0 = 20
@@ -738,6 +981,7 @@ export class MatchScreen {
     this.particles.burst('coins', { x: loser.pos.x, y: loser.pos.y + 1.2, z: loser.pos.z }, { n: 18 })
     this.game.audio.sfx('coins_burst')
     try { this.cam.koCinematic(loser) } catch { /* stub */ }
+    this._cut()   // #6: the KO camera cuts to its orbit rig — no ghost across it
     if (winner.damageTakenThisRound === 0) {
       this.at(24, () => { this.cap('FLAWLESS PORTFOLIO!'); this.say('FLAWLESS PORTFOLIO!') })
     }
@@ -839,6 +1083,7 @@ export class MatchScreen {
       this._replayUI?.hide()
       this._replayUI = null
       this.replayActive = false
+      this._cut()   // #6: replay orbit -> live camera is a cut, both ways
       done()
     }
     this._replayFinish = finish
@@ -846,6 +1091,7 @@ export class MatchScreen {
     try { ok = rp.playInstantReplay({ seconds: 5, slowmo: 0.4, onDone: finish }) } catch (e) {
       console.error('[combat] instant replay failed to start', e)
     }
+    this._cut()   // #6: live camera -> replay orbit rig
     if (!ok) { finish(); return }
     this._replayUI = showInstantReplay(this.game, {
       onSkip: () => { try { rp.skipInstant() } catch { finish() } },
@@ -864,6 +1110,7 @@ export class MatchScreen {
     this._replayUI?.hide()
     this._replayUI = null
     this.replayActive = false
+    this._cut()   // #6: forced exit from the replay camera is still a cut
   }
 
   _togglePause() {
@@ -873,6 +1120,244 @@ export class MatchScreen {
     if (!this.active || this.phase === 'matchEnd') return
     this.paused = !this.paused
     this.game.events.emit(this.paused ? 'match:paused' : 'match:resumed')
+  }
+
+  // ------------------------------------------------- the contact-frame pose
+
+  /**
+   * FEEL-CRITIC #1, PART 1: "hold the attacker at FULL EXTENSION for the
+   * hit-stop duration instead of whatever pose the clip happens to be in — the
+   * extension frame must be the frozen one."
+   *
+   * The mechanism, and why it belongs here rather than in the animator: during
+   * hit-stop _fixedTick() returns before anything updates, so the attacker's
+   * bones keep EXACTLY the pose they had on the frame the hit resolved. That
+   * frame is the first ACTIVE frame — the fist has only just entered the
+   * hitbox and the clip is nowhere near its widest pose. The freeze is not the
+   * bug (Animator.attackDrive has the same note about the torque spring); the
+   * bug is which pose gets frozen. So on the contact frame, before the freeze
+   * starts, we scrub the attack clip forward to the pose with the widest
+   * silhouette anywhere in its remaining active window and re-pose once.
+   *
+   * WHAT THIS DOES NOT TOUCH: moveFrame, hitStop frame counts, damage,
+   * hitboxes, knockback, any timing. `animator.time` is a render-side clip
+   * cursor with no gameplay meaning. The scrub is bounded by the END OF THE
+   * ACTIVE WINDOW plus a small overshoot, so the clip can never run more than
+   * a couple of frames ahead of the move, and it is NOT restored afterwards on
+   * purpose: snapping back would make the arm re-extend during recovery.
+   *
+   * Best-effort throughout — a stub rig, a clipless move or a missing camera
+   * all fall through to the old behaviour.
+   */
+  _holdExtension(a, move) {
+    const an = a && a.animator
+    const clip = an && an.clip
+    if (!clip || !move || typeof an.update !== 'function') return
+    // Only ever scrub the MOVE's own clip. A move with no clip (or one the
+    // character does not ship) falls back to looping 'idle' inside
+    // Fighter.startMove, and scrubbing a loop just teleports the idle cycle.
+    if (clip.loop) return
+    if (move.clip && an.clipName !== move.clip) return
+    const dur = clip.duration || 0
+    if (!(dur > 1e-4)) return
+    const total = Math.max(1, (move.startup || 0) + (move.active || 0) + (move.recovery || 0))
+    const t0 = Number.isFinite(an.time) ? an.time : 0
+    // End of the active window in clip time, plus a 16% overshoot: on a clip
+    // whose peak reach sits just past the last active frame that overshoot is
+    // the difference between finding the extension and stopping short of it.
+    // The 0.94 ceiling keeps the scrub out of the clip's final settle pose.
+    const tEnd = Math.min(dur * 0.94,
+      dur * ((move.startup || 0) + (move.active || 0)) / total + dur * 0.16)
+    if (!(tEnd > t0 + 1e-4)) return
+
+    // A crossfade still running at contact would blend the extension back
+    // toward the previous clip's pose. Past the halfway mark the fade has
+    // nothing left to say, so retire it and let the extension land clean.
+    if (an.fading && an.fadeDur > 0 && an.fadeTime >= an.fadeDur * 0.5) {
+      an.fading = false
+      an.fadeTime = an.fadeDur
+    }
+
+    // Silhouette width is scored in SCREEN space, which is the space the
+    // acceptance test ("40%+ wider than idle") is measured in. World-axis
+    // width would rank a punch thrown toward the lens as narrow when on screen
+    // it is the widest thing the clip does; perspective is exactly the term
+    // that matters here.
+    this._extViewProj()
+
+    // Probe with secondary motion off: springs integrate nothing at dt 0 but
+    // they do rewrite their parent-rotation history every call, and there is
+    // no reason to churn it seven times for a measurement.
+    const secondary = an.secondaryOn
+    an.secondaryOn = false
+    // ---- ROOT MOTION MUST NOT LEAK -------------------------------------
+    // A clip flagged `root: true` accumulates hips XZ deltas into the
+    // animator's root-motion channel on every update(), and Fighter drains
+    // that channel straight into fighter.pos. Scrubbing the clip forward would
+    // therefore TELEPORT the attacker by the distance the clip's hips travel
+    // between the contact frame and the extension frame — seven times over,
+    // once per probe. This is presentation; it may not move anybody. The
+    // channel is snapshotted and restored, and _rootPrev is deliberately left
+    // where the final pose put it so the next real frame measures a normal
+    // one-frame delta from there instead of a jump.
+    const rm = an._rootMotion
+    const rmx = rm ? rm.x : 0, rmy = rm ? rm.y : 0, rmz = rm ? rm.z : 0
+    let bestT = t0
+    let bestW = -1
+    let baseW = -1
+    try {
+      for (let i = 0; i < EXT_PROBES.length; i++) {
+        const t = t0 + (tEnd - t0) * EXT_PROBES[i]
+        an.time = t
+        an.update(0)
+        // update() rewrites bone LOCALS; the world matrices the measurement
+        // reads are stale until the subtree is refreshed.
+        a.root?.updateMatrixWorld?.(true)
+        const w = this._silhouetteWidth(a)
+        if (i === 0) baseW = w   // probe 0 IS the pose the old code froze
+        if (w > bestW) { bestW = w; bestT = t }
+      }
+    } catch {
+      an.secondaryOn = secondary
+      an.time = t0
+      try { an.update(0) } catch { /* stub rig */ }
+      if (rm) { rm.x = rmx; rm.y = rmy; rm.z = rmz }
+      return
+    }
+    an.secondaryOn = secondary
+    an.time = bestT
+    try {
+      an.update(0)
+      a.root?.updateMatrixWorld?.(true)
+    } catch { /* stub rig */ }
+    if (rm) { rm.x = rmx; rm.y = rmy; rm.z = rmz }
+    // The ribbon was fed earlier in this step, from the PRE-extension pose, so
+    // its head would stop short of the fist the freeze is about to hold. One
+    // more sample lands the blade on the extended limb.
+    if (a._ribbonMove) {
+      const tip = this._strikeTip(a)
+      if (tip) {
+        try { this.particles?.swing?.(a.slot, tip.x, tip.y, tip.z) } catch { /* pool optional */ }
+      }
+    }
+    // Diagnostics for the verifier. Nothing in the sim reads either field.
+    a._extHoldT = bestT
+    a._extHoldWidth = bestW
+    a._extBaseWidth = baseW
+  }
+
+  /** Cache projection * viewInverse for _silhouetteWidth. Called once per
+   *  _holdExtension so the seven probes share one matrix multiply. */
+  _extViewProj() {
+    const cam = this.camera
+    const M = this._extVP || (this._extVP = new THREE.Matrix4())
+    if (!cam) { M.identity(); return M }
+    cam.updateMatrixWorld()
+    M.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse)
+    return M
+  }
+
+  /** Horizontal spread of the skeleton in NORMALISED DEVICE COORDINATES, i.e.
+   *  the same axis and the same perspective the screenshot rig measures. Bone
+   *  origins only — 20-60 reads, no allocation. Bones behind the near plane are
+   *  skipped rather than mirrored to the wrong side of the frame. */
+  _silhouetteWidth(f) {
+    const list = f.animator && f.animator.list
+    if (!list || !list.length) return 0
+    const e = (this._extVP || this._extViewProj()).elements
+    let lo = Infinity
+    let hi = -Infinity
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i]
+      const m = b && b.matrixWorld && b.matrixWorld.elements
+      if (!m) continue
+      const x = m[12], y = m[13], z = m[14]
+      const w = e[3] * x + e[7] * y + e[11] * z + e[15]
+      if (!(w > 1e-4)) continue
+      const p = (e[0] * x + e[4] * y + e[8] * z + e[12]) / w
+      if (p < lo) lo = p
+      if (p > hi) hi = p
+    }
+    return hi > lo ? hi - lo : 0
+  }
+
+  // ------------------------------------------------------- swing ribbons (fx)
+
+  // Feel-critic #1, part 3: "add a swing ribbon on the striking limb across
+  // the 3-4 startup frames so the approach is visible at all."
+  //
+  // Runs once per fixed step, after the fighters have posed themselves and
+  // before the pool's own update() builds the strip, so the ribbon head is on
+  // the same frame as the limb. Purely additive presentation: it reads bone
+  // world positions and writes nothing back.
+  _feedSwingRibbons() {
+    const P = this.particles
+    if (!P || typeof P.swing !== 'function') return
+    for (const f of this.fighters) {
+      const m = f.currentMove
+      const live = f.state === 'attack' && m && m.kind !== 'grab' && !f.scriptFx &&
+        f.moveFrame >= (m.startup || 0) - RIBBON_LEAD &&
+        f.moveFrame <= (m.startup || 0) + (m.active || 0) + 1
+      if (!live) { P.endSwing(f.slot); f._ribbonMove = null; continue }
+      const tip = this._strikeTip(f)
+      if (!tip) { P.endSwing(f.slot); f._ribbonMove = null; continue }
+      const restart = f._ribbonMove !== m
+      f._ribbonMove = m
+      // Heavier moves get a wider, hotter blade. Kicks read cooler than fists
+      // only because the limb is longer, so the width scales off the move kind
+      // rather than the bone.
+      const heavy = m.kind === 'heavy' || m.kind === 'launcher' || m.kind === 'special' || m.kind === 'super'
+      P.swing(f.slot, tip.x, tip.y, tip.z, {
+        width: heavy ? 0.30 : 0.19,
+        gain: heavy ? 0.85 : 0.58,
+        color: m.kind === 'super' ? 0xfff0c4 : 0xffe9c0,
+        restart,
+      })
+    }
+  }
+
+  // World position of the striking limb's TIP, or null.
+  //
+  // The roster has no hand or foot bones (hips/torso/head/armL·R/forearmL·R/
+  // legL·R/shinL·R plus per-character extras), so the tip is extrapolated: the
+  // forearm bone is the elbow, and the fist sits about one more upper-arm
+  // length down the same line. Whichever candidate ends up furthest along the
+  // attacker's own facing direction is the one doing the striking, which picks
+  // the right limb for punches, kicks and mirrored rigs without any per-move
+  // or per-character authoring.
+  _strikeTip(f) {
+    const B = f.bones
+    if (!B) return null
+    const root = f.root
+    if (root && root.updateMatrixWorld) {
+      try { root.updateMatrixWorld(true) } catch { return null }
+    }
+    const hips = B.hips
+    if (!hips || !hips.matrixWorld) return null
+    const hm = hips.matrixWorld.elements
+    const hx = hm[12], hy = hm[13], hz = hm[14]
+    const fx = f.dirX ? f.dirX() : (f.facingSign || 1)
+    const fz = f.dirZ ? f.dirZ() : 0
+    let best = null
+    let bestReach = -Infinity
+    for (const pair of STRIKE_LIMBS) {
+      const tipBone = B[pair[0]]
+      const rootBone = B[pair[1]]
+      if (!tipBone || !tipBone.matrixWorld) continue
+      const tm = tipBone.matrixWorld.elements
+      let x = tm[12], y = tm[13], z = tm[14]
+      if (rootBone && rootBone.matrixWorld) {
+        const rm = rootBone.matrixWorld.elements
+        // Extend past the elbow/knee by `pair[2]` of the parent segment.
+        x += (x - rm[12]) * pair[2]
+        y += (y - rm[13]) * pair[2]
+        z += (z - rm[14]) * pair[2]
+      }
+      if (!Number.isFinite(x + y + z)) continue
+      const reach = (x - hx) * fx + (z - hz) * fz + Math.abs(y - hy) * 0.25
+      if (reach > bestReach) { bestReach = reach; best = _tipV.set(x, y, z) }
+    }
+    return best
   }
 
   // ------------------------------------------------------------------ hits
@@ -895,22 +1380,33 @@ export class MatchScreen {
       const m = a.activeAttack()
       if (!m) continue
       const d = a.foe
-      if (d.isInvulnerable()) continue
+      // OTG: past the 90-frame mark a downed foe is a legal target even though
+      // isInvulnerable() still lists knockdown/ragdoll (pre-mark behavior is
+      // exactly the old invulnerability).
+      let otg = null
+      if (d.isInvulnerable()) {
+        otg = this._otgTarget(d)
+        if (!otg) continue
+      }
       const hb = m.hitbox || { w: 1, h: 0.8, d: 1, forward: 1, up: 1.2 }
-      let dx = d.pos.x - a.pos.x
-      let dz = d.pos.z - a.pos.z
+      // during ragdoll d.pos is stale (the launch spot) — aim at the prone body
+      let dx = (otg ? otg.x : d.pos.x) - a.pos.x
+      let dz = (otg ? otg.z : d.pos.z) - a.pos.z
       const dist = Math.hypot(dx, dz)
-      const reach = (hb.forward ?? 1) + (hb.w ?? 1) * 0.5 + d.radius()
+      const reach = (hb.forward ?? 1) + (hb.w ?? 1) * 0.5 +
+        d.radius() * (otg ? OTG_PRONE_RADIUS_MULT : 1)
       if (dist > reach) continue
       let nx, nz
       if (dist > 1e-4) { nx = dx / dist; nz = dz / dist } else { nx = a.dirX(); nz = a.dirZ() }
       if (dist > 0.6 && (nx * a.dirX() + nz * a.dirZ()) < COS_HALF_CONE) continue
-      // vertical band of the attack vs the victim's height span
+      // vertical band of the attack vs the victim's height span (prone = low)
       const up = hb.up ?? 1.2
       const hh = (hb.h ?? 0.8) / 2
       const ay0 = a.pos.y + up - hh
       const ay1 = a.pos.y + up + hh
-      const span = d.heightSpan()
+      const span = otg
+        ? { y0: 0, y1: Math.max(OTG_PRONE_HEIGHT, (d.def.height || 1.8) * 0.35) }
+        : d.heightSpan()
       if (ay0 >= span.y1 || ay1 <= span.y0) continue
       a.hitDone = true
       a.contactMade = true
@@ -920,7 +1416,66 @@ export class MatchScreen {
         y: Math.max(span.y0, Math.min(span.y1, (ay0 + ay1) / 2)),
         z: a.pos.z + nz * pr,
       }
-      this._resolveHit(a, d, m, pt, { x: nx, z: nz })
+      if (otg) this._resolveOtgHit(a, d, m, pt, { x: nx, z: nz })
+      else this._resolveHit(a, d, m, pt, { x: nx, z: nz })
+    }
+  }
+
+  // OTG target check: returns the prone body's XZ when the downed fighter is
+  // legally hittable, else null. Ragdolls qualify once the pile is genuinely
+  // DOWN — settled, or lying low (a body sliding along the floor reads as
+  // "on the ground" to the player; a mid-air tumble does not).
+  _otgTarget(d) {
+    if (d.otgHit || d.hp <= 0 || (d.fallFrames || 0) < OTG_FRAMES) return null
+    if (d.state === 'knockdown') return { x: d.pos.x, z: d.pos.z }
+    if (d.state !== 'ragdoll') return null
+    let hx = d.pos.x
+    let hz = d.pos.z
+    let hy = 0
+    try {
+      d.bones.hips.getWorldPosition(_otgV)
+      if (Number.isFinite(_otgV.x + _otgV.y + _otgV.z)) { hx = _otgV.x; hy = _otgV.y; hz = _otgV.z }
+    } catch { /* stub rig */ }
+    let settled = true
+    try { settled = this.ragdolls.isSettled(d) } catch { /* stub */ }
+    if (!settled && hy > OTG_PRONE_HEIGHT) return null
+    return { x: hx, z: hz }
+  }
+
+  // OTG hit resolution: normal damage (damageScale via setHp, gore blood, HUD
+  // events with otg:true), no blocking/armor (a downed body does neither), and
+  // the one-per-fall forced getup with its anti-loop invulnerability window.
+  _resolveOtgHit(a, d, move, pt, dir) {
+    d.otgHit = true // latch FIRST — nothing below may re-enter
+    const kickDir = Math.sign(dir.x) || a.facingSign
+    const scale = Math.max(0.3, Math.pow(0.9, a.comboHits))
+    const dmg = Math.max(1, Math.round((move.damage || 5) * scale * a.damageMult))
+    a.comboHits++
+    a.comboLastFrame = this.worldFrame
+    this._goreHit(d, a, dmg, pt, kickDir)
+    d.setHp(d.hp - dmg)
+    d.damageTakenThisRound += dmg
+    this._trackHit(a, dmg)
+    a.gainMeter(move.meterGain || 5)
+    d.gainMeter(dmg * 0.35)
+    this.game.events.emit('fighter:hit', { slot: d.slot, damage: dmg, move: move.id, counter: false, combo: a.comboHits, dirX: kickDir, otg: true })
+    if (a.comboHits >= 2) this.game.events.emit('combo', { slot: a.slot, hits: a.comboHits })
+    this.hitStop(move.hitStop || 3)
+    this._holdExtension(a, move)
+    try { this.cam.kick(kickDir, Math.min(1, 0.06 + dmg * 0.04)) } catch { /* stub */ }
+    this.game.audio.sfx(move.sfx || KIND_SFX[move.kind] || 'punch_light')
+    this.particles.burst('impact', pt, { dirX: kickDir })
+    if (d.hp <= 0) {
+      this._killBlow = { moveId: move.id, kind: move.kind } // §23
+      this.onKO(d)
+      return
+    }
+    // first OTG hit of the fall pops them straight up, briefly untouchable
+    if (d.state === 'ragdoll') {
+      const instant = this._settleRagdoll(d)
+      d.enterGetup(OTG_GETUP_INVULN, instant)
+    } else {
+      d.enterGetup(OTG_GETUP_INVULN)
     }
   }
 
@@ -966,6 +1521,7 @@ export class MatchScreen {
       d.squash(0.1)
       a.gainMeter((move.meterGain || 5) * 0.5)
       this.hitStop(2)
+      this._holdExtension(a, move)
       this.game.audio.sfx('thud', { pitch: 0.7 })
       this.particles.burst('impact', pt, { n: 4 })
       this.game.events.emit('fighter:hit', { slot: d.slot, damage: dmg, move: move.id, counter: false, combo: 0, dirX: kickDir })
@@ -995,12 +1551,20 @@ export class MatchScreen {
     if (!this.firstHitDone) { this.firstHitDone = true; this.say(BAGS.firstHit.next(), 300) }
 
     this.hitStop((move.hitStop || 3) + (counter ? 2 : 0))
+    // The freeze starts on the NEXT tick, so this is the last chance to decide
+    // which pose it holds. See _holdExtension().
+    this._holdExtension(a, move)
     // directional camera kick along the real hit axis (attacker -> victim, so
     // cross-ups shove the right way), magnitude scaled by damage. cam.kick is
     // idempotent per frame — this call carries better data than the camera's
     // own 'fighter:hit' fallback and wins by magnitude.
     try { this.cam.kick(kickDir, Math.min(1, 0.06 + dmg * 0.04)) } catch { /* stub */ }
     if (dmg >= 9) this.game.events.emit('camera:shake', { mag: 0.22 + dmg * 0.016 })
+    // §8: post-stack punch on heavy hits only — bloom kick + chromatic spike +
+    // exposure lift, decaying over ~6 frames. Deliberately gated at the same
+    // damage threshold as the camera shake so light pokes stay clean; jabs
+    // landing 60 times a round with a screen-wide flash would be unreadable.
+    if (dmg >= 9) this._impactFx(Math.min(1, 0.35 + dmg * 0.035))
     this.game.audio.sfx(move.sfx || KIND_SFX[move.kind] || 'punch_light')
     this.particles.burst('impact', pt, { dirX: kickDir })
     if (dmg >= 11) this.particles.burst('sparks', pt, { dirX: kickDir })
@@ -1045,6 +1609,20 @@ export class MatchScreen {
       if (rag === 1) { try { this.ragdolls.partial(d, dmg >= 10 ? 'upper' : 'head', [dir.x * rk * 0.4, 1.5, dir.z * rk * 0.4]) } catch { /* stub */ } }
       // pushback: attacker slides back a touch if the victim is cornered
       if (this._nearWall(d)) { a.vel.x -= dir.x * 1.8; a.vel.z -= dir.z * 1.8 }
+    }
+    // ---- THE VICTIM FLASH, RE-ARMED ON HEAVIES ONLY --------------------
+    // The heavy-hit white flash was pulled back until it covered 0.49% of the
+    // victim's bbox above luma 245 — safe, but the verifier's own note was
+    // that the contact may now barely read. The middle is DURATION, not
+    // amplitude: Fighter.flash() caps peak radiance at FLASH_PEAK regardless
+    // of what we ask for (that cap is what protects the silhouette and it is
+    // deliberately left alone), but the visible window is a request, clamped
+    // to FLASH_MS_MAX ~= 3 rendered frames. enterHitstun/enterLaunched already
+    // fired the default 2-frame flash; re-arming it at 4 frames on a heavy
+    // stretches the SAME peak across the whole hit-stop instead of retiring it
+    // a frame in. Light pokes are untouched, so jabs stay clean.
+    if (dmg >= 9 && d.state !== 'ragdoll' && d.hp > 0) {
+      try { d.flash(0xffffff, 4) } catch { /* stub rig */ }
     }
   }
 
@@ -1150,6 +1728,8 @@ export class MatchScreen {
     f.state = 'ragdoll'
     f.stateFrames = 0
     f.ragdollFrames = 0
+    f.fallFrames = 0 // fresh fall: OTG clock restarts, OTG latch re-arms
+    f.otgHit = false
     f.holder.rotation.z = 0
     f.tumble = 0
     f.flash()
@@ -1159,13 +1739,31 @@ export class MatchScreen {
   }
 
   _recoverFromRagdoll(f) {
-    // Compute the hips-settle target BEFORE choosing the handoff. A blended
-    // recover() snapshots bone LOCAL transforms against the CURRENT root, so
-    // teleporting f.pos in the same frame re-expresses that snapshot the full
-    // flight distance away for the blend frames — the mid-fight "model desynced
-    // from body" tripwire. Long root jump (>1m) => instant handoff instead:
-    // the Animator rewrites the whole pose next frame and the 'knockdown' clip
-    // masks the cut. Short jump => keep the smooth 260ms blend.
+    const instant = this._settleRagdoll(f)
+    f.invuln = 30
+    // v2.1 mobile-feel pass: post-settle 'down beat' 22 -> 10 frames
+    f.knockdownFrames = 10
+    f.state = 'knockdown'
+    f.stateFrames = 0
+    // instant path must also snap the ANIMATOR: its crossfade snapshots the
+    // current (stale, ragdoll-driven) bone locals, which re-express against
+    // the teleported root — same tripwire through a different door.
+    f.animator.play('knockdown', { restart: true, snap: instant })
+  }
+
+  // Hand the bones back from the full-ragdoll driver and park the logical
+  // fighter at the pile's floor spot. Shared by the normal recovery and the
+  // OTG forced getup. Returns true when the handoff was INSTANT (root jump
+  // >1m — the caller must snap its clip, see below).
+  //
+  // Compute the hips-settle target BEFORE choosing the handoff. A blended
+  // recover() snapshots bone LOCAL transforms against the CURRENT root, so
+  // teleporting f.pos in the same frame re-expresses that snapshot the full
+  // flight distance away for the blend frames — the mid-fight "model desynced
+  // from body" tripwire. Long root jump (>1m) => instant handoff instead:
+  // the Animator rewrites the whole pose next frame and the snapped clip
+  // masks the cut. Short jump => keep the smooth 260ms blend.
+  _settleRagdoll(f) {
     let tx = f.pos.x
     let tz = f.pos.z
     try {
@@ -1183,14 +1781,7 @@ export class MatchScreen {
     f.pos.z = tz
     f.pos.y = 0
     f.vel.set(0, 0, 0)
-    f.invuln = 30
-    f.knockdownFrames = 22
-    f.state = 'knockdown'
-    f.stateFrames = 0
-    // instant path must also snap the ANIMATOR: its crossfade snapshots the
-    // current (stale, ragdoll-driven) bone locals, which re-express against
-    // the teleported root — same tripwire through a different door.
-    f.animator.play('knockdown', { restart: true, snap: instant })
+    return instant
   }
 
   applyImpulse(target, vec, spin = 0) {
@@ -1282,6 +1873,7 @@ export class MatchScreen {
     // Real cinematic, not just the mode flag — koCinematic orbits/dollies and
     // tracks the victim; scripts layer their own beats via fx.cam().
     try { this.cam.koCinematic(d) } catch { /* stub */ }
+    this._cut()   // #6: execution cinematic re-frames the stage
     const fx = this.makeFx(a, () => this._executionDone(a, d))
     fx.context = context // §23: absurd scripts echo the special that landed
     this._execFx = fx
@@ -1573,9 +2165,19 @@ export class MatchScreen {
   superFlash(f, move) {
     this.hitStopFrames = Math.max(this.hitStopFrames, 24) // ~0.4 s frozen beat
     try { this.cam.punchIn(0.4) } catch { /* stub */ }
+    // The HUD already paints its white DOM pulse; this is the 3D half of it.
+    this._impactFx(1)
+    try { this.game?.pipeline?.flash?.(0xffffff, 0.45, 10) } catch { /* post is optional */ }
     this.game.events.emit('superflash', { slot: f.slot, name: move?.name || 'SUPER' })
     this.game.events.emit('camera:shake', { mag: 0.3 })
     this.game.audio.crowd('gasp')
+  }
+
+  // One-line guarded bridge to RenderPipeline.impact(). Everything that wants a
+  // post punch goes through here so there is exactly one place that knows the
+  // pipeline may be absent (low tier, construction failure, node harness).
+  _impactFx(strength = 1) {
+    try { this.game?.pipeline?.impact?.(strength) } catch { /* post is optional */ }
   }
 
   hitStop(frames) {

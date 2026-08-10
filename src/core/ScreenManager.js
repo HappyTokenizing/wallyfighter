@@ -28,5 +28,9 @@ export class ScreenManager {
     if (this.game.frame < this._graceUntil) return
     this.current?.update?.(dt)
   }
-  render(renderer) { this.current?.render?.(renderer) }
+  // `dt` is the REAL frame delta (not the fixed step) and is forwarded to
+  // renderScene() so the post stack's time-based effects — film grain, impact
+  // decay, DoF easing — run on wall-clock time. Screens that ignore it keep
+  // working: it is an added trailing argument, never a replacement.
+  render(renderer, dt = 1 / 60) { this.current?.render?.(renderer, dt) }
 }

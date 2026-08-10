@@ -454,7 +454,7 @@ Tier by the killing blow's move kind:
 - special/super → ABSURD pool (the 8 existing + new; 4-6s; scripts receive
   fx.context = { killingMoveId, killingKind, attackerCharId } and the absurd ones
   should ECHO/AMPLIFY the special that landed when recognizable).
-The victim's owner-signature finisher joins the absurd pool for its fighter.
+The ATTACKER's owner-signature finisher joins the absurd pool for their KOs.
 No same-execution twice in a row per tier. SKIPPABLE with ANY button/tap → clean
 flush straight to round end (all execution scripts must tolerate mid-flush).
 The old FINISHER! prompt/chord UI is removed.
@@ -491,8 +491,10 @@ Settings row. 'default' = the shipped per-arena themes. Each other station: >=3
 procedural tracks in genre (hiphop: boom-bap drums + bass + sample-ish stabs;
 edm: four-on-floor + supersaw builds/drops; lofi: dusty chill keys + vinyl
 crackle + laid-back drums; rockmetal: distorted power-chord riffs + driving
-double-kick). Station governs MATCH music only (menus keep theme), rotates
-tracks per match, applies LIVE when changed mid-match.
+double-kick). v2.1.1: the station governs ALL music — menus, title, intro,
+results AND matches ('default' = per-context themes). Changing the station swaps
+the currently playing track within ~1 bar on any screen; switching back to
+'default' restores the context-appropriate theme.
 
 ## 27. Camera & crowd rendering (v2.1)
 

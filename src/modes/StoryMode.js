@@ -5,7 +5,7 @@
 // Exported as StoryScreen; registered under the name 'story' by the UI module.
 import { Characters, UnchainedBull } from '../characters/index.js'
 import { ArenaOrder, Arenas } from '../arenas/index.js'
-import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle } from '../ui/uiKit.js'
+import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, hintHTML } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 import { TutorialDirector } from './Tutorial.js'
 
@@ -142,13 +142,31 @@ const STYLE = `
 
 // §24: late-game difficulty comes from BULK, not superhuman skill — AI level
 // stays easy early and caps at 4 while the opponent HP multiplier climbs.
-const STORY_AI_CURVE = [1, 1, 2, 2, 3, 3, 3, 4, 4, 4]
-const STORY_HP_CURVE = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9]
+//
+// v3.1 — the opening chapters were too hard and too long. Three curves now,
+// and the early easing has to come from HP and round count rather than from
+// AI level, because tuningFor() in src/ai/Brain.js clamps to a floor of 1
+// (`Math.max(1, ...)`): there is no level 0 to drop to.
+//   AI:     1 for the first three chapters, then the old ramp, still capped at 4
+//   HP:     starts at 0.7x (was 1.0x) and reaches the same 1.9x peak by ch.10
+//   ROUNDS: chapters 1-3 are a SINGLE round, so an early fight is ~1:00 rather
+//           than a best-of-3. From chapter 4 the campaign settles into best-of-3.
+// Net effect with the v3.1 economy (1:00 round median): ch.1 ~0:45, ch.4 ~2:45,
+// ch.10 ~3:30 — an escalation curve instead of ten flat 8-minute slogs.
+const STORY_AI_CURVE = [1, 1, 1, 2, 2, 3, 3, 3, 4, 4]
+const STORY_HP_CURVE = [0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.45, 1.6, 1.75, 1.9]
+const STORY_ROUNDS_CURVE = [1, 1, 1, 2, 2, 2, 2, 2, 2, 2]
+function curveAt(curve, round) {
+  return curve[Math.max(0, Math.min(curve.length - 1, round - 1))]
+}
 function aiLevelFor(round) {
-  return STORY_AI_CURVE[Math.max(0, Math.min(STORY_AI_CURVE.length - 1, round - 1))]
+  return curveAt(STORY_AI_CURVE, round)
 }
 function hpMultFor(round) {
-  return STORY_HP_CURVE[Math.max(0, Math.min(STORY_HP_CURVE.length - 1, round - 1))]
+  return curveAt(STORY_HP_CURVE, round)
+}
+function roundsToWinFor(round) {
+  return curveAt(STORY_ROUNDS_CURVE, round)
 }
 function arenaFor(round) {
   const id = ArenaOrder[round - 1]
@@ -198,7 +216,7 @@ export class StoryScreen {
     this.cues = []
   }
 
-  render(renderer) { this.backdrop?.render(renderer) }
+  render(renderer, dt) { this.backdrop?.render(renderer, dt) }
 
   update(dt) {
     ensureMusic(this.game, this.musicId)
@@ -277,7 +295,7 @@ export class StoryScreen {
         <div class="sub">${status}</div>
         <div class="sm-menu"></div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game, '<b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> BACK', 'TAP TO SELECT')}
     `)
 
     const items = []
@@ -311,7 +329,7 @@ export class StoryScreen {
         <div class="sub">CHAPTERS CLEARED, ENDINGS, EVERYTHING. NO TAX BENEFITS.</div>
         <div class="sm-menu"></div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game, '<b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> BACK', 'TAP TO SELECT')}
     `)
     this.list = new MenuList(this.game, this.stage.querySelector('.sm-menu'), [
       { label: 'Sell Everything — Start Over', id: 'wipe' },
@@ -341,7 +359,7 @@ export class StoryScreen {
         <div class="sm-h1">PICK YOUR FIGHT</div>
         <div class="sm-menu"></div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> FIGHT &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game, '<b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> FIGHT &nbsp; <b>ESC</b> BACK', 'TAP A CHAPTER TO FIGHT')}
     `)
     const items = []
     for (let r = 1; r <= reach; r++) {
@@ -395,7 +413,7 @@ export class StoryScreen {
           <div class="menu"></div>
         </div>
       </div>
-      <div class="wcs-hintbar"><b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game, '<b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> BACK', 'TAP TO SELECT')}
     `, 'menu')
 
     const card = this.stage.querySelector('.sm-card')
@@ -465,7 +483,7 @@ export class StoryScreen {
         <div class="sub">THE MARKET REMAINS IRRATIONAL LONGER THAN YOU REMAIN CONSCIOUS.</div>
         <div class="sm-menu"></div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> QUIT</div>
+      ${hintHTML(this.game, '<b>↑↓</b> MOVE &nbsp; <b>J / ENTER</b> CONFIRM &nbsp; <b>ESC</b> QUIT', 'TAP TO SELECT')}
     `)
     this.game.audio.announcer('REKT!')
     this.list = new MenuList(this.game, this.stage.querySelector('.sm-menu'), [
@@ -490,8 +508,10 @@ export class StoryScreen {
       p2: { charId: info.charId, control: 'ai', aiLevel: aiLevelFor(round) },
       arenaId: arenaFor(round),
       onEnd: (result) => this.game.screens.goto('story', { result, round }),
-      // §24: opponent bulk curve — combat multiplies P2 max HP by this
-      rules: { p2HpMult: hpMultFor(round) },
+      // §24: opponent bulk curve — combat multiplies P2 max HP by this.
+      // v3.1: roundsToWin rides the same curve so the opening chapters are a
+      // single quick round rather than a best-of-3.
+      rules: { p2HpMult: hpMultFor(round), roundsToWin: roundsToWinFor(round) },
     }
     if (round === 10) params.rules.boss = true
     if (round === 1 && tutorial) params.rules.tutorial = true
@@ -535,7 +555,7 @@ export class StoryScreen {
         waiting for his next move. What does an elephant do with infinite money?</div>
         <div class="sm-menu"></div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> CHOOSE &nbsp; <b>J / ENTER</b> DECIDE THE MARKET'S FATE</div>
+      ${hintHTML(this.game, `<b>↑↓</b> CHOOSE &nbsp; <b>J / ENTER</b> DECIDE THE MARKET'S FATE`, `TAP TO DECIDE THE MARKET'S FATE`)}
     `, 'results')
     if (!replay) {
       this.game.audio.sfx('coins_burst')
@@ -558,7 +578,7 @@ export class StoryScreen {
     this.slides = ENDINGS[key] || ENDINGS.stabilize
     this.slideIdx = -1
     this._setView('ending', `<div class="sm-solid"></div><div class="sm-holder" style="position:absolute;inset:0"></div>
-      <div class="wcs-hintbar"><b>J / ENTER</b> NEXT &nbsp; <b>ESC</b> SKIP</div>`, 'results')
+      ${hintHTML(this.game, '<b>J / ENTER</b> NEXT &nbsp; <b>ESC</b> SKIP', 'TAP ▸ NEXT')}`, 'results')
     this._nextSlide()
   }
 
@@ -594,7 +614,7 @@ export class StoryScreen {
           <div class="crow"><div class="fin">THANKS FOR HODLING</div></div>
         </div>
       </div>
-      <div class="wcs-hintbar"><b>J / ENTER</b> SKIP</div>
+      ${hintHTML(this.game, '<b>J / ENTER</b> SKIP', 'TAP ▸ SKIP')}
     `, 'results')
     this._cue(dur + 1, () => this._finishCredits())
   }

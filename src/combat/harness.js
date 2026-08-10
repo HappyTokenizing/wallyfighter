@@ -9,12 +9,22 @@
 //
 //   node src/combat/harness.js            # 3 matches, seeded RNG
 //   node src/combat/harness.js --level 5
+//   node src/combat/harness.js --duration # §24 pacing check: applies
+//       GameConfig.balance + live-phase damage scaling and asserts the median
+//       even level-3 round lands in the contract's 3-4 minute window
+//       (--hp X --dmg Y override the scales for tuning sweeps)
+//   node src/combat/harness.js --exec     # §23/§24 live-flow check: drives the
+//       REAL MatchScreen headless (2 AI matches) and asserts (a) a KO round
+//       auto-fires an execution BEFORE round:end with no button input, and
+//       (b) the round timer hard-caps a stalled round (TEN SECONDS klaxon,
+//       timeout decision, no execution on time-up)
 import * as THREE from 'three'
 import { Fighter } from './Fighter.js'
 import { AIControl } from './AIControl.js'
 import { SpecialContext } from './SpecialContext.js'
 import { EventBus } from '../core/EventBus.js'
 import { Characters, RosterOrder } from '../characters/index.js'
+import { GameConfig } from '../config/GameConfig.js'
 
 // ---------------------------------------------------------------- seeded RNG
 const seedArg = process.argv.indexOf('--seed')
@@ -269,8 +279,16 @@ function scanHits(match) {
 // ------------------------------------------------------------- match loop
 const ROUND_FRAMES = 60 * 35 // trimmed rounds: 35 simulated seconds
 
-function runMatch(idA, idB, level, report) {
+function runMatch(idA, idB, level, report, opts = {}) {
   const match = new HarnessMatch()
+  // §24 duration mode: arm the real economy chokepoints — maxHpScale reads
+  // game.config.balance in the Fighter ctor, damageScale gates on the live
+  // 'fight' phase in setHp. The default sweep leaves both off (plain 100hp).
+  if (opts.balance) {
+    match.game.config = { balance: opts.balance }
+    match.phase = 'fight'
+  }
+  const roundFrames = opts.roundFrames || ROUND_FRAMES
   const ca = new StrafeAI(level)
   const cb = new StrafeAI(level)
   ca._zPhase = 0
@@ -283,6 +301,7 @@ function runMatch(idA, idB, level, report) {
   const roundWins = [0, 0]
   let maxAbsZ = 0
   let completedRounds = 0
+  const roundSecs = []
 
   const bZ = { min: match.bounds.minZ - 0.05, max: match.bounds.maxZ + 0.05 }
   const bX = { min: match.bounds.minX - 0.05, max: match.bounds.maxX + 0.05 }
@@ -293,7 +312,8 @@ function runMatch(idA, idB, level, report) {
     ca.clearPlan()
     cb.clearPlan()
     let winner = -1
-    for (let fr = 0; fr < ROUND_FRAMES; fr++) {
+    let framesUsed = roundFrames
+    for (let fr = 0; fr < roundFrames; fr++) {
       match.worldFrame++
       match.game.frame++
       try {
@@ -327,20 +347,21 @@ function runMatch(idA, idB, level, report) {
         maxAbsZ = Math.max(maxAbsZ, Math.abs(f.pos.z))
       }
       if (hardErrors.length) break
-      if (fa.hp <= 0) { winner = 1; break }
-      if (fb.hp <= 0) { winner = 0; break }
+      if (fa.hp <= 0) { winner = 1; framesUsed = fr + 1; break }
+      if (fb.hp <= 0) { winner = 0; framesUsed = fr + 1; break }
     }
     if (hardErrors.length) break
     if (winner < 0) winner = fa.hp >= fb.hp ? 0 : 1 // timeout: health decides
     roundWins[winner]++
     completedRounds++
+    roundSecs.push(framesUsed / 60)
     for (const fx of match.fxList) { try { fx.flush() } catch { /* stub */ } }
     match.fxList = []
   }
   match.active = false
   ca.dispose?.()
   cb.dispose?.()
-  report.push({ idA, idB, roundWins, maxAbsZ, completedRounds })
+  report.push({ idA, idB, roundWins, maxAbsZ, completedRounds, roundSecs })
   return roundWins
 }
 
@@ -351,6 +372,177 @@ const level = (() => {
 })()
 
 const roster = RosterOrder.filter((id) => Characters[id])
+
+// ── §24 duration check (node src/combat/harness.js --duration) ──────────────
+// v3.1: the contract is a ~3:00 MATCH, not a 3:00 round. Best-of-3 resolves in
+// 2-3 rounds (2.5 average), so an evenly-matched level-3 ROUND must land near
+// 1:00 — the window below is 0:45-1:20 and the reported match estimate is
+// median x 2.5. Do not "fix" a 1:00 median back up to 3:00; that was the v2.1
+// contract and it produced 8-minute matches.
+// Runs 5 disjoint matchups × 2 rounds under the round cap; --hp / --dmg
+// override GameConfig.balance for tuning sweeps.
+if (process.argv.includes('--duration')) {
+  const num = (flag, dflt) => {
+    const i = process.argv.indexOf(flag)
+    const v = i >= 0 ? Number(process.argv[i + 1]) : NaN
+    return Number.isFinite(v) && v > 0 ? v : dflt
+  }
+  const balance = {
+    maxHpScale: num('--hp', GameConfig.balance.maxHpScale),
+    damageScale: num('--dmg', GameConfig.balance.damageScale),
+  }
+  const capSecs = GameConfig.rules?.roundTime || 300
+  const dPairs = []
+  for (let i = 0; i + 1 < roster.length && dPairs.length < 5; i += 2) dPairs.push([roster[i], roster[i + 1]])
+  const dReport = []
+  for (const [a, b] of dPairs) {
+    runMatch(a, b, level, dReport, { balance, roundFrames: Math.round(capSecs * 60) })
+  }
+  console.error = realError
+  console.warn = realWarn
+  const secs = dReport.flatMap((r) => r.roundSecs).sort((x, y) => x - y)
+  const median = secs.length ? (secs[(secs.length - 1) >> 1] + secs[secs.length >> 1]) / 2 : 0
+  const timeouts = secs.filter((s) => s >= capSecs - 1 / 60).length
+  const mss = (s) => { const t = Math.round(s); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}` }
+  console.log(`\n=== §24 round-duration check: ${dReport.length} matches, level ${level}, ` +
+    `balance hp×${balance.maxHpScale} dmg×${balance.damageScale}, cap ${mss(capSecs)} ===`)
+  for (const r of dReport) {
+    console.log(`  ${r.idA} vs ${r.idB}: ${r.roundSecs.map(mss).join(', ')}`)
+  }
+  console.log(`Rounds: ${secs.length}  median ${mss(median)}  ` +
+    `min ${mss(secs[0] || 0)}  max ${mss(secs[secs.length - 1] || 0)}  timeouts ${timeouts}`)
+  console.log(`Hard errors: ${hardErrors.length}`)
+  for (const e of hardErrors.slice(0, 10)) console.log('  ' + e)
+  // v3.1 window: round median 0:45-1:20 => a 1:52-3:20 best-of-3 match.
+  const inWindow = median >= 45 && median <= 80
+  const ok = !hardErrors.length && secs.length === dPairs.length * 2 && inWindow
+  console.log(`Estimated match (median x 2.5 rounds): ${mss(median * 2.5)}`)
+  console.log(`Round median in 0:45-1:20 window: ${inWindow ? 'YES' : 'NO'}`)
+  console.log(ok ? '\nDURATION CHECK: PASS' : '\nDURATION CHECK: FAIL')
+  process.exit(ok ? 0 : 1)
+}
+
+// ── §23/§24 live-flow check (node src/combat/harness.js --exec) ──────────────
+// Drives the REAL MatchScreen (not the harness mirror) headless through two
+// full AI matches: a forced-KO match must auto-play an execution cutscene
+// between fighter:ko and round:end with zero input, and a stalled short-timer
+// match must hit the hard cap (klaxon warning, timeout decision, no execution).
+if (process.argv.includes('--exec')) {
+  // browser globals the live chain reads bare (camera aspect, cam frustum fit)
+  globalThis.innerWidth = 1280
+  globalThis.innerHeight = 720
+  const { MatchScreen } = await import('./MatchScreen.js')
+  console.error = realError
+  console.warn = realWarn
+  const failures = []
+
+  const makeGame = () => ({
+    config: GameConfig,
+    events: new EventBus(),
+    save: { get: (_k, d) => d, set() {} },
+    input: null, // exhibition mode: both slots AI, HumanControl never built
+    audio: { sfx() {}, music() {}, stopMusic() {}, announcer() {}, crowd() {} },
+    screens: { goto() {} },
+    quality: GameConfig.quality.low,
+    ui: null,
+    frame: 0,
+  })
+
+  function runLive(name, { rules, aiLevel, onFight, maxSecs }) {
+    const ms = new MatchScreen()
+    ms.game = makeGame()
+    const log = []
+    for (const ev of ['round:start', 'round:end', 'execution:start', 'match:end', 'fighter:ko', 'timer', 'announcer']) {
+      ms.game.events.on(ev, (p) => log.push({ ev, p, frame: ms.worldFrame }))
+    }
+    let ended = null
+    try {
+      ms.enter({
+        mode: 'exhibition',
+        p1: { charId: 'wally', control: 'ai', aiLevel },
+        p2: { charId: 'dogey', control: 'ai', aiLevel },
+        arenaId: 'meme-market',
+        rules,
+        onEnd: (r) => { ended = r },
+      })
+    } catch (e) {
+      failures.push(`${name}: enter() threw — ${e.stack?.split('\n')[0]}`)
+      return { log, ended: null }
+    }
+    // The instant-replay viewer is DOM (document/canvas) — out of scope here,
+    // so the recorder is dropped and _endMatch takes the direct results path.
+    ms.replay = null
+    let fightHooked = false
+    const maxFrames = Math.round(maxSecs * 60)
+    for (let i = 0; i < maxFrames && !ended; i++) {
+      if (!fightHooked && ms.phase === 'fight') { fightHooked = true; onFight?.(ms) }
+      try { ms.update(1 / 60) } catch (e) {
+        failures.push(`${name}: update() threw — ${e.stack?.split('\n')[0]}`)
+        break
+      }
+    }
+    if (!ended) failures.push(`${name}: match never ended within ${maxSecs}s of sim time`)
+    try { ms.exit() } catch (e) { failures.push(`${name}: exit() threw — ${e.stack?.split('\n')[0]}`) }
+    return { log, ended }
+  }
+
+  const idx = (log, ev) => log.findIndex((e) => e.ev === ev)
+
+  // -- match 1: forced KO — the auto execution must fire before round:end --
+  {
+    const { log, ended } = runLive('exec', {
+      rules: { roundsToWin: 1, roundTime: 300 },
+      aiLevel: 3,
+      maxSecs: 150,
+      onFight: (ms) => { ms.fighters[1].hp = 1 }, // next clean hit is the killing blow
+    })
+    const iKo = idx(log, 'fighter:ko')
+    const iEx = idx(log, 'execution:start')
+    const iRe = idx(log, 'round:end')
+    const iMe = idx(log, 'match:end')
+    if (iKo < 0) failures.push('exec: no fighter:ko was emitted')
+    if (iEx < 0) failures.push('exec: KO round ended with NO execution:start (§23 auto-fire broken)')
+    if (iRe < 0) failures.push('exec: no round:end was emitted')
+    if (iEx >= 0 && iKo >= 0 && iEx < iKo) failures.push('exec: execution:start fired before the KO')
+    if (iEx >= 0 && iRe >= 0 && iRe < iEx) failures.push('exec: round:end fired before the execution')
+    if (iMe < 0 || (iRe >= 0 && iMe < iRe)) failures.push('exec: match:end missing or out of order')
+    const ex = log[iEx]?.p
+    if (iEx >= 0 && !['basic', 'heavy', 'absurd'].includes(ex?.tier)) {
+      failures.push(`exec: execution tier '${ex?.tier}' is not a §23 tier`)
+    }
+    if (!ended) failures.push('exec: onEnd result was never delivered')
+    console.log(`exec match: ko@${log[iKo]?.frame ?? '-'} execution@${log[iEx]?.frame ?? '-'} ` +
+      `(tier ${ex?.tier ?? '-'}, id ${ex?.id ?? '-'}) roundEnd@${log[iRe]?.frame ?? '-'} winner slot ${ended?.winnerSlot ?? '-'}`)
+  }
+
+  // -- match 2: stalled round — the timer must hard-cap and decide on health --
+  {
+    const { log, ended } = runLive('timeout', {
+      rules: { roundsToWin: 1, roundTime: 12 }, // 2.8x HP + 0.5x dmg: unkillable in 12s
+      aiLevel: 1,
+      maxSecs: 60,
+    })
+    const iEx = idx(log, 'execution:start')
+    const iRe = idx(log, 'round:end')
+    const timerVals = log.filter((e) => e.ev === 'timer').map((e) => e.p.value)
+    const warned = log.some((e) => e.ev === 'announcer' && /TEN SECONDS/.test(e.p?.line || ''))
+    if (idx(log, 'fighter:ko') >= 0) failures.push('timeout: unexpected KO in the stall match')
+    if (iRe < 0) failures.push('timeout: timer expiry never produced round:end')
+    if (iEx >= 0) failures.push('timeout: a time-up decision must NOT play an execution')
+    if (!timerVals.includes(0)) failures.push('timeout: timer never reached 0 (cap not enforced)')
+    if (Math.max(...timerVals, 0) > 12) failures.push(`timeout: timer exceeded roundTime (${Math.max(...timerVals)})`)
+    if (!warned) failures.push('timeout: TEN SECONDS announcer warning never fired (§24)')
+    if (!ended) failures.push('timeout: onEnd result was never delivered')
+    console.log(`timeout match: timer ${Math.max(...timerVals, 0)}->0, ten-second warning ${warned ? 'YES' : 'NO'}, ` +
+      `roundEnd@${log[iRe]?.frame ?? '-'} winner slot ${ended?.winnerSlot ?? '-'}`)
+  }
+
+  console.log(`\nFailures: ${failures.length}`)
+  for (const f of failures) console.log('  ' + f)
+  console.log(failures.length ? '\nEXEC-FLOW CHECK: FAIL' : '\nEXEC-FLOW CHECK: PASS')
+  process.exit(failures.length ? 1 : 0)
+}
+
 const pairs = []
 for (let i = 0; i + 1 < roster.length && pairs.length < 3; i += 2) pairs.push([roster[i], roster[i + 1]])
 while (pairs.length < 3 && roster.length >= 2) pairs.push([roster[0], roster[roster.length - 1]])

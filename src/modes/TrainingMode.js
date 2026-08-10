@@ -7,7 +7,7 @@
 import * as THREE from 'three'
 import { MatchScreen } from '../combat/MatchScreen.js'
 import { RosterOrder } from '../characters/index.js'
-import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle } from '../ui/uiKit.js'
+import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, hintHTML } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 // The dummy: a ControlSource that wants absolutely nothing. AIControl clamps
@@ -148,9 +148,9 @@ export class TrainingScreen {
     this._instrument()
   }
 
-  render(renderer) {
-    if (this.phase === 'pick') this.backdrop?.render(renderer)
-    else this.match?.render(renderer)
+  render(renderer, dt) {
+    if (this.phase === 'pick') this.backdrop?.render(renderer, dt)
+    else this.match?.render(renderer, dt)
   }
 
   // ------------------------------------------------------------------ picker
@@ -171,7 +171,7 @@ export class TrainingScreen {
           <div class="who"><b></b><i></i></div><span class="arr" data-d="1">▶</span></div>
         <div class="wcs-btn tp-start">ENTER THE SIM</div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> ROW &nbsp; <b>←→</b> FIGHTER &nbsp; <b>ENTER</b> NEXT/START &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game, '<b>↑↓</b> ROW &nbsp; <b>←→</b> FIGHTER &nbsp; <b>ENTER</b> NEXT/START &nbsp; <b>ESC</b> BACK', 'TAP THE ARROWS ▸ ENTER THE SIM')}
     `
     this.game.ui.appendChild(this.pickRoot)
     this.pickRows = [...this.pickRoot.querySelectorAll('.tp-pickrow')]

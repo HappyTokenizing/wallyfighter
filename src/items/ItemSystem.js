@@ -680,10 +680,13 @@ export class ItemSystem {
     const z = Math.max(zLo + 0.7, Math.min(zHi - 0.7, p.z ?? 0))
     // Ejection direction: random, but scored by wall clearance so the skitter
     // genuinely LANDS 5-9 m out instead of folding back off a nearby wall
-    // (walls still reflect as a safety net). 8 candidates, roomiest wins.
-    let dir = Math.random() * Math.PI * 2, bestRoom = -1
-    for (let i = 0; i < 8; i++) {
-      const a = Math.random() * Math.PI * 2
+    // (walls still reflect as a safety net). 8 random candidates plus the
+    // toward-arena-center direction (guaranteed roomy even for corner breaks,
+    // where 8 random draws can all face walls); roomiest wins.
+    const centerDir = Math.atan2((zLo + zHi) / 2 - z, (b.minX + b.maxX) / 2 - x)
+    let dir = centerDir, bestRoom = -1
+    for (let i = 0; i < 9; i++) {
+      const a = i === 0 ? centerDir : Math.random() * Math.PI * 2
       const cx = Math.cos(a), cz = Math.sin(a)
       const roomX = cx > 1e-4 ? (b.maxX - 0.7 - x) / cx : cx < -1e-4 ? (b.minX + 0.7 - x) / cx : 99
       const roomZ = cz > 1e-4 ? (zHi - 0.7 - z) / cz : cz < -1e-4 ? (zLo + 0.7 - z) / cz : 99
@@ -692,7 +695,8 @@ export class ItemSystem {
     }
     // horizontal speed tuned so total skitter (launch + bounces at 0.72
     // horizontal restitution) covers roughly 5-9 m before it settles
-    const speed = 7.5 + Math.random() * 3
+    // (headless-measured displacement over 60 breaks: ~5-9 m, median ~7.5)
+    const speed = 6.6 + Math.random() * 2.6
     const y = Math.max(this.floorY + 0.5, Math.min(this.floorY + 3, p.y ?? this.floorY + 0.5))
     mesh.position.set(x, y, z)
     this.scene?.add(mesh)

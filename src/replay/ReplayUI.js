@@ -12,6 +12,7 @@
 // with hard fallbacks so the module never depends on load order.
 import * as THREE from 'three'
 import { el } from '../ui/uiKit.js'
+import { RenderPipeline, renderScene, resetRenderFallback } from '../render/index.js'
 
 const STYLE_ID = 'replay-ui-css'
 const SPEEDS = [0.25, 0.5, 1]
@@ -211,13 +212,38 @@ export function mountReplayViewer(game, container = null) {
   root.appendChild(el('div', 'rp-title', '&#9666;&#9666; CLIP MODE'))
 
   // --- own renderer: never fight the results screen over the shared canvas ---
+  //
+  // v3.0 (GRAPHICS_CONTRACT §8): because this is a SECOND WebGLRenderer with a
+  // second GL context, it cannot borrow game.pipeline — an EffectComposer's
+  // render targets belong to the context that made them. So it gets its OWN
+  // RenderPipeline, disposed in close() alongside the renderer.
+  //
+  // It is built one tier DOWN from the game's, and with DoF and motion blur
+  // off. Reasons: (a) two composers alive at once double the post-processing
+  // VRAM and this one is on screen while the results screen is still holding
+  // the match scene, (b) the clip viewer is scrubbable and DoF/afterimage both
+  // smear when you drag the timeline, (c) an orbiting free camera makes any
+  // temporal accumulation useless. Grade, bloom and AA still match the match,
+  // which is what makes the clip look like the same game.
   let renderer = null
+  let pipeline = null
   try {
     renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' })
     renderer.setPixelRatio(Math.min(devicePixelRatio || 1, game.quality?.pixelRatio || 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     // shadows off in the viewer: cheap, and lights were configured for the match pass
     canvasWrap.appendChild(renderer.domElement)
+    try {
+      const q = { ...(game.quality || {}) }
+      const DOWN = { ultra: 'high', high: 'medium', medium: 'medium', low: 'low' }
+      q.tier = DOWN[q.tier || 'high'] || 'medium'
+      q.post = { ...(q.post || {}), dof: false, motionBlur: false, taa: false }
+      pipeline = new RenderPipeline(renderer, q)
+      renderer.__wcsPipeline = pipeline
+    } catch (e) {
+      console.warn('[replay] viewer pipeline failed — rendering without post', e)
+      pipeline = null
+    }
   } catch (e) {
     console.error('[replay] viewer renderer failed', e)
     const toast = el('div', 'rp-toast', 'REPLAY VIEWER UNAVAILABLE')
@@ -284,6 +310,11 @@ export function mountReplayViewer(game, container = null) {
     btnPlay.innerHTML = replay.playing ? '&#10074;&#10074;' : '&#9654;'
     if (!scrubbing) scrubEl.value = String(Math.round(replay.progress01() * 1000))
     timeEl.textContent = `${fmtTime(replay.progress01() * replay.duration())} / ${fmtTime(replay.duration())}`
+    // The full-fight blob finalizes ASYNC shortly after match:end (MediaRecorder
+    // onstop) — keep the button in step in case the viewer mounted first.
+    const fightReady = !!game.fightRecording?.available
+    const shown = btnFight.style.display !== 'none'
+    if (fightReady !== shown) btnFight.style.display = fightReady ? '' : 'none'
   }
 
   // --- sizing (resize-safe) ---
@@ -291,6 +322,7 @@ export function mountReplayViewer(game, container = null) {
     const w = root.clientWidth || innerWidth
     const h = root.clientHeight || innerHeight
     renderer.setSize(w, h, false)
+    try { pipeline?.setSize(w, h) } catch (e) { console.warn('[replay] viewer pipeline resize threw', e) }
     const cam = replay.camera
     if (cam?.isPerspectiveCamera && h > 0) {
       cam.aspect = w / h
@@ -406,7 +438,9 @@ export function mountReplayViewer(game, container = null) {
     last = now
     try {
       replay.updatePlayback(dt)
-      renderer.render(replay.scene, replay.camera)
+      // `renderer`, not `game`: renderScene reads renderer.__wcsPipeline, which
+      // is the viewer's own pipeline — never the game's (wrong GL context).
+      renderScene(renderer, replay.scene, replay.camera, dt)
     } catch (e) {
       console.error('[replay] viewer frame threw', e)
       close()
@@ -428,9 +462,17 @@ export function mountReplayViewer(game, container = null) {
       replay.exitPlayback() // restores the KO pose exactly for a future reopen
     } catch (e) { console.warn('[replay] viewer close restore threw', e) }
     try {
+      pipeline?.dispose()
+      pipeline = null
+      renderer.__wcsPipeline = null
       renderer.dispose()
       renderer.forceContextLoss?.()
     } catch { /* context already gone */ }
+    // renderScene()'s "post is broken" latch is module-global. If the viewer's
+    // own pipeline tripped it, the GAME's pipeline would stay disabled for the
+    // rest of the session — clear it on the way out so the next match gets a
+    // fresh chance.
+    try { resetRenderFallback() } catch { /* fine */ }
     root.remove()
   }
 

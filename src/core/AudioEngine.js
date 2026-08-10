@@ -63,19 +63,29 @@ export class AudioEngine {
         }
         this._applyVolumes()
       }
-      if (this.ctx.state === 'suspended') this.ctx.resume()
-      if (!this._inited && this.ctx.state !== 'suspended') {
-        this._inited = true
-        try { this.library?.init?.(this) } catch (e) { console.warn('[audio] library init failed', e) }
+      // resume() is async — on mobile the FIRST gesture often finds the context
+      // still 'suspended' synchronously, so finish init when the promise lands.
+      if (this.ctx.state === 'suspended') {
+        this.ctx.resume().then(() => this._finishInit()).catch(() => {})
       }
+      this._finishInit()
     } catch (e) { console.warn('[audio] ensure failed', e) }
+  }
+
+  _finishInit() {
+    if (this._inited || !this.ctx || this.ctx.state === 'suspended') return
+    this._inited = true
+    try { this.library?.init?.(this) } catch (e) { console.warn('[audio] library init failed', e) }
+    // Replay the last music request that arrived before the context unlocked —
+    // without this, mobile's intro (requested pre-gesture) plays silence.
+    if (this._lastMusicReq) this._call('music', this._lastMusicReq)
   }
 
   installLibrary(lib) { this.library = lib }
 
   sfx(name, opts) { this._call('sfx', name, opts) }
-  music(trackId) { this._call('music', trackId) }
-  stopMusic() { this._call('stopMusic') }
+  music(trackId) { this._lastMusicReq = trackId; this._call('music', trackId) }
+  stopMusic() { this._lastMusicReq = null; this._call('stopMusic') }
   announcer(line) { this._call('announcer', line) }
   crowd(mood) { this._call('crowd', mood) }
 

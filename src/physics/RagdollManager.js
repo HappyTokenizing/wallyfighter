@@ -29,8 +29,16 @@ function jointLimits(name) {
 
 const SETTLE_LIN = 0.9
 const SETTLE_ANG = 1.4
-const SETTLE_FRAMES = 20
-const FORCE_SETTLE_TIME = 6.0
+// v2.1 mobile-feel pass: fighters get back up faster — settle confirmation
+// window 20 -> 12 calm frames, force-settle timeout 6s -> 4s.
+const SETTLE_FRAMES = 12
+const FORCE_SETTLE_TIME = 4.0
+// Ground-calm assist (see _updateFull): a downed pile keeps ~8-12 rad/s of
+// pure constraint micro-jitter (near-zero displacement), which stalls the
+// settle detector until the force-settle timeout — piles must be dampable
+// once they lie LOW and translationally slow, or "calm frames" never happen.
+const CALM_MAX_Y = 0.8
+const CALM_LIN = SETTLE_LIN * 1.5
 const PARTIAL_TIME = 0.45
 
 const REGION_BONES = {
@@ -472,7 +480,7 @@ export class RagdollManager {
     const maxZ = Number.isFinite(bounds.maxZ) ? bounds.maxZ : 5.5
     rec.fullTime += dt
 
-    let lin = 0, ang = 0
+    let lin = 0, ang = 0, maxY = -Infinity
     for (const p of Object.values(rec.parts)) {
       const b = p.body
       // NaN rescue — a poisoned body must never write NaN into the bone graph
@@ -515,6 +523,7 @@ export class RagdollManager {
 
       lin += b.velocity.length()
       ang += b.angularVelocity.length()
+      if (b.position.y > maxY) maxY = b.position.y
 
       // Body → bone (world → local via parent inverse; handles mirrored roots).
       const bone = p.bone
@@ -537,7 +546,24 @@ export class RagdollManager {
     }
 
     const n = Math.max(1, Object.keys(rec.parts).length)
-    const settledNow = lin / n < SETTLE_LIN && ang / n < SETTLE_ANG
+    // Settled = slow AND calm — except a pile that lies LOW is judged on
+    // linear velocity alone: the constraint solver sustains ~3-10 rad/s of
+    // in-place angular micro-jitter forever on a downed pile (near-zero
+    // displacement), which otherwise stalls the detector until the
+    // force-settle timeout on EVERY knockdown. A low pile that has stopped
+    // translating is visibly "down"; airborne tumbles keep the strict test.
+    const low = maxY < floorY + CALM_MAX_Y
+    const settledNow = low
+      ? lin / n < CALM_LIN // in-place jitter tolerance, see above
+      : lin / n < SETTLE_LIN && ang / n < SETTLE_ANG
+    // Ground-calm assist: damp the low pile's jitter so the recovery blend
+    // starts from a genuinely still pose.
+    if (!rec.settled && low && lin / n < CALM_LIN) {
+      for (const p of Object.values(rec.parts)) {
+        p.body.velocity.scale(0.86, p.body.velocity)
+        p.body.angularVelocity.scale(0.72, p.body.angularVelocity)
+      }
+    }
     rec.settleFrames = settledNow ? rec.settleFrames + 1 : 0
     if (rec.settleFrames >= SETTLE_FRAMES || rec.fullTime > FORCE_SETTLE_TIME + 0.5) {
       rec.settled = true

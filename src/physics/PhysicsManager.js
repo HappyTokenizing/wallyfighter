@@ -85,7 +85,10 @@ export class PhysicsManager {
 
     this.maxProps = game?.quality?.propLimit ?? 24
     this.maxDebris = game?.quality?.maxDebris ?? 45
-    game?.events?.on?.('quality:changed', () => {
+    // Keep the unsubscribe: one PhysicsManager is built per match, and a
+    // dangling handler would pin the dead manager (CANNON world + arrays)
+    // on the EventBus for the whole session.
+    this._offQuality = game?.events?.on?.('quality:changed', () => {
       this.maxProps = game.quality?.propLimit ?? this.maxProps
       this.maxDebris = game.quality?.maxDebris ?? this.maxDebris
     })
@@ -522,6 +525,8 @@ export class PhysicsManager {
 
   dispose() {
     this._disposed = true
+    try { this._offQuality?.() } catch { /* bus gone — fine */ }
+    this._offQuality = null
     for (const h of [...this.props]) this._removeProp(h)
     for (const d of [...this.debris]) this._removeProp(d)
     for (const s of this.statics) this.world.removeBody(s)

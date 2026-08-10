@@ -6,10 +6,11 @@
 import { Characters, RosterOrder } from '../../characters/index.js'
 import { Arenas } from '../../arenas/index.js'
 import {
-  el, toast, shake, ensureMusic, drawPortrait, statBarsHTML,
-  charName, charTitle, charDef,
+  el, toast, shake, ensureMusic, statBarsHTML,
+  charName, charTitle, charDef, touchUI, hintHTML,
 } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
+import { heroPortrait } from './PortraitStudio.js'
 
 const COLS = 5
 const LOCKED_BIOS = [
@@ -72,9 +73,13 @@ export class SelectScreen {
         <div class="diff-boxes"></div>
         <div class="diff-name"></div>
         <div class="diff-flavor"></div>
-        <div class="diff-hint"><b>←→</b> ADJUST &nbsp; <b>J / ENTER</b> FIGHT &nbsp; <b>ESC</b> BACK</div>
+        <div class="diff-hint">${touchUI(this.game)
+          ? 'TAP A LEVEL TO FIGHT'
+          : '<b>←→</b> ADJUST &nbsp; <b>J / ENTER</b> FIGHT &nbsp; <b>ESC</b> BACK'}</div>
       </div>
-      <div class="wcs-hintbar"><b>←→↑↓</b> MOVE &nbsp; <b>J / ENTER</b> LOCK IN &nbsp; <b>K</b> COSTUME &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game,
+        '<b>←→↑↓</b> MOVE &nbsp; <b>J / ENTER</b> LOCK IN &nbsp; <b>K</b> COSTUME &nbsp; <b>ESC</b> BACK',
+        'TAP A FIGHTER TO LOCK IN')}
     `
     this.game.ui.appendChild(this.root)
     this.headerEl = this.root.querySelector('.sel-header .h2')
@@ -98,7 +103,11 @@ export class SelectScreen {
       const def = charDef(id)
       const slot = el('div', 'sel-slot' + (def ? '' : ' locked'))
       const canvas = document.createElement('canvas')
-      drawPortrait(canvas, id, { locked: !def })
+      // Real 3D bust of the fighter, lit by the portrait rig. Falls back to the
+      // flat doodle instantly and swaps the render in when the bake lands.
+      heroPortrait(this.game, canvas, id, {
+        framing: 'bust', pose: 'idle', look: 'neutral', locked: !def, px: 224,
+      })
       slot.appendChild(canvas)
       if (!def) {
         slot.appendChild(el('div', 'qmark', '???'))
@@ -310,7 +319,7 @@ export class SelectScreen {
 
     if (!data) {
       const ex = this.mode === 'exhibition'
-      drawPortrait(canvas, null, { locked: true })
+      heroPortrait(this.game, canvas, null, { locked: true })
       canvas.classList.remove('costume-b')
       panel.querySelector('.pn').textContent = p === 1 ? (ex ? 'BOT 2' : 'CPU') : (ex ? 'BOT 1' : 'P1')
       panel.querySelector('.pt').textContent = 'WAITING…'
@@ -326,7 +335,6 @@ export class SelectScreen {
     }
 
     const def = charDef(data.id)
-    drawPortrait(canvas, data.id, { locked: !def })
     if (def) {
       panel.querySelector('.pn').textContent = def.name
       panel.querySelector('.pt').textContent = def.title || ''
@@ -342,9 +350,23 @@ export class SelectScreen {
     }
 
     const costume = data.picked ? this.picks[p].costume : this.costumes[p]
-    // the swap must be VISIBLE: tint the portrait (same cheap alt-palette
-    // preview the gallery uses) and show a palette swatch strip that changes
+    // The swap must be VISIBLE. The hue-rotate class is now only the STAND-IN:
+    // it tints the flat doodle while the real costume-B model is being baked,
+    // and drops off the moment the true alt-palette render lands. A palette
+    // swatch strip changes either way.
     canvas.classList.toggle('costume-b', !!(def && costume))
+    // Portrait: full-body hero shot in this corner's colour — red for P1, blue
+    // for the CPU — so the two panels read as opposing corners, not clip art.
+    heroPortrait(this.game, canvas, data.id, {
+      framing: 'hero',
+      pose: data.picked ? 'win' : 'ready',
+      look: p === 0 ? 'p1' : 'p2',
+      costume: costume ? 1 : 0,
+      locked: !def,
+      px: 320,
+      priority: true,
+      onReady: () => canvas.classList.remove('costume-b'),
+    })
     const costumeEl = panel.querySelector('.sel-costume')
     if (def) {
       const chips = (costume
@@ -394,5 +416,5 @@ export class SelectScreen {
     if (input.menuPressed('confirm')) this._confirm()
   }
 
-  render(renderer) { this.backdrop?.render(renderer) }
+  render(renderer, dt) { this.backdrop?.render(renderer, dt) }
 }

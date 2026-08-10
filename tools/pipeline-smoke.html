@@ -1,0 +1,119 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WCS — RenderPipeline smoke test</title>
+<style>
+  html,body { margin:0; height:100%; background:#0b0d12; overflow:hidden } canvas { display:block }
+  #log { position:fixed; left:10px; top:10px; font:12px/1.5 ui-monospace,monospace; color:#9fe8b8;
+         background:rgba(0,0,0,.6); padding:8px 10px; border-radius:6px; white-space:pre;
+         pointer-events:none; max-height:92vh; overflow:hidden } #log b { color:#ffd166 }
+</style>
+<div id="log">booting…</div>
+<script type="module">
+// Standalone proof that the post stack compiles without the game. Renders a few
+// spheres + an emissive cube, walks every tier, exercises every live knob, and
+// publishes the result on window.__smoke for the verifier to read back as JSON.
+import * as THREE from 'three'
+import { RenderPipeline } from '/src/render/Pipeline.js'
+
+const errors = []
+addEventListener('error', (e) => errors.push(String(e.message)))
+for (const lvl of ['warn', 'error']) {
+  const real = console[lvl]
+  console[lvl] = (...a) => { errors.push(lvl + ': ' + a.map(String).join(' ')); real(...a) }
+}
+
+const W = 960, H = 540
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true })
+renderer.setPixelRatio(1); renderer.setSize(W, H)
+renderer.outputColorSpace = THREE.SRGBColorSpace
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+document.body.appendChild(renderer.domElement)
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0x1b2233)
+scene.fog = new THREE.Fog(0x1b2233, 14, 46)
+
+const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 120)
+camera.position.set(5.5, 3.2, 8)
+camera.lookAt(0, 1, 0)
+scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x2a2118, 0.55))
+const key = new THREE.DirectionalLight(0xfff0d8, 2.4)
+key.position.set(6, 9, 4)
+key.castShadow = true
+key.shadow.mapSize.set(1024, 1024)
+scene.add(key)
+
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({ color: 0x596273, roughness: 0.9, metalness: 0 }),
+)
+floor.rotation.x = -Math.PI / 2
+floor.receiveShadow = true
+scene.add(floor)
+
+// Deterministic layout — no Math.random anywhere in the render layer.
+const sphereGeo = new THREE.SphereGeometry(0.7, 40, 28)
+for (let i = 0; i < 6; i++) {
+  const t = i / 6
+  const m = new THREE.Mesh(sphereGeo, new THREE.MeshStandardMaterial({
+    color: new THREE.Color().setHSL(t * 0.7 + 0.05, 0.55, 0.5),
+    roughness: 0.15 + t * 0.7, metalness: i % 2 ? 0.9 : 0.05,
+  }))
+  m.position.set(Math.cos(t * Math.PI * 2) * 3.2, 0.7, Math.sin(t * Math.PI * 2) * 3.2)
+  m.castShadow = m.receiveShadow = true
+  scene.add(m)
+}
+
+// The bloom subject: emissive well above 1.0 so the threshold has something to bite.
+const glow = new THREE.Mesh(
+  new THREE.BoxGeometry(1.1, 1.1, 1.1),
+  new THREE.MeshStandardMaterial({ color: 0x112233, emissive: 0x33ffcc, emissiveIntensity: 6, roughness: 0.4 }),
+)
+glow.position.set(0, 1.4, 0)
+glow.castShadow = true
+scene.add(glow)
+
+const pipeline = new RenderPipeline(renderer, { name: 'High' })
+window.__pipeline = pipeline
+pipeline.autoFocus(glow)
+
+const results = []
+function exercise(tier) {
+  pipeline.setQuality({ name: tier })
+  pipeline.setSize(W, H)
+  pipeline.exposure = 1.05
+  pipeline.setBloom({ strength: 0.5, radius: 0.6, threshold: 0.9 })
+  pipeline.setDoF({ aperture: 0.002, maxblur: 0.006, enabled: true })
+  pipeline.setGrade({ lift: 0.01, gamma: 1, gain: 1.02, saturation: 1.1, temperature: 0.08, contrast: 0.18 })
+  pipeline.setVignette(0.3); pipeline.setGrain(0.03); pipeline.setChromatic(0.4); pipeline.setMotionBlur(0.2)
+  for (let i = 0; i < 8; i++) {
+    if (i === 2) pipeline.impact(1)
+    if (i === 4) pipeline.flash(0x66ccff, 0.5, 6)
+    glow.rotation.y += 0.04
+    pipeline.render(scene, camera, 1 / 60)
+  }
+  results.push(pipeline.stats())
+}
+
+let ok = true
+try {
+  for (const tier of ['low', 'medium', 'high', 'ultra']) exercise(tier)
+  pipeline.setSize(1280, 720); pipeline.render(scene, camera, 1 / 60)
+  pipeline.setSize(W, H)
+  pipeline.enabled = false; pipeline.render(scene, camera, 1 / 60)
+  pipeline.enabled = true
+  pipeline.setQuality({ name: 'High' })
+} catch (e) {
+  ok = false
+  errors.push('threw: ' + (e && e.message))
+}
+
+const gl = renderer.getContext()
+window.__smoke = { ok: ok && errors.length === 0, errors, results, glError: gl.getError() }
+document.getElementById('log').innerHTML =
+  '<b>RenderPipeline smoke</b>\n' + JSON.stringify(window.__smoke, null, 1)
+
+// Keep drawing the final tier so the frame is inspectable on screen.
+;(function loop() { requestAnimationFrame(loop); glow.rotation.y += 0.01; pipeline.render(scene, camera, 1 / 60) })()
+</script>

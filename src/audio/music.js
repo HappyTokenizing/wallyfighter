@@ -851,10 +851,13 @@ function pump(engine, st) {
   }
 }
 
-// ── §26 radio router ─────────────────────────────────────────────────────────
-// settings.radio governs MATCH music only: when a battle_* track is requested
-// and the station isn't 'default', a station track plays instead. Menus, title
-// and results keep their themes (their ids never enter the router).
+// ── §26 radio router (v2.1.1: the station governs ALL music) ────────────────
+// When settings.radio !== 'default', EVERY music request — title, menu, select,
+// results, intro_hype AND battle_* — resolves to one of the active station's
+// tracks ('default' keeps the per-context themes). Each playing track remembers
+// its requested CONTEXT id in `sourceId`, so a live station change (including
+// back to 'default') can restore the right theme even though uiKit's
+// ensureMusic tracker never re-requests a context it already asked for.
 
 const STATION_NAMES = ['hiphop', 'edm', 'lofi', 'rockmetal']
 
@@ -865,8 +868,9 @@ export function radioStation(engine) {
   } catch (e) { return 'default' }
 }
 
-// Round-robin per station (random entry point): every request rotates to the
-// next of the >=3 station tracks — never the same track twice in a row.
+// Round-robin per station (random entry point): every fresh pick rotates to the
+// next of the >=3 station tracks — never the same track twice in a row, and
+// consecutive contexts (e.g. menu → battle) land on DIFFERENT tracks.
 function nextStationTrack(engine, station) {
   const ids = STATION_IDS[station]
   if (!ids || !ids.length) return null
@@ -878,22 +882,29 @@ function nextStationTrack(engine, station) {
 }
 
 // Live station change (save already written; called on 'settings:changed').
-// Swaps the playing MATCH track at the next bar boundary (<= ~1 bar away).
+// Swaps the CURRENTLY PLAYING track at the next bar boundary (<= ~1 bar away)
+// on ANY screen — menus, title, mid-intro, results, matches. Switching back to
+// 'default' restores the context-appropriate theme via the remembered sourceId.
 export function setRadioStation(engine) {
   const s = S(engine)
   if (!s || !s.ctx) return
   if (s.radioSwitchTimer) { clearTimeout(s.radioSwitchTimer); s.radioSwitchTimer = 0; s.radioSwitchFire = null }
   const st = s.music
-  if (!st || !st.sourceId) return // station only governs match music
+  if (!st) return // nothing playing — the next request routes through the new station
   const station = radioStation(engine)
-  if (station === 'default') { if (st.id === st.sourceId) return }
-  else if ((STATION_IDS[station] || []).includes(st.id)) return // already on-station
-  const src = st.sourceId
+  const src = st.sourceId || st.id // requested CONTEXT id, not the resolved station id
+  if (station === 'default') { if (st.id === src) return } // already on its theme
+  else if (st.station === station && (STATION_IDS[station] || []).includes(st.id)) return // already on-station
   const stepDur = 60 / st.spec.bpm / 4
   const barDur = stepDur * 16
-  let delay = st.nextTime - s.ctx.currentTime + (16 - (st.step % 16)) * stepDur
+  // Slow (e.g. lofi ~70-82bpm) bars run ~2.9-3.4s — switch on the HALF-bar
+  // there so a station change always lands within the spec's ~2s, while fast
+  // tracks keep the full bar boundary. Hard cap at min(barDur, 2.0).
+  const grid = barDur > 2.0 ? 8 : 16
+  let delay = st.nextTime - s.ctx.currentTime + (grid - (st.step % grid)) * stepDur
   if (!(delay > 0.05)) delay = 0.05
-  if (delay > barDur) delay = barDur
+  const cap = Math.min(barDur, 2.0)
+  if (delay > cap) delay = cap
   const fire = () => {
     s.radioSwitchTimer = 0; s.radioSwitchFire = null
     if (S(engine).music !== st) return // something else took over — stand down
@@ -915,20 +926,29 @@ export function startMusic(engine, trackId) {
     id = 'battle_meme_market'
     spec = tracks[id]
   }
-  if (!spec) { console.debug('[audio] unknown music track:', trackId); return }
-  // §26: battle tracks may reroute to the active radio station. sourceId keeps
-  // the original arena theme so a mid-match station change can route back.
-  let sourceId = null
-  if (typeof id === 'string' && id.startsWith('battle_')) {
-    sourceId = id
-    const station = radioStation(engine)
-    if (station !== 'default') {
-      const rid = nextStationTrack(engine, station)
-      if (rid && tracks[rid]) { id = rid; spec = tracks[rid] }
-    }
+  if (!spec) {
+    console.debug('[audio] unknown music track:', trackId)
+    // Boot-silence hardening: a bad id must never leave the game silent. If
+    // something is already playing, keep it; otherwise fall back to the title.
+    if (s.music) return
+    id = 'title'
+    spec = tracks.title
+  }
+  // §26 v2.1.1: EVERY request may reroute to the active radio station.
+  // sourceId keeps the requested CONTEXT id (title/menu/select/results/
+  // intro_hype/battle_*) so a station change can route back to the theme.
+  const sourceId = id
+  const station = radioStation(engine)
+  if (station !== 'default') {
+    // Stable per-context pick: re-requesting the context that's already
+    // playing on this station keeps its current track (no restart, no re-roll).
+    if (s.music && s.music.station === station && s.music.sourceId === sourceId) return
+    const rid = nextStationTrack(engine, station)
+    if (rid && tracks[rid]) { id = rid; spec = tracks[rid] }
   }
   if (s.music?.id === id) {
-    if (sourceId) s.music.sourceId = sourceId
+    s.music.sourceId = sourceId
+    s.music.station = station
     return // already grooving
   }
   stopMusic(engine)
@@ -981,7 +1001,7 @@ export function startMusic(engine, trackId) {
   for (const ch of spec.pad || []) (padAt[ch.step] = padAt[ch.step] || []).push(ch)
 
   const st = {
-    id, sourceId, spec, bus, echoSend, leadOut, padAt, crackleSrc,
+    id, sourceId, station, spec, bus, echoSend, leadOut, padAt, crackleSrc,
     step: 0, nextTime: ctx.currentTime + 0.08, timer: 0,
   }
   st.timer = setInterval(() => {

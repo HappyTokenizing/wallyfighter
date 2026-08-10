@@ -6,11 +6,19 @@
 // game.input.bindings[0] is the plain merged object InputManager reads every
 // frame, so we mutate it in place — and persist via game.save.set('controls.p1')
 // for the next boot.
-import { el, ensureMusic, formatKey, toast } from '../uiKit.js'
+import { el, ensureMusic, formatKey, toast, touchUI, hintHTML } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 import { GameConfig } from '../../config/GameConfig.js'
 
-const QUALITY_ORDER = ['low', 'medium', 'high']
+// v3.0: derived from GameConfig.quality so a new tier (e.g. 'ultra') shows up
+// here automatically. The explicit list is only an ordering hint — anything in
+// GameConfig that is not named here is appended, so the row can never desync
+// from the config again.
+const QUALITY_ORDER = (() => {
+  const preferred = ['low', 'medium', 'high', 'ultra']
+  const all = Object.keys(GameConfig.quality || {})
+  return [...preferred.filter((k) => all.includes(k)), ...all.filter((k) => !preferred.includes(k))]
+})()
 const PHYSICS_ORDER = ['standard', 'silly', 'unhinged']
 // order puts the default ('cartoon' — matches GameConfig.gore and the §15 gore
 // contract) in the middle: NO GORE ◀ CARTOON DAMAGE ▶ MAXIMUM CHAOS
@@ -48,7 +56,9 @@ export class SettingsScreen {
           <div class="pad-note">GAMEPADS: PLUG IN &amp; GO — STANDARD MAPPING, START = PAUSE</div>
         </div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> ROW &nbsp; <b>←→</b> ADJUST / PLAYER &nbsp; <b>ENTER</b> SELECT / REBIND &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game,
+        '<b>↑↓</b> ROW &nbsp; <b>←→</b> ADJUST / PLAYER &nbsp; <b>ENTER</b> SELECT / REBIND &nbsp; <b>ESC</b> BACK',
+        'TAP A ROW TO ADJUST')}
     `
     this.game.ui.appendChild(this.root)
 
@@ -285,7 +295,9 @@ export class SettingsScreen {
       status.classList.add('warn')
       status.textContent = '! DUPLICATE KEYS HIGHLIGHTED — ONE KEY, TWO JOBS'
     } else {
-      status.textContent = 'CLICK OR PRESS ENTER ON A ROW TO REBIND'
+      status.textContent = touchUI(this.game)
+        ? 'KEY REBINDS NEED A PHYSICAL KEYBOARD'
+        : 'CLICK OR PRESS ENTER ON A ROW TO REBIND'
     }
   }
 
@@ -379,5 +391,5 @@ export class SettingsScreen {
     }
   }
 
-  render(renderer) { this.backdrop.render(renderer) }
+  render(renderer, dt) { this.backdrop.render(renderer, dt) }
 }

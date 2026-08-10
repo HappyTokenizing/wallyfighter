@@ -27,9 +27,12 @@ const CODE_GLYPHS = {
   Enter: 'ENTER', Escape: 'ESC', Backspace: 'BKSP', Tab: 'TAB',
   ArrowLeft: '◀', ArrowRight: '▶', ArrowUp: '▲', ArrowDown: '▼',
 }
+// Glyphs match the v2.1 touch overlay: ATTACK is the light button, BLOCK is a
+// hold button in the right cluster, SUPER is a long-press on SPEC (full meter),
+// and the GRAB button reads USE while an item is held.
 const TOUCH_GLYPHS = {
-  jump: 'JUMP', light: 'LIGHT', heavy: 'HEAVY', kick: 'KICK', block: 'BLOCK',
-  grab: 'GRAB', special: 'SPECIAL', super: 'SUPER', item: 'ITEM', crouch: 'CROUCH',
+  jump: 'JUMP', light: 'ATTACK', heavy: 'HEAVY', kick: 'KICK', block: 'BLOCK',
+  grab: 'GRAB', special: 'SPEC', super: 'HOLD SPEC', item: 'USE', crouch: 'CROUCH',
 }
 
 function codeGlyph(code) {
@@ -321,7 +324,7 @@ export class TutorialDirector {
         this._forcedFinisher = true
         if (!this._finisherAnnounced) {
           this._finisherAnnounced = true
-          try { this.game.events.emit('finisher:ready', { slot: 0 }) } catch { /* HUD optional */ }
+          // v2.1 (§23): finisher:ready prompt removed — KO auto-plays the execution
           try { this.match.say('FINISH THE POSITION!', 0) } catch { /* announcer optional */ }
         }
         break

@@ -34,7 +34,7 @@ class ExhibitionRedirect {
     this.backdrop?.update(dt)
     this.game.screens.goto('select', { mode: 'exhibition' })
   }
-  render(renderer) { this.backdrop?.render(renderer) }
+  render(renderer, dt) { this.backdrop?.render(renderer, dt) }
 }
 
 export function registerScreens(game) {

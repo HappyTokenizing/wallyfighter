@@ -3,7 +3,7 @@
 // screen). Combat never touches DOM; everything here reacts to events.
 // v1.1: AI slots are tagged CPU (local 2P is gone), and each meter box carries
 // a HELD ITEM slot fed by the §14 item events.
-import { el, UIState, drawPortrait, charName, formatKey } from './uiKit.js'
+import { el, UIState, drawPortrait, charName, formatKey, touchUI } from './uiKit.js'
 import { GameConfig } from '../config/GameConfig.js'
 
 const KO_FLAVOR = ['LIQUIDATED!', 'REKT!', 'RUGGED!', 'MARGIN CALLED!', 'DELISTED!']
@@ -127,7 +127,9 @@ export class Hud {
     // (versus/training/playground/exhibition) to the main menu
     this.matchMode = params.mode || stash.mode || 'versus'
     const rules = params.rules || stash.rules || GameConfig.rules
-    this.roundTime = rules.roundTime ?? 99
+    // v2.1 (§24): the config default is 300 (5:00) — seed the readout from the
+    // same chain combat uses so a mode passing partial rules never shows 99.
+    this.roundTime = rules.roundTime ?? GameConfig.rules?.roundTime ?? 300
     this.roundsToWin = rules.roundsToWin ?? 2
     this.wins = [0, 0]
     this.paused = false
@@ -555,7 +557,7 @@ export class Hud {
       dur: 1900,
       show: () => {
         item.el = el('div', 'hud-execstamp',
-          'FINISH THE POSITION!<small>ANY BUTTON TO SKIP</small>')
+          `FINISH THE POSITION!<small>${touchUI(this.game) ? 'TAP TO SKIP' : 'ANY BUTTON TO SKIP'}</small>`)
         this.root.appendChild(item.el)
         item.outT = this._later(() => item.el?.classList.add('out'), 1650)
       },

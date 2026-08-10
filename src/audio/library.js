@@ -7,7 +7,7 @@
 // once (see below) to hook automatic event-driven flavor.
 import { ensureSetup } from './synth.js'
 import { playSfx } from './sfx.js'
-import { startMusic, stopMusic as haltMusic } from './music.js'
+import { startMusic, stopMusic as haltMusic, setRadioStation } from './music.js'
 import { announce } from './voice.js'
 import { setCrowd } from './crowd.js'
 
@@ -83,6 +83,14 @@ export function wireAudioEvents(game) {
   }))
 
   offs.push(game.events.on('match:start', () => audio.crowd('idle')))
+
+  // §26 v2.1.1: radio station applies LIVE on ANY screen — SettingsScreen
+  // persists settings.radio and broadcasts it; the router swaps whatever is
+  // playing (menu, title, intro, results or match) to the new station within
+  // ~1 bar, and back to the context theme when set to 'default'.
+  offs.push(game.events.on('settings:changed', ({ key } = {}) => {
+    if (key === 'settings.radio') setRadioStation(audio)
+  }))
 
   return () => { for (const off of offs) { try { off() } catch (e) { /* noop */ } } }
 }

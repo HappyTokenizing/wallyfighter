@@ -2154,7 +2154,7 @@
 .mv-tablewrap .k-light, .mv-tablewrap .k-heavy, .mv-tablewrap .k-kick { color: #cfd6ff; }
 .mv-tablewrap .k-launcher { color: #7fe7ff; }
 .mv-tablewrap .k-grab { color: #ffb74d; }
-.mv-tablewrap .k-special { color: var(--wcs-purple); }
+.mv-tablewrap .k-special { color: var(--wcs-gold); }
 .mv-tablewrap .k-super { color: var(--wcs-gold); }
 .mv-tablewrap .k-finisher { color: var(--wcs-red); letter-spacing: 1px; }
 .mv-tablewrap tr.joke td { color: #59608c; font-style: italic; }
@@ -2392,18 +2392,49 @@
   background: linear-gradient(180deg, #ffe98a, var(--wcs-gold) 45%, #e0a51d);
   text-shadow: none;
 }
-/* v2.1 simplified scheme: 4-button diamond (ATTACK big at the thumb's rest,
-   HEAVY right, SPECIAL left, GRAB/ITEM top) + a small JUMP tucked in the
-   corner (present only while settings.jumpEnabled). No kick button — light
-   chains cover its role on touch. */
+/* v2.1 simplified scheme: 5-button cluster (ATTACK big at the thumb's rest,
+   HEAVY right, SPECIAL left, GRAB/ITEM top, BLOCK bottom-left) + a small JUMP
+   tucked in the corner (present only while settings.jumpEnabled). No kick
+   button — light chains cover its role on touch. */
 .wcs-touch-btn.primary { width: 64px; height: 64px; font-size: 12px; }
 .wcs-touch-btn.big { width: 78px; height: 78px; font-size: 13px; }
 .wcs-touch-btn.small { width: 44px; height: 44px; font-size: 9px; }
 .wcs-touch-btn.tb-attack { right: 96px; bottom: 24px; }
 .wcs-touch-btn.tb-heavy { right: 22px; bottom: 106px; color: #ff9d7a; }
-.wcs-touch-btn.tb-special { right: 178px; bottom: 106px; color: var(--wcs-purple); }
+.wcs-touch-btn.tb-special { right: 178px; bottom: 106px; color: var(--wcs-gold); }
 .wcs-touch-btn.tb-grab { right: 100px; bottom: 182px; color: #ffb74d; }
+.wcs-touch-btn.tb-block { right: 186px; bottom: 28px; color: var(--wcs-green); }
 .wcs-touch-btn.tb-jump { right: 20px; bottom: 196px; color: #7fe7ff; }
+
+/* BLOCK hold state: green guard glow instead of the shared gold press so a
+   held guard reads differently from an attack press */
+.wcs-touch-btn.tb-block.active {
+  color: #06230f;
+  background: linear-gradient(180deg, #9dffbe, var(--wcs-green) 45%, #12994a);
+  box-shadow: 0 0 16px rgba(43, 255, 106, 0.6), 0 4px 0 #000;
+}
+/* one-time first-match hint: pulse the button, label floats above */
+.wcs-touch-btn.tb-block.hint {
+  opacity: 1;
+  animation: wcs-block-hint 1.15s ease-in-out infinite;
+}
+.wcs-touch-btn.tb-block.hint::after {
+  content: 'HOLD TO BLOCK';
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--wcs-green);
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+@keyframes wcs-block-hint {
+  0%, 100% { box-shadow: 0 0 4px rgba(43, 255, 106, 0.3), 0 4px 0 #000; }
+  50% { box-shadow: 0 0 22px rgba(43, 255, 106, 0.9), 0 4px 0 #000; }
+}
 
 /* SPECIAL long-press: conic ring (bg set inline by JS) masked to a rim; it
    fills over 600ms while a full-meter hold charges the SUPER */
@@ -2438,46 +2469,6 @@
   opacity: 0.6;
 }
 
-/* BLOCK zone: hold anywhere on the left half ABOVE the stick zone. Invisible
-   until touched; .hint outlines it once, on the first match ever. */
-.wcs-touch-blockzone {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 50vw;
-  height: 28vh;
-  pointer-events: auto;
-  touch-action: none;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-}
-.wcs-touch-blockzone .bz-tag {
-  margin-bottom: 8px;
-  font-family: var(--wcs-font);
-  font-size: 13px;
-  letter-spacing: 3px;
-  color: var(--wcs-green);
-  text-shadow: 1px 1px 0 #000;
-  opacity: 0;
-  transition: opacity 0.15s;
-  pointer-events: none;
-}
-.wcs-touch-blockzone.active {
-  background: radial-gradient(ellipse at 50% 65%, rgba(43, 255, 106, 0.16), transparent 72%);
-}
-.wcs-touch-blockzone.active .bz-tag { opacity: 0.9; }
-.wcs-touch-blockzone.hint {
-  outline: 3px dashed rgba(43, 255, 106, 0.6);
-  outline-offset: -10px;
-  animation: wcs-bz-hint 1.15s ease-in-out infinite;
-}
-.wcs-touch-blockzone.hint .bz-tag { opacity: 1; }
-.wcs-touch-blockzone.hint .bz-tag::after { content: ' — HOLD ANYWHERE HERE'; color: #d8ffe6; }
-@keyframes wcs-bz-hint {
-  0%, 100% { background: rgba(43, 255, 106, 0.02); }
-  50% { background: rgba(43, 255, 106, 0.1); }
-}
 /* pause chip — clear of the health bars and the center timer */
 .wcs-touch-btn.tb-pause {
   width: 40px;

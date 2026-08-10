@@ -2,7 +2,8 @@
 // Auto-advances to the match in ~2.1s; any input skips. Stashes the match
 // params so the results screen can offer a rematch.
 import { Arenas } from '../../arenas/index.js'
-import { el, UIState, drawPortrait, charName, charTitle, stopMusicNow } from '../uiKit.js'
+import { el, UIState, charName, charTitle, stopMusicNow } from '../uiKit.js'
+import { heroPortrait } from './PortraitStudio.js'
 
 export class VsScreen {
   constructor(game) { this.game = game }
@@ -34,9 +35,19 @@ export class VsScreen {
       <div class="vs-flash"></div>
     `
     this.game.ui.appendChild(this.root)
+    // The two corners are lit as opposing corners: full-body hero shots, red key
+    // and rim on the left, cold cyan on the right, each on its own plinth with
+    // its own contact shadow. Same canvases, same boxes, same animation — the
+    // only thing that changed is what is inside them.
     const canvases = this.root.querySelectorAll('canvas')
-    drawPortrait(canvases[0], p1.charId)
-    drawPortrait(canvases[1], p2.charId)
+    heroPortrait(this.game, canvases[0], p1.charId, {
+      framing: 'hero', pose: 'entrance', look: 'p1',
+      costume: p1.costume ? 1 : 0, px: 512, priority: true,
+    })
+    heroPortrait(this.game, canvases[1], p2.charId, {
+      framing: 'hero', pose: 'entrance', look: 'p2',
+      costume: p2.costume ? 1 : 0, px: 512, priority: true,
+    })
 
     stopMusicNow(this.game)
     this.game.audio.sfx('bell')

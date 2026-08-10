@@ -1,6 +1,6 @@
 // Fake retro loading screen — everything is procedural so this is pure vibes.
 // Auto-advances to 'title' in ~1.5s; any key/click skips immediately.
-import { el } from '../uiKit.js'
+import { el, touchUI } from '../uiKit.js'
 import { GameConfig } from '../../config/GameConfig.js'
 
 const TICKER_LINES = [
@@ -32,7 +32,7 @@ export class LoadingScreen {
       <div class="load-bar"><div class="load-bar-fill"></div></div>
       <div class="load-pct">0%</div>
       <div class="load-ticker"></div>
-      <div class="load-hint">PRESS ANY KEY TO SKIP (NOBODY EVER WAITS)</div>
+      <div class="load-hint">${touchUI(this.game) ? 'TAP TO SKIP (NOBODY EVER WAITS)' : 'PRESS ANY KEY TO SKIP (NOBODY EVER WAITS)'}</div>
     `
     this.game.ui.appendChild(this.root)
     this.fillEl = this.root.querySelector('.load-bar-fill')
@@ -56,7 +56,7 @@ export class LoadingScreen {
     this.done = true
     // first boot plays the intro cinematic once; every boot after that goes
     // straight to the title. The flag is set NOW so a mid-intro refresh never
-    // loops the player back into it. 'Replay Intro' on the menu re-enters it.
+    // loops the player back into it. Settings → REPLAY INTRO re-enters it (v2.1).
     if (!this.game.save.get('introSeen', false) && this.game.screens.screens.has('intro')) {
       this.game.save.set('introSeen', true)
       this.game.screens.goto('intro')

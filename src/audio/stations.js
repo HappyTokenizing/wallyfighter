@@ -50,9 +50,12 @@ export function buildRadioTracks() {
   if (RADIO) return RADIO
 
   // ── INTRO HYPE (§22) — driving, rising energy under the fighter-roll-call.
-  // E minor, 16 bars in three escalations: pulse → groove → full anthem, with
-  // noise risers ramping each section into the next. Loops hot on a V chord.
-  const ihRoots = [40, 40, 36, 38, 40, 40, 36, 38, 40, 36, 45, 47, 40, 36, 38, 47]
+  // E minor, 56 bars @146bpm (~92s loop): pulse → groove → anthem → breakdown →
+  // anthem B → bridge climb → anthem C → snare-roll build → final anthem →
+  // turnaround, noise risers ramping every seam. The crowd is about to riot.
+  // Sections (bars): S1 pulse 0-3 · S2 groove 4-7 · S3 anthem 8-15 ·
+  // S4 breakdown 16-19 · S5 anthem 20-27 · S6 bridge 28-31 · S7 anthem 32-39 ·
+  // S8 build 40-43 · S9 anthem 44-51 · S10 turnaround 52-55.
   const ihChords = {
     40: [64, 67, 71], // Em
     36: [64, 67, 72], // C
@@ -60,42 +63,146 @@ export function buildRadioTracks() {
     45: [69, 73, 76], // A (dorian lift)
     47: [71, 75, 78], // B (the "here we GO" dominant)
   }
+  const ihAnthem = [40, 36, 45, 47, 40, 36, 38, 47]
+  const ihRoots = [
+    40, 40, 36, 38,   // S1 pulse
+    40, 40, 36, 38,   // S2 groove
+    ...ihAnthem,      // S3 anthem A
+    36, 36, 45, 47,   // S4 breakdown
+    ...ihAnthem,      // S5 anthem B
+    45, 47, 36, 38,   // S6 bridge
+    ...ihAnthem,      // S7 anthem C
+    36, 38, 45, 47,   // S8 build
+    ...ihAnthem,      // S9 final anthem
+    40, 36, 38, 47,   // S10 turnaround
+  ]
+  // the big singable motif — reused each anthem pass, drums escalate around it
+  const ihAnthemLead = (o) => [
+    [o + 0, 0, 76, 4], [o + 0, 4, 79, 2], [o + 0, 6, 76, 2], [o + 0, 8, 83, 6], [o + 0, 14, 81, 1],
+    [o + 1, 0, 79, 4], [o + 1, 4, 76, 2], [o + 1, 8, 74, 4], [o + 1, 12, 71, 2],
+    [o + 2, 0, 72, 4], [o + 2, 4, 76, 2], [o + 2, 6, 79, 2], [o + 2, 8, 84, 6],
+    [o + 3, 0, 83, 2], [o + 3, 2, 81, 1], [o + 3, 4, 79, 2], [o + 3, 8, 74, 4], [o + 3, 12, 78, 2],
+    [o + 4, 0, 76, 4], [o + 4, 4, 79, 2], [o + 4, 6, 81, 2], [o + 4, 8, 83, 4], [o + 4, 12, 84, 2],
+    [o + 5, 0, 84, 4], [o + 5, 4, 83, 2], [o + 5, 8, 79, 4], [o + 5, 12, 76, 2],
+    [o + 6, 0, 74, 2], [o + 6, 2, 76, 1], [o + 6, 4, 78, 2], [o + 6, 8, 81, 4], [o + 6, 12, 83, 2],
+    [o + 7, 0, 83, 2], [o + 7, 4, 81, 2], [o + 7, 8, 78, 2], [o + 7, 10, 75, 1], [o + 7, 12, 71, 2], [o + 7, 14, 75, 1],
+  ]
+  // bridge climb (bars 28-31, A B C D): 8th-note chord arps stepping upward
+  const ihBridgeArp = []
+  ;[45, 47, 36, 38].forEach((r, i) => {
+    const tn = ihChords[r]
+    const ord = [0, 1, 2, 1, 0, 1, 2, 1]
+    for (let s = 0; s < 8; s++) ihBridgeArp.push([28 + i, s * 2, tn[ord[s]], 1])
+  })
+  const IH_K4 = 'x...x...x...x...'
+  const IH_SN = '....x.......x...'
+  const IH_H8 = 'x.x.x.x.x.x.x.x.'
+  const IH_H16 = 'x.xxx.xxx.xxx.xx'
+  const IH_FILL = 'x...x...x..xx.xx'
+  const IH_BAR1 = 'x...............'
+  const ihCrash = rep(EMPTY, 56)
+  for (const b of [8, 20, 24, 32, 36, 44, 48, 52]) ihCrash[b] = IH_BAR1
+  const ihTom = rep(EMPTY, 56)
+  ihTom[7] = 'x..x..x.x..x..x.'
+  ihTom[19] = '............x.x.'
+  for (const b of [28, 29, 30, 31]) ihTom[b] = 'x..x..x.x..x..x.'
+  ihTom[43] = 'x..x..x.x..xxxx.'
+  const ihRiser = rep(EMPTY, 56)
+  for (const b of [2, 6, 14, 18, 30, 42, 50, 54]) ihRiser[b] = IH_BAR1
   const intro_hype = {
-    bpm: 146, bars: 16, gain: 0.42, leadWave: 'sawtooth', bassWave: 'sawtooth',
+    bpm: 146, bars: 56, gain: 0.42, leadWave: 'sawtooth', bassWave: 'sawtooth',
     leadVol: 0.2, bassVol: 0.4, bassCutoff: 1000,
     padStyle: 'supersaw', pump: true, padVol: 0.095, padCutoff: 4200,
     riserBars: 2,
     kickOpts: { f0: 165, f1: 50, dur: 0.1, vol: 0.85 },
     drums: {
-      kick: [...rep('x.......x.......', 4), ...rep('x...x...x...x...', 11), 'x...x...x..xx.xx'],
-      snare: [...rep(EMPTY, 4), ...rep('....x.......x...', 11), '....x.......xx.x'],
-      hat: [...rep('....x.......x...', 4), ...rep('x.x.x.x.x.x.x.x.', 4), ...rep('x.xxx.xxx.xxx.xx', 8)],
-      ohat: [...rep(EMPTY, 8), ...rep('..x...x...x...x.', 8)],
-      crash: [...rep(EMPTY, 8), 'x...............', ...rep(EMPTY, 3), 'x...............', ...rep(EMPTY, 3)],
-      tom: [...rep(EMPTY, 7), 'x..x..x.x..x..x.', ...rep(EMPTY, 8)],
-      riser: [...rep(EMPTY, 2), 'x...............', ...rep(EMPTY, 3), 'x...............',
-        ...rep(EMPTY, 7), 'x...............', EMPTY],
+      kick: [
+        ...rep('x.......x.......', 4),            // S1 pulse
+        ...rep(IH_K4, 4),                          // S2
+        ...rep(IH_K4, 7), IH_FILL,                 // S3
+        ...rep('x.......x.......', 4),             // S4 breakdown
+        ...rep(IH_K4, 8),                          // S5
+        ...rep('x.......x.......', 4),             // S6 (toms carry it)
+        ...rep(IH_K4, 7), IH_FILL,                 // S7
+        ...rep(IH_K4, 4),                          // S8
+        ...rep(IH_K4, 8),                          // S9
+        ...rep(IH_K4, 3), IH_FILL,                 // S10
+      ],
+      snare: [
+        ...rep(EMPTY, 4),                          // S1
+        ...rep(IH_SN, 4),                          // S2
+        ...rep(IH_SN, 8),                          // S3
+        ...rep(EMPTY, 3), '............x...',      // S4
+        ...rep(IH_SN, 8),                          // S5
+        ...rep(IH_SN, 4),                          // S6
+        ...rep(IH_SN, 8),                          // S7
+        IH_K4, IH_K4, IH_H8, 'x.x.x.x.xxxxxxxx',   // S8 snare-roll build
+        ...rep(IH_SN, 7), '....x.......xx.x',      // S9
+        ...rep(IH_SN, 3), '....x..x....xx.x',      // S10
+      ],
+      hat: [
+        ...rep('....x.......x...', 4),             // S1
+        ...rep(IH_H8, 4),                          // S2
+        ...rep(IH_H16, 8),                         // S3
+        ...rep('....x.......x...', 4),             // S4
+        ...rep(IH_H16, 8),                         // S5
+        ...rep(IH_H8, 4),                          // S6
+        ...rep(IH_H16, 8),                         // S7
+        ...rep(IH_H8, 4),                          // S8
+        ...rep(IH_H16, 8),                         // S9
+        ...rep(IH_H16, 4),                         // S10
+      ],
+      ohat: [
+        ...rep(EMPTY, 20), ...rep('..x...x...x...x.', 8),   // quiet until S5
+        ...rep(EMPTY, 4), ...rep('..x...x...x...x.', 8),    // S6 rest, S7 on
+        ...rep(EMPTY, 4), ...rep('..x...x...x...x.', 12),   // S8 rest, S9+S10 on
+      ],
+      crash: ihCrash,
+      tom: ihTom,
+      riser: ihRiser,
     },
     bass: [
       ...bassFromRoots(ihRoots.slice(0, 4), [[0, 0, 8], [8, 0, 8]]),
-      ...bassFromRoots(ihRoots.slice(4), [[0, 0, 1], [2, 0, 1], [4, 0, 1], [6, 0, 1], [8, 0, 1], [10, 0, 1], [12, 0, 1], [14, 0, 1]]),
+      ...bassFromRoots(ihRoots.slice(4, 16), [[0, 0, 1], [2, 0, 1], [4, 0, 1], [6, 0, 1], [8, 0, 1], [10, 0, 1], [12, 0, 1], [14, 0, 1]]),
+      ...bassFromRoots(ihRoots.slice(16, 20), [[0, 0, 8], [8, 0, 8]]),
+      ...bassFromRoots(ihRoots.slice(20, 28), [[0, 0, 1], [2, 0, 1], [4, 0, 1], [6, 0, 1], [8, 0, 1], [10, 0, 1], [12, 0, 1], [14, 0, 1]]),
+      ...bassFromRoots(ihRoots.slice(28, 32), [[0, 0, 2], [4, 0, 2], [8, 0, 2], [12, 0, 2]]),
+      ...bassFromRoots(ihRoots.slice(32, 40), [[0, 0, 1], [2, 0, 1], [4, 0, 1], [6, 0, 1], [8, 0, 1], [10, 0, 1], [12, 0, 1], [14, 0, 1]]),
+      ...bassFromRoots(ihRoots.slice(40, 44), [[0, 0, 2], [4, 0, 2], [8, 0, 2], [12, 0, 2]]),
+      ...bassFromRoots(ihRoots.slice(44, 56), [[0, 0, 1], [2, 0, 1], [4, 0, 1], [6, 0, 1], [8, 0, 1], [10, 0, 1], [12, 0, 1], [14, 0, 1]]),
     ],
     pad: padWholeBars(ihRoots, ihChords),
-    lead: notes(16 * 16, [
-      // section 2 — short calls answering the roll-call
+    lead: notes(56 * 16, [
+      // S2 — short calls answering the roll-call
       [4, 8, 76, 2], [4, 12, 79, 2],
       [5, 8, 74, 2], [5, 12, 71, 2],
       [6, 8, 72, 2], [6, 12, 76, 2],
       [7, 8, 78, 2], [7, 12, 79, 2], [7, 14, 81, 2],
-      // section 3 — the anthem
-      [8, 0, 76, 4], [8, 4, 79, 2], [8, 6, 76, 2], [8, 8, 83, 6], [8, 14, 81, 1],
-      [9, 0, 79, 4], [9, 4, 76, 2], [9, 8, 74, 4], [9, 12, 71, 2],
-      [10, 0, 72, 4], [10, 4, 76, 2], [10, 6, 79, 2], [10, 8, 84, 6],
-      [11, 0, 83, 2], [11, 2, 81, 1], [11, 4, 79, 2], [11, 8, 74, 4], [11, 12, 78, 2],
-      [12, 0, 76, 4], [12, 4, 79, 2], [12, 6, 81, 2], [12, 8, 83, 4], [12, 12, 84, 2],
-      [13, 0, 84, 4], [13, 4, 83, 2], [13, 8, 79, 4], [13, 12, 76, 2],
-      [14, 0, 74, 2], [14, 2, 76, 1], [14, 4, 78, 2], [14, 8, 81, 4], [14, 12, 83, 2],
-      [15, 0, 83, 2], [15, 4, 81, 2], [15, 8, 78, 2], [15, 10, 75, 1], [15, 12, 71, 2], [15, 14, 75, 1],
+      // S3 — the anthem, first pass
+      ...ihAnthemLead(8),
+      // S4 — breakdown: long floating tones over the risers
+      [16, 0, 76, 10], [16, 12, 79, 4],
+      [17, 0, 79, 10], [17, 12, 76, 4],
+      [18, 0, 76, 8], [18, 8, 73, 6],
+      [19, 0, 75, 8], [19, 8, 78, 6],
+      // S5 — anthem B
+      ...ihAnthemLead(20),
+      // S6 — bridge climb arps
+      ...ihBridgeArp,
+      // S7 — anthem C
+      ...ihAnthemLead(32),
+      // S8 — build stabs rising under the snare roll
+      [40, 0, 76, 2], [40, 8, 79, 2],
+      [41, 0, 78, 2], [41, 8, 81, 2],
+      [42, 0, 81, 2], [42, 8, 85, 2],
+      [43, 0, 83, 1], [43, 4, 85, 1], [43, 8, 87, 1], [43, 12, 88, 1],
+      // S9 — final anthem
+      ...ihAnthemLead(44),
+      // S10 — turnaround, big descending lap onto the dominant
+      [52, 0, 88, 4], [52, 4, 86, 2], [52, 6, 83, 2], [52, 8, 79, 4], [52, 12, 76, 2],
+      [53, 0, 84, 4], [53, 4, 79, 2], [53, 8, 76, 4], [53, 12, 72, 2],
+      [54, 0, 74, 2], [54, 2, 76, 1], [54, 4, 78, 2], [54, 8, 81, 4], [54, 12, 83, 2],
+      [55, 0, 83, 2], [55, 4, 81, 2], [55, 8, 78, 2], [55, 10, 75, 2], [55, 12, 71, 2], [55, 14, 75, 1],
     ]),
   }
 
@@ -339,12 +446,12 @@ export function buildRadioTracks() {
     ]),
   }
 
-  // TAPE — 82bpm A-minor turnarounds (Am F Dm E7). A little more motion,
+  // TAPE — 80bpm A-minor turnarounds (Am F Dm E7). A little more motion,
   // same worn-cassette softness.
   const lf2Roots = [45, 41, 38, 40, 45, 41, 38, 40]
   const lf2Chords = { 45: [67, 72, 76], 41: [69, 72, 77], 38: [65, 69, 74], 40: [68, 71, 76] }
   const radio_lofi_tape = {
-    bpm: 82, bars: 8, gain: 0.38, leadWave: 'triangle', bassWave: 'triangle',
+    bpm: 80, bars: 8, gain: 0.38, leadWave: 'triangle', bassWave: 'triangle',
     leadStyle: 'lofi', crackle: 0.04, swing: 0.14,
     leadVol: 0.22, bassVol: 0.42, padWave: 'triangle', padVol: 0.07,
     kickOpts: { f0: 105, f1: 50, dur: 0.12, vol: 0.62 },
@@ -432,12 +539,12 @@ export function buildRadioTracks() {
       : [[0, 0, 2], [4, 0, 1], [6, 0, 1], [8, 3, 2], [12, 0, 1], [14, 2, 1]])),
   }
 
-  // THRASH — 172bpm E-phrygian sprint. Sixteenth-gallop hats, the half-step
+  // THRASH — 160bpm E-phrygian sprint. Sixteenth-gallop kick, the half-step
   // F stab doing the menacing, a squealed turnaround every eighth bar.
   const rk2Bass = [40, 40, 41, 40, 40, 40, 41, 43]
   const rk2Riff = [52, 52, 53, 52, 52, 52, 53, 55]
   const radio_rock_thrash = {
-    bpm: 172, bars: 8, gain: 0.42, leadWave: 'sawtooth', bassWave: 'sawtooth',
+    bpm: 160, bars: 8, gain: 0.42, leadWave: 'sawtooth', bassWave: 'sawtooth',
     leadStyle: 'guitar', leadCutoff: 2800, leadVol: 0.21,
     bassStyle: 'chug', bassVol: 0.26,
     kickOpts: { f0: 190, f1: 64, dur: 0.07, vol: 0.85 },
@@ -454,17 +561,17 @@ export function buildRadioTracks() {
       : [[0, 0, 1], [2, 0, 1], [4, 0, 1], [6, 1, 1], [8, 0, 2], [12, 0, 1], [14, 1, 1]])),
   }
 
-  // GROOVE — 138bpm half-time A-minor neck-snapper. Space between the hits,
+  // GROOVE — 142bpm half-time A-minor neck-snapper. Space between the hits,
   // the Bb half-step lean, toms answering the riff.
   const rk3Bass = [45, 45, 48, 46, 45, 45, 48, 50]
   const rk3Riff = [45, 45, 48, 46, 45, 45, 48, 50]
   const radio_rock_groove = {
-    bpm: 138, bars: 8, gain: 0.42, leadWave: 'sawtooth', bassWave: 'sawtooth',
+    bpm: 142, bars: 8, gain: 0.42, leadWave: 'sawtooth', bassWave: 'sawtooth',
     leadStyle: 'guitar', leadCutoff: 2200, leadVol: 0.24,
     bassStyle: 'chug', bassVol: 0.28, tomF: 90,
     kickOpts: { f0: 170, f1: 56, dur: 0.09, vol: 0.9 },
     drums: {
-      kick: 'x..x..x...x.x...',
+      kick: [...rep('x..x..x...x.x...', 3), 'x..x..x..xxxxxx.'], // double-kick run on the turn
       snare: '........x.......',
       hat: 'x.x.x.x.x.x.x.x.',
       tom: [EMPTY, '............x.x.', EMPTY, '............xxx.'],

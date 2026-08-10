@@ -79,5 +79,5 @@ export class MenuScreen {
     this.list?.update()
   }
 
-  render(renderer) { this.backdrop.render(renderer) }
+  render(renderer, dt) { this.backdrop.render(renderer, dt) }
 }

@@ -1,271 +1,1861 @@
 // CRYPTO PUNK'D — The Glitched Detective.
 // Fully self-contained CharacterDef per CONTRACTS.md §4.
-// Original block-built humanoid: perfectly square head with an animated digital
-// face (procedural canvas texture — blinking cyan pixel eyes that glitch),
-// rectangular limbs, boxy dark trench coat, small geometric hat, purple + cyan
-// glitch accents, magnifying lens in hand. Technical trickster: teleports,
-// clones, detachable body pieces. All geometry, textures, animation and move
-// scripts are procedural — no assets, no extra deps.
+//
+// VISUAL OVERHAUL — GRAPHICS_CONTRACT.md §0/§4/§9/§12 + docs/parody/crypto-punkd.md.
+// The joke is a RESOLUTION MISMATCH: a true 24 mm-lattice voxel head (11 x 17 x 9,
+// face-culled + greedy-meshed, one-voxel ink keyline shell on every plane, baked
+// per-face brightness bias and 3-level voxel AO in vertex colours, chamfered cubes
+// on every silhouette edge and every feature) bolted onto a completely smooth,
+// bevelled, tailored 1940s trench-coat gumshoe body. Everything above the collar
+// steps in whole voxels; nothing below the collar has a hard corner.
+//
+// All geometry is procedural (src/render/geometry.js), all surfacing is real PBR
+// (src/render/materials.js + textures.js). No assets, no extra deps.
+//
+// ---------------------------------------------------------------------------
+// DECLARED DIVERGENCES from GRAPHICS_CONTRACT.md / docs/parody/crypto-punkd.md.
+// The contract's §0 rule is explicit: you may not SILENTLY diverge.
+//
+//  D1  §9 "real eye geometry (sclera + iris + pupil + specular + lid)" — no
+//      sclera and no iris. The eye is the brief's 3-band voxel construct: a
+//      `skin-shade` brow band, a proud `voxel-ink` lid, a recessed pupil voxel
+//      and a highlight voxel. Lid geometry, pupil, specular and 2 voxels of
+//      real depth relief are all present; a white sclera on a 2-voxel eye is
+//      what makes a pixel head read as "3D model with a texture". Brief §0.1.
+//  D2  §0 criterion 1 "spatially varying roughness" — the head has EXACTLY
+//      constant roughness, no roughness map, zero variation. The body spans
+//      0.16 (pipe stem) to 1.0 (fedora felt). Round 4 LOWERS the head's
+//      constant (skin 0.62 -> 0.42, ink 0.48 -> 0.30, glint 0.22) because
+//      "constant roughness" never meant "no specular lobe".
+//  D3  §4 flatShading off by default — `flatShading: true` on all head
+//      materials. The contract carves this out for parody looks; this is the
+//      character that clause was written for.
+//  D4  §11 "nothing moves linearly" — everything above the collar SNAPS in
+//      whole-voxel, <=2-frame, un-eased steps. `hat`, `coat`, tie, storm flap
+//      and collar obey §11 fully.
+//  D5  §9 "no gaps" — the 6-voxel wrist dissolve. The wrist joint underneath
+//      is fully sleeved and closed; each dissolve cube shares a full 24 mm
+//      face with the cuff or with another cube.
+//  D6  Brief §7.4 asks for a 3-vx-deep goggle block; ours is 1 vx deep (front
+//      face still at the specified x = +0.132). Carving 3 vx would delete the
+//      forehead `skin-hilite` voxel and open a crater when the goggles snap
+//      down.
+//  D7  Brief §2's fin/brim negative-space wedge is geometrically unreachable
+//      at a 0.404 m brim tilted 18 deg about a pivot inside the skull, so the
+//      brim carries a 48 deg front notch. That is how the wedge actually gets
+//      built and it removes the last hard interpenetration on the model.
+//  D8  Brief §5's `coat-gabardine` #8E8067 (luma 0.51, hue 40) SHIPPED AS
+//      CAMOUFLAGE: measured against a warm-wood arena wall at hue 24 / luma
+//      0.340, the coat sampled hue 27 / luma 0.349 — three degrees of hue and
+//      nine thousandths of a stop from the background, on the largest mass on
+//      the character. The coat is now #46482F: luma 0.274, hue 65,
+//      saturation 0.21. It costs the brief's literal three-value ladder
+//      (head 0.76 / coat 0.27 / hat+shoes 0.19 instead of 0.77/0.51/0.19) and
+//      buys a figure that separates from every warm arena by value AND hue.
+//      No shipped AAA fighter shares a hue and a value with its own stage.
+//  D9  Brief §5's head hexes are unchanged in HUE and in LUMA but raised in
+//      SATURATION (0.22 -> 0.38), and every head material carries a small cool
+//      emissive floor. Reason and arithmetic in the palette block below. The
+//      parody-safety clearance against the source's alien family is unchanged
+//      in kind and still holds on all three measured axes.
+// ---------------------------------------------------------------------------
 import * as THREE from 'three'
+import {
+  pbr, surfaceMaps,
+  roundedBox, taperedBox, taperedCapsule, sleeve, weld,
+  skirt, loft, profileLathe, filletRing, roundedCylinder,
+  plate, superellipsoid, superellipsePoints, roundedRectPoints,
+  mergeParts, markDynamic, GEO,
+} from '../render/index.js'
+
+// The special-move FX props below are transient, unlit `basic()` geometry, but
+// they are still on camera during every super — and a raw `BoxGeometry` reads
+// as a raw box wherever it appears. `GEO` is the render layer's documented
+// drop-in: `new GEO.BoxGeometry(w, h, d)` is chamfered, keeps the six material
+// groups a multi-material panel needs, and `GEO.CylinderGeometry` fillets its
+// rims. Torus has no GEO entry; `filletRing(radius, tube, radialSeg, tubeSeg)`
+// takes the same four arguments and is the bevelled equivalent.
 
 // ---------------------------------------------------------------------------
-// palette (costume 0: noir cyan / costume 1: vaporwave gold)
+// palette — brief §5. Every hex sits inside the contract's 30..240 sRGB albedo
+// band on all three channels, and every colour derived from a source measurement
+// is shifted >= 8/255 in >= 2 channels (brief §9.1).
+// Authored value ladder (costume 0): head 0.759 / coat 0.274 / hat+shoes 0.194
+// (divergence D8 — brief §5 asks for 0.77 / 0.51 / 0.19 and 0.51 was measured
+// as camouflage against a warm arena wall). SIMULATED SHIPPED VALUES, linear
+// albedo x the real lighting.js rigs, ACES, sRGB out:
+//   sunset-stadium  head 0.722 hue 154 | coat 0.143 | ink 0.111 | wall 0.545
+//   meme-plaza      head 0.810 hue 181 | coat 0.237 | ink 0.145 | wall 0.721
+//   tower-dusk      head 0.765 hue 166 | coat 0.184 | ink 0.126 | wall 0.632
+// i.e. the face lands cool (hue 154-181) in every rig instead of the hue-47
+// warm cream that shipped, and the coat separates from the wall by 0.40-0.48
+// of luma instead of 0.009.
+// One correction to brief §5: its `pipe-briar-dark` #5E3A16 has a blue channel
+// of 22, BELOW the contract's 30 floor (the brief asserts the whole table is in
+// band; that one entry is not). Shipped as #5E3A1E — blue lifted to the floor,
+// luma still 0.25, and still >= 8/255 off the source measurement in >= 2
+// channels (brief §9.1) at -10 / -2 / +22.
 // ---------------------------------------------------------------------------
+// ROUND-4 COLOUR CORRECTION — measured, not guessed.
+//
+// The round-3 hexes were the brief's verbatim table and they were RIGHT on
+// paper and WRONG on screen. The arena keys in `src/render/lighting.js` are
+// hard warm suns (`sunset-stadium` 0xffb066, `mountain-dawn` 0xffc07a,
+// `tower-dusk` 0xffd9a8): three.js converts a light colour to LINEAR, so
+// 0xffb066 delivers an irradiance ratio of (1.00, 0.43, 0.13). Multiply that
+// into `skin-base` #A9CBC4 — a hue-168 teal at HSL saturation 0.22 — and the
+// blue channel is gone: the face lands at hue ~45, a warm cream, exactly as
+// the critic sampled (#e1d092). A 0.22-saturation "cool" is not cool under a
+// warm key; it is a neutral, and a neutral takes the key's temperature whole.
+//
+// Two changes, both measurable:
+//   1. HEAD SATURATION UP. The skin ramp keeps the brief's luma ladder exactly
+//      (base 0.759 vs 0.77, shade 0.602 vs 0.61, stubble 0.473 vs 0.46, hilite
+//      0.879 vs 0.89) and raises HSL saturation 0.22 -> 0.38 at an unchanged
+//      hue of ~171. Parody-safety clearance vs the alien family (§9.1) is
+//      unchanged in kind and still holds on two independent axes: hue 171 vs
+//      the alien ramp's exact 180, saturation 0.38 vs 0.52-0.86, lightness
+//      0.694 vs 0.74-0.88 — plus the stubble block and the horizontal mouth
+//      bar, neither of which the alien base has.
+//   2. A COOL EMISSIVE FLOOR on the head (see `headMat`). Emissive is the only
+//      term a warm key cannot tint. That is what actually holds the hue.
+//
+// The coat moves off the brief's #8E8067 for the same measured reason: the
+// critic sampled the shipped coat at #8c501c against an arena wall at
+// #944b17 — three degrees of hue and 0.009 of luma apart. Authored luma drops
+// 0.51 -> 0.273 and the hue rotates 40 -> 65 (desaturated olive-khaki), which
+// separates the largest mass on the character from every warm-wood arena by
+// value first and hue second. Declared as divergence D8.
 const PAL = [
-  {
-    coat: 0x23262f, coatDark: 0x171921, trim: 0x2ee6ff, accent: 0x8b5cf6,
-    skin: 0x4a5266, hand: 0x59637d, shirt: 0x2a1e45, hat: 0x14161d,
-    hatBand: 0x2ee6ff, shoe: 0x101219, sole: 0x2ee6ff, lensRing: 0xd7b45a,
-    glass: 0x9fe8ff, eye: '#2ee6ff', glitchA: '#ff3df0', glitchB: '#2ee6ff',
+  { // costume 0 — "gumshoe noir"
+    skinBase: 0x93cfc6, skinHilite: 0xc2e9e2, skinShade: 0x6ba79f, stubble: 0x4c8580,
+    ink: 0x22262c, mohawk: 0x4b2fe0, mohawkDark: 0x35228e,
+    coat: 0x46482f, coatShadow: 0x2e3020, hat: 0x35312a, hatBand: 0x463f34,
+    glint: 0xb6e6df, trim: 0x2fdcf0, smoke: 0xb3b6bc, cig: 0xbebab2, ember: 0xd9622f,
+    briar: 0x8a5a22, briarDark: 0x5e3a1e, stem: 0x2b2830, gold: 0xc79a2e,
+    vrBody: 0x6e747c, vrEdge: 0x4a4f57, screen: 0x4a5bd0,
+    shirt: 0x2c2a26, glass: 0x9fe8ff, horn: 0x6b5a44, sole: 0x4a443a,
+    // Cool emissive floor (see headMat/finMat). NOT albedo — exempt from the
+    // 30..240 band, same clause §5 grants `rim-cyan`.
+    headGlow: 0x2f8894, inkGlow: 0x1e2a38, finGlow: 0x2a1268,
+    hat3d: false, ghostA: 0xee47de, ghostB: 0x2fdcf0,
   },
-  {
-    coat: 0x3a2160, coatDark: 0x241240, trim: 0xffcf3d, accent: 0x2ee6ff,
-    skin: 0x50485e, hand: 0x645a75, shirt: 0x141d3a, hat: 0x2a1747,
-    hatBand: 0xffcf3d, shoe: 0x161020, sole: 0xffcf3d, lensRing: 0x2ee6ff,
-    glass: 0xffd9fb, eye: '#ff3df0', glitchA: '#2ee6ff', glitchB: '#ffcf3d',
+  { // costume 1 — "vaporwave" (no fedora: `hat` carries a pixel headband instead)
+    skinBase: 0xa8bad6, skinHilite: 0xd4deef, skinShade: 0x7b8dad, stubble: 0x57678a,
+    ink: 0x22262c, mohawk: 0x2fbcd4, mohawkDark: 0x1f7f9c,
+    // (#271A44 had a green channel of 26, under the contract's 30 floor)
+    coat: 0x40316a, coatShadow: 0x2c2148, hat: 0x2a2733, hatBand: 0x3a3644,
+    glint: 0xefaee0, trim: 0xefc33d, smoke: 0xd6d8d3, cig: 0xbebab2, ember: 0xd9622f,
+    briar: 0x8a5a22, briarDark: 0x5e3a1e, stem: 0x2b2830, gold: 0xefc33d,
+    vrBody: 0x9aa096, vrEdge: 0x33619c, screen: 0x9c3838,
+    shirt: 0x232130, glass: 0xffd9fb, horn: 0x5a5164, sole: 0x3e3b48,
+    headGlow: 0x33507e, inkGlow: 0x1e2a38, finGlow: 0x10525e,
+    hat3d: true, ghostA: 0x2fdcf0, ghostB: 0xefc33d,
   },
 ]
 
 // ---------------------------------------------------------------------------
-// tiny procedural-model helpers (inline — character files are self-contained)
+// THE LATTICE — brief §3.1. One voxel = 24 mm. Everything above the collar snaps
+// to it, position AND size, in integer multiples. There are no half voxels.
+//
+//   d  depth index   0 = the "proud" layer, 1 = L1 (the front-plane map) .. 9 = L9
+//   r  row index    16 = chin, 0 = crown, negative = above the crown, 17+ = neck
+//   c  column index  0 = character's LEFT edge .. 10 = right edge, 5 = centreline
+//
+// The three functions return a voxel's MIN CORNER in world metres (bind pose).
 // ---------------------------------------------------------------------------
-function lamb(color, opts = {}) {
-  return new THREE.MeshLambertMaterial({ color, flatShading: true, ...opts })
+const VX = 0.024
+const xMin = (d) => 0.108 - VX * d
+const yMin = (r) => 1.442 + (16 - r) * VX
+const zMin = (c) => (5 - c) * VX - 0.012
+
+// head bone pivot, world (brief §0). Head-local = world - HEAD_PIVOT.
+const HEAD_PIVOT = [0.045, 1.394, 0]
+
+// Build-time lattice assertion (brief §3: "assert it in the builder").
+// Round-3: this existed but was never CALLED, so `latticeBad` could not move off
+// zero and a half-voxel would have shipped silently. `VoxelSet.set` now runs it
+// on every voxel it accepts, and `buildModel` fails loudly on a non-zero count.
+let latticeBad = 0
+function onLattice(v, origin) {
+  const k = (v - origin) / VX
+  if (Math.abs(k - Math.round(k)) > 1e-6) latticeBad++
+  return v
+}
+/** Assert one voxel's three min corners land exactly on the 24 mm lattice. */
+function assertLattice(d, r, c) {
+  if (!Number.isInteger(d) || !Number.isInteger(r) || !Number.isInteger(c)) { latticeBad++; return }
+  onLattice(xMin(d), 0.108); onLattice(yMin(r), 1.442); onLattice(zMin(c), -0.012)
 }
 
-function box(w, h, d, material, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material)
-  m.position.set(x, y, z)
-  m.rotation.set(rx, ry, rz)
-  return m
-}
+const srgbToLinear = (u) => (u <= 0.04045 ? u / 12.92 : Math.pow((u + 0.055) / 1.055, 2.4))
+const lumaOf = (hex) => (0.2126 * ((hex >> 16) & 255) + 0.7152 * ((hex >> 8) & 255) + 0.0722 * (hex & 255)) / 255
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v)
 
-function cyl(rTop, rBottom, h, material, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) {
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBottom, h, 10, 1), material)
-  m.position.set(x, y, z)
-  m.rotation.set(rx, ry, rz)
-  return m
-}
+// ===========================================================================
+// VOXEL TOOLKIT — brief §3.10. Two-tier build so the head costs ~9k triangles
+// instead of the ~80k a RoundedBoxGeometry-per-voxel build would.
+//   Tier A  chamfered cubes (44 tris) for every FEATURE voxel and every voxel
+//           that sits on a silhouette EDGE (2+ exposed axes) — i.e. exactly the
+//           voxels whose edges are seen edge-on, which is where a bevel earns
+//           its triangles.
+//   Tier B  greedy-merged coplanar same-colour face runs for everything else.
+//           A 5x9 blank forehead is ONE quad, not 45 cubes.
+// Hidden faces are culled before either tier runs.
+// ===========================================================================
 
-function pivot(parent, x = 0, y = 0, z = 0) {
-  const g = new THREE.Group()
-  g.position.set(x, y, z)
-  parent.add(g)
-  return g
-}
+const CHAMFER = 0.0012                 // 5% of VX — brief §3.10.10 ceiling is 1.9 mm
+const F_FEATURE = 1                    // force Tier A (relief, props, accessories)
+const AO_LEVEL = [1.0, 0.94, 0.86, 0.78]
 
-// static wrapper: bakes a base rotation between an animated bone and its meshes,
-// so every animated bone starts at rotation (0,0,0) = bind pose.
-function bent(parent, rz = 0, rx = 0, ry = 0) {
-  const g = new THREE.Group()
-  g.rotation.set(rx, ry, rz)
-  parent.add(g)
-  return g
-}
+// dir: n = world normal, s = LATTICE delta toward the neighbour on that side,
+// uL/vL = lattice deltas for the face's world (u, v) basis where u x v = n,
+// bias = brief §3.10.5 per-face brightness multiplier.
+const DIRS = [
+  { i: 0, n: [1, 0, 0], s: [-1, 0, 0], uL: [0, -1, 0], vL: [0, 0, -1], bias: 1.00, ax: 'd' },
+  { i: 1, n: [-1, 0, 0], s: [1, 0, 0], uL: [0, 0, -1], vL: [0, -1, 0], bias: 0.86, ax: 'd' },
+  { i: 2, n: [0, 1, 0], s: [0, -1, 0], uL: [0, 0, -1], vL: [-1, 0, 0], bias: 1.06, ax: 'r' },
+  { i: 3, n: [0, -1, 0], s: [0, 1, 0], uL: [-1, 0, 0], vL: [0, 0, -1], bias: 0.78, ax: 'r' },
+  { i: 4, n: [0, 0, 1], s: [0, 0, -1], uL: [-1, 0, 0], vL: [0, -1, 0], bias: 0.90, ax: 'c' },
+  { i: 5, n: [0, 0, -1], s: [0, 0, 1], uL: [0, -1, 0], vL: [-1, 0, 0], bias: 0.90, ax: 'c' },
+]
+const CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]]
 
-// ---------------------------------------------------------------------------
-// animated digital face — 64x64 canvas texture, redrawn via onBeforeRender.
-// Blinking square cyan eyes; random RGB-split glitch bursts. Fails silently
-// (returns null) when no canvas is available — a mesh fallback is used then.
-// ---------------------------------------------------------------------------
-function makeFace(p) {
-  let tex = null, ctx = null
-  try {
-    const canvas = document.createElement('canvas')
-    canvas.width = 64
-    canvas.height = 64
-    ctx = canvas.getContext('2d')
-    if (!ctx) return null
-    tex = new THREE.CanvasTexture(canvas)
-    tex.magFilter = THREE.NearestFilter
-    tex.minFilter = THREE.NearestFilter
-    tex.generateMipmaps = false
-  } catch { return null }
-
-  let last = -1e9
-  let glitch = 0
-  const draw = (now) => {
-    if (now - last < 110) return
-    last = now
-    try {
-      // dark screen + faint scanlines
-      ctx.fillStyle = '#07080f'
-      ctx.fillRect(0, 0, 64, 64)
-      ctx.fillStyle = '#0c0e1a'
-      for (let y = 0; y < 64; y += 8) ctx.fillRect(0, y, 64, 3)
-
-      if (glitch <= 0 && Math.random() < 0.09) glitch = 2 + ((Math.random() * 2) | 0)
-      const g = glitch > 0
-      if (g) glitch--
-
-      // eyes: 10x10 pixel blocks, blink to slits on a ~3.4s cycle
-      const blink = (now % 3400) > 3230
-      const eh = blink ? 2 : 10
-      const jx = g ? ((Math.random() * 7) | 0) - 3 : 0
-      const jy = g ? ((Math.random() * 5) | 0) - 2 : 0
-      ctx.fillStyle = p.eye
-      ctx.fillRect(13 + jx, 22 + jy + (10 - eh), 10, eh)
-      ctx.fillRect(41 - jx, 22 - jy + (10 - eh), 10, eh)
-      if (!blink) {
-        ctx.fillStyle = '#ffffff'
-        ctx.fillRect(16 + jx, 25 + jy, 3, 3)
-        ctx.fillRect(44 - jx, 25 - jy, 3, 3)
+/** A sparse lattice occupancy set. Keys are "d,r,c". */
+class VoxelSet {
+  constructor(name = '') { this.name = name; this.m = new Map() }
+  static k(d, r, c) { return `${d},${r},${c}` }
+  set(d, r, c, color, flags = 0) {
+    if (color === null) { this.m.delete(VoxelSet.k(d, r, c)); return this }
+    assertLattice(d, r, c)
+    this.m.set(VoxelSet.k(d, r, c), { d, r, c, color, flags })
+    return this
+  }
+  get(d, r, c) { return this.m.get(VoxelSet.k(d, r, c)) }
+  has(d, r, c) { return this.m.has(VoxelSet.k(d, r, c)) }
+  del(d, r, c) { this.m.delete(VoxelSet.k(d, r, c)); return this }
+  /** inclusive ranges */
+  fill(d0, d1, r0, r1, c0, c1, color, flags = 0) {
+    for (let d = d0; d <= d1; d++) {
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) this.set(d, r, c, color, flags)
       }
-      // flat pixel mouth (widens into a static bar mid-glitch)
-      ctx.fillStyle = '#8b5cf6'
-      ctx.fillRect(g ? 18 : 24, 45, g ? 28 : 16, 3)
+    }
+    return this
+  }
+  get size() { return this.m.size }
+  values() { return this.m.values() }
+}
 
-      if (g) {
-        // RGB-split bands + pixel noise
-        ctx.fillStyle = p.glitchA
-        ctx.globalAlpha = 0.55
-        ctx.fillRect(0, 12 + ((Math.random() * 34) | 0), 64, 3)
-        ctx.fillStyle = p.glitchB
-        ctx.fillRect(0, 8 + ((Math.random() * 44) | 0), 64, 2)
-        ctx.globalAlpha = 1
-        for (let i = 0; i < 7; i++) {
-          ctx.fillStyle = Math.random() < 0.5 ? p.glitchA : p.glitchB
-          ctx.fillRect((Math.random() * 60) | 0, (Math.random() * 60) | 0, 3, 3)
+// --- vertex-colour bake (brief §3.10.5-7) ----------------------------------
+// tint = faceBias * AO, compressed on near-black albedo so the ink keyline can
+// never leave the contract's 30..240 band, then shipped as the exact LINEAR
+// ratio three.js needs (it multiplies vertexColor into albedo in linear space).
+const _tintCache = new Map()
+// `maxLuma` / `maxLumaHex` answer the round-2 note "the skin is blown out to
+// near-white": they are the brightest sRGB luma any baked vertex colour actually
+// produces, and which authored hex produced it. §5's rule is that the two
+// `skin-hilite` voxels (#D2E7E1, luma 0.89) are the only thing on the head above
+// 0.85 — this is the build-time proof of it.
+const bakeAudit = { clampLo: 0, clampHi: 0, maxLuma: 0, maxLumaHex: 0, perHex: new Map() }
+function tintRGB(hex, bias, ao) {
+  const key = `${hex}|${bias}|${ao}`
+  const hit = _tintCache.get(key)
+  if (hit) return hit
+  const ch = [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255]
+  const k = clamp01((lumaOf(hex) - 0.25) / 0.35)
+  const t = 1 + (bias * ao - 1) * (0.25 + 0.75 * k)
+  const out = new Array(3)
+  const shipped = new Array(3)
+  for (let i = 0; i < 3; i++) {
+    let q = ch[i] * t
+    if (q < 30) { bakeAudit.clampLo++; q = 30 }
+    if (q > 240) { bakeAudit.clampHi++; q = 240 }
+    shipped[i] = q
+    const base = srgbToLinear(ch[i] / 255)
+    out[i] = base > 1e-6 ? srgbToLinear(q / 255) / base : 1
+  }
+  const lum = (0.2126 * shipped[0] + 0.7152 * shipped[1] + 0.0722 * shipped[2]) / 255
+  if (lum > bakeAudit.maxLuma) { bakeAudit.maxLuma = lum; bakeAudit.maxLumaHex = hex }
+  if (lum > (bakeAudit.perHex.get(hex) || 0)) bakeAudit.perHex.set(hex, lum)
+  _tintCache.set(key, out)
+  return out
+}
+
+/** Non-indexed geometry accumulator: position + normal + uv + colour. */
+class VoxAcc {
+  constructor() { this.p = []; this.n = []; this.u = []; this.c = [] }
+  v(x, y, z, nx, ny, nz, u, vv, col) {
+    this.p.push(x, y, z); this.n.push(nx, ny, nz); this.u.push(u, vv); this.c.push(col[0], col[1], col[2])
+  }
+  /** four corner points (already CCW from outside), one normal, per-corner uv + colour */
+  quad(pt, n, uv, col) {
+    const o = [0, 1, 2, 0, 2, 3]
+    for (const i of o) this.v(pt[i][0], pt[i][1], pt[i][2], n[0], n[1], n[2], uv[i][0], uv[i][1], col[i])
+  }
+  get triangles() { return this.p.length / 9 }
+  build(name) {
+    if (!this.p.length) return null
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3))
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.n, 3))
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.u, 2))
+    g.setAttribute('color', new THREE.Float32BufferAttribute(this.c, 3))
+    g.computeBoundingSphere(); g.computeBoundingBox()
+    g.name = name || 'voxels'
+    return g
+  }
+}
+
+// world axis index carried by each face's (u, v) basis, for lattice-aligned UVs
+const UAX = [1, 2, 2, 0, 0, 1]
+const VAX = [2, 1, 0, 2, 1, 0]
+
+/** 3-level voxel AO (brief §3.10.6) for the four corners of one face. */
+function cornerAO(v, D, occupied) {
+  const bd = v.d + D.s[0], br = v.r + D.s[1], bc = v.c + D.s[2]
+  const out = new Array(4)
+  for (let i = 0; i < 4; i++) {
+    const su = CORNERS[i][0], sv = CORNERS[i][1]
+    const s1 = occupied(bd + D.uL[0] * su, br + D.uL[1] * su, bc + D.uL[2] * su)
+    const s2 = occupied(bd + D.vL[0] * sv, br + D.vL[1] * sv, bc + D.vL[2] * sv)
+    const s3 = occupied(bd + D.uL[0] * su + D.vL[0] * sv, br + D.uL[1] * su + D.vL[1] * sv,
+      bc + D.uL[2] * su + D.vL[2] * sv)
+    out[i] = AO_LEVEL[(s1 && s2) ? 3 : (s1 ? 1 : 0) + (s2 ? 1 : 0) + (s3 ? 1 : 0)]
+  }
+  return out
+}
+
+const AXIS_BIAS = [[0.86, 1.00], [0.78, 1.06], [0.90, 0.90]]  // [-,+] per world axis
+function normalBias(nx, ny, nz) {
+  const w = [Math.abs(nx), Math.abs(ny), Math.abs(nz)]
+  const s = [nx, ny, nz]
+  let acc = 0, tot = 0
+  for (let i = 0; i < 3; i++) { acc += w[i] * AXIS_BIAS[i][s[i] >= 0 ? 1 : 0]; tot += w[i] }
+  return tot > 1e-6 ? acc / tot : 1
+}
+
+// direction index for (world axis, sign) — the inverse of DIRS
+const DIR_OF = [[1, 0], [3, 2], [5, 4]]   // [axis][sign<0 ? 0 : 1]
+
+/**
+ * Tier A — a bevelled cube that emits ONLY the faces that are actually seen,
+ * with a 1.2 mm chamfer on exactly the edges that are silhouette edges (both
+ * adjoining faces exposed) and none anywhere else. A fully exposed voxel costs
+ * the same 44 triangles a RoundedBoxGeometry would; the typical head edge voxel
+ * costs SIX. Where a face's in-plane neighbour is occupied the quad runs to its
+ * full extent, so it meets the neighbouring (Tier A or Tier B) face flush — no
+ * chamfer notch, no gap, nothing to see at the tier boundary.
+ */
+function addBevelCube(acc, v, occupied, O) {
+  const h = VX / 2, k = CHAMFER
+  const C = [xMin(v.d) + h, yMin(v.r) + h, zMin(v.c) + h]
+  const _ao = []
+  const aoOf = (D2, s) => {
+    if (!_ao[D2.i]) _ao[D2.i] = cornerAO(v, D2, occupied)
+    const su = s[UAX[D2.i]], sv = s[VAX[D2.i]]
+    for (let q = 0; q < 4; q++) if (CORNERS[q][0] === su && CORNERS[q][1] === sv) return _ao[D2.i][q]
+    return 1
+  }
+  const open = (dl) => !occupied(v.d + dl[0], v.r + dl[1], v.c + dl[2])
+  // emit a polygon (3 or 4 world points, already outward-CCW-or-not) with its
+  // own flat normal, per-vertex AO taken from the face that owns each vertex
+  const poly = (pts, aos, uA, vA) => {
+    const e1 = [pts[1][0] - pts[0][0], pts[1][1] - pts[0][1], pts[1][2] - pts[0][2]]
+    const e2 = [pts[2][0] - pts[0][0], pts[2][1] - pts[0][1], pts[2][2] - pts[0][2]]
+    let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+    const len = Math.hypot(n[0], n[1], n[2]) || 1
+    n = [n[0] / len, n[1] / len, n[2] / len]
+    const out = [pts[0][0] - C[0], pts[0][1] - C[1], pts[0][2] - C[2]]
+    let order = [0, 1, 2, 0, 2, 3]
+    if (n[0] * out[0] + n[1] * out[1] + n[2] * out[2] < 0) {
+      n = [-n[0], -n[1], -n[2]]; order = [0, 2, 1, 0, 3, 2]
+    }
+    const bias = normalBias(n[0], n[1], n[2])
+    const tri = pts.length === 3 ? order.slice(0, 3) : order
+    for (const i of tri) {
+      const P = pts[i]
+      acc.v(P[0] - O[0], P[1] - O[1], P[2] - O[2], n[0], n[1], n[2],
+        P[uA] / VX, P[vA] / VX, tintRGB(v.color, bias, aos[i]))
+    }
+  }
+
+  for (const D of DIRS) {
+    if (!open(D.s)) continue
+    const nAx = D.n[0] ? 0 : D.n[1] ? 1 : 2
+    const nS = D.n[nAx]
+    const uA = UAX[D.i], vA = VAX[D.i]
+    const oU = { '-1': open([-D.uL[0], -D.uL[1], -D.uL[2]]), 1: open(D.uL) }
+    const oV = { '-1': open([-D.vL[0], -D.vL[1], -D.vL[2]]), 1: open(D.vL) }
+    const pt = (an, au, av) => { const w = []; w[nAx] = C[nAx] + an; w[uA] = C[uA] + au; w[vA] = C[vA] + av; return w }
+    const signs = (su, sv) => { const s = []; s[nAx] = nS; s[uA] = su; s[vA] = sv; return s }
+    const iu = (su) => su * (h - (oU[su] ? k : 0))
+    const iv = (sv) => sv * (h - (oV[sv] ? k : 0))
+    // the face itself
+    const fp = [], fa = []
+    for (const [su, sv] of CORNERS) { fp.push(pt(nS * h, iu(su), iv(sv))); fa.push(aoOf(D, signs(su, sv))) }
+    poly(fp, fa, uA, vA)
+    // bevel strips along the two u edges and the two v edges
+    for (const su of [-1, 1]) {
+      if (!oU[su]) continue
+      const P2 = DIRS[DIR_OF[uA][su > 0 ? 1 : 0]]
+      if (P2.i < D.i) continue                                   // emitted by the other face
+      const q = [pt(nS * h, iu(su), iv(-1)), pt(nS * h, iu(su), iv(1)),
+        pt(nS * (h - k), su * h, iv(1)), pt(nS * (h - k), su * h, iv(-1))]
+      poly(q, [aoOf(D, signs(su, -1)), aoOf(D, signs(su, 1)),
+        aoOf(P2, signs(su, 1)), aoOf(P2, signs(su, -1))], uA, vA)
+    }
+    for (const sv of [-1, 1]) {
+      if (!oV[sv]) continue
+      const P2 = DIRS[DIR_OF[vA][sv > 0 ? 1 : 0]]
+      if (P2.i < D.i) continue
+      const q = [pt(nS * h, iu(-1), iv(sv)), pt(nS * h, iu(1), iv(sv)),
+        pt(nS * (h - k), iu(1), sv * h), pt(nS * (h - k), iu(-1), sv * h)]
+      poly(q, [aoOf(D, signs(-1, sv)), aoOf(D, signs(1, sv)),
+        aoOf(P2, signs(1, sv)), aoOf(P2, signs(-1, sv))], uA, vA)
+    }
+    // corner triangles, emitted once by the lowest-index of the three faces
+    for (const [su, sv] of CORNERS) {
+      if (!oU[su] || !oV[sv]) continue
+      const PU = DIRS[DIR_OF[uA][su > 0 ? 1 : 0]], PV = DIRS[DIR_OF[vA][sv > 0 ? 1 : 0]]
+      if (PU.i < D.i || PV.i < D.i) continue
+      poly([pt(nS * h, iu(su), iv(sv)), pt(nS * (h - k), su * h, iv(sv)), pt(nS * (h - k), iu(su), sv * h)],
+        [aoOf(D, signs(su, sv)), aoOf(PU, signs(su, sv)), aoOf(PV, signs(su, sv))], uA, vA)
+    }
+  }
+}
+
+/**
+ * meshVoxels(set, opts) -> { geoms: Map<colourHex, BufferGeometry>, tris, faces }
+ *
+ * opts.occlude  extra VoxelSets used ONLY for face culling (a prop culls against
+ *               the skull it is welded to, so no interior faces are ever paid for)
+ * opts.origin   world-space origin subtracted from every vertex (the bone pivot)
+ */
+function meshVoxels(vs, opts = {}) {
+  const sets = [vs, ...(opts.occlude || [])]
+  const occupied = (d, r, c) => {
+    for (const s of sets) if (s.has(d, r, c)) return true
+    return false
+  }
+  const O = opts.origin || [0, 0, 0]
+  const accs = new Map()
+  const accFor = (hex) => { let a = accs.get(hex); if (!a) { a = new VoxAcc(); accs.set(hex, a) } return a }
+
+  const tierA = []
+  const planes = new Map()      // "dir|plane" -> Map("a,b" -> cell)
+  const allFaces = new Set()    // "dir|plane|a,b" for BOTH tiers — used to close seams
+  let faces = 0
+  // NO FLOATING VOXELS (round-3). Every voxel above the collar must share a full
+  // 24 x 24 mm face with a neighbour — in its own set or in one of its
+  // occluders. A cube touching only along an edge or a corner reads as a
+  // z-fight or a build bug, and `Gore._detach()` has no surface to cut.
+  // (The smoke cluster is exempt and opts out: its DETACHMENT is brief §2's
+  // silhouette event and the whole gag, so it is meshed with assertWelded off.)
+  let orphans = 0
+  if (opts.assertWelded) {
+    for (const v of vs.values()) {
+      let touch = 0
+      for (const D of DIRS) if (occupied(v.d + D.s[0], v.r + D.s[1], v.c + D.s[2])) touch++
+      if (!touch) orphans++
+    }
+    if (orphans) console.warn(`[crypto-punkd] ${orphans} orphaned voxel(s) in set '${vs.name}'`)
+  }
+  const inPlane = (D, v) => (D.ax === 'd' ? [v.r, v.c] : D.ax === 'r' ? [v.d, v.c] : [v.d, v.r])
+
+  for (const v of vs.values()) {
+    const exposed = DIRS.filter((D) => !occupied(v.d + D.s[0], v.r + D.s[1], v.c + D.s[2]))
+    if (!exposed.length) continue                       // fully enclosed — free
+    faces += exposed.length
+    const axes = new Set(exposed.map((D) => D.ax))
+    const isA = (v.flags & F_FEATURE) !== 0 || axes.size >= 2
+    for (const D of exposed) {
+      const pi = D.ax === 'd' ? v.d : D.ax === 'r' ? v.r : v.c
+      const [a, b] = inPlane(D, v)
+      allFaces.add(`${D.i}|${pi}|${a},${b}`)
+      if (isA) continue
+      const kk = `${D.i}|${pi}`
+      let pl = planes.get(kk)
+      if (!pl) { pl = new Map(); planes.set(kk, pl) }
+      pl.set(`${a},${b}`, { v, D, pi, a, b })
+    }
+    if (isA) tierA.push(v)
+  }
+
+  for (const v of tierA) addBevelCube(accFor(v.color), v, occupied, O)
+
+  // --- Tier B: greedy merge coplanar, same-colour, uniform-AO runs ----------
+  for (const [kk, pl] of planes) {
+    const cut = kk.indexOf('|')
+    const di = +kk.slice(0, cut), pi = +kk.slice(cut + 1)
+    const D = DIRS[di]
+    const info = new Map()
+    for (const cell of pl.values()) {
+      const ao = cornerAO(cell.v, D, occupied)
+      info.set(`${cell.a},${cell.b}`, {
+        cell, ao, uni: ao[0] === ao[1] && ao[1] === ao[2] && ao[2] === ao[3],
+      })
+    }
+    const order = [...pl.values()].sort((p, q) => (p.a - q.a) || (p.b - q.b))
+    const done = new Set()
+    for (const start of order) {
+      const k0 = `${start.a},${start.b}`
+      if (done.has(k0)) continue
+      const it = info.get(k0)
+      const col = start.v.color
+      const ok = (a, b) => {
+        const nk = `${a},${b}`
+        if (done.has(nk)) return false
+        const ni = info.get(nk)
+        return !!ni && ni.uni && it.uni && ni.cell.v.color === col && ni.ao[0] === it.ao[0]
+      }
+      let a1 = start.a, b1 = start.b
+      if (it.uni) {
+        while (ok(start.a, b1 + 1)) b1++
+        let grow = true
+        while (grow) {
+          for (let b = start.b; b <= b1; b++) if (!ok(a1 + 1, b)) { grow = false; break }
+          if (grow) a1++
         }
       }
-      tex.needsUpdate = true
-    } catch { /* never let the face crash a frame */ }
+      for (let a = start.a; a <= a1; a++) for (let b = start.b; b <= b1; b++) done.add(`${a},${b}`)
+      emitRun(accFor(col), D, pi, start.a, a1, start.b, b1, col, it.ao, allFaces, O)
+    }
   }
-  draw(0)
-  return { tex, draw }
+
+  const geoms = new Map()
+  let tris = 0
+  for (const [hex, a] of accs) { tris += a.triangles; const g = a.build(); if (g) geoms.set(hex, g) }
+  return { geoms, tris, faces, orphans }
+}
+
+/** Emit one merged (or single-cell) face run as a quad. */
+function emitRun(acc, D, pi, a0, a1, b0, b1, colorHex, ao, allFaces, O) {
+  // colour-boundary groove (brief §3.10.9): the darker run is inset 0.3 mm, which
+  // gives every colour transition a hairline AO line for free.
+  const groove = 0.0003 * clamp01((0.60 - lumaOf(colorHex)) / 0.45)
+  // Tier A already runs its quads to full extent wherever the in-plane neighbour
+  // is occupied, so a merged run never needs to grow to meet one. Kept at 0 and
+  // named, because the seam between the two tiers is exactly where a voxel model
+  // usually shows a hairline crack.
+  const G = 0
+  const gA0 = allFaces.has(`${D.i}|${pi}|${a0 - 1},${b0}`) ? G : 0
+  const gA1 = allFaces.has(`${D.i}|${pi}|${a1 + 1},${b0}`) ? G : 0
+  const gB0 = allFaces.has(`${D.i}|${pi}|${a0},${b0 - 1}`) ? G : 0
+  const gB1 = allFaces.has(`${D.i}|${pi}|${a0},${b1 + 1}`) ? G : 0
+
+  let xLo, xHi, yLo, yHi, zLo, zHi
+  if (D.ax === 'd') {                       // plane = depth layer; a = row, b = col
+    const x = D.i === 0 ? xMin(pi) + VX : xMin(pi)
+    xLo = xHi = x - D.n[0] * groove
+    yLo = yMin(a1) - gA1; yHi = yMin(a0) + VX + gA0
+    zLo = zMin(b1) - gB1; zHi = zMin(b0) + VX + gB0
+  } else if (D.ax === 'r') {                // plane = row; a = depth, b = col
+    const y = D.i === 2 ? yMin(pi) + VX : yMin(pi)
+    yLo = yHi = y - D.n[1] * groove
+    xLo = xMin(a1) - gA1; xHi = xMin(a0) + VX + gA0
+    zLo = zMin(b1) - gB1; zHi = zMin(b0) + VX + gB0
+  } else {                                  // plane = column; a = depth, b = row
+    const z = D.i === 4 ? zMin(pi) + VX : zMin(pi)
+    zLo = zHi = z - D.n[2] * groove
+    xLo = xMin(a1) - gA1; xHi = xMin(a0) + VX + gA0
+    yLo = yMin(b1) - gB1; yHi = yMin(b0) + VX + gB0
+  }
+  const lo = [xLo, yLo, zLo], hi = [xHi, yHi, zHi]
+  const uA = UAX[D.i], vA = VAX[D.i]
+  const pt = [], uv = [], col = []
+  for (let i = 0; i < 4; i++) {
+    const su = CORNERS[i][0] > 0, sv = CORNERS[i][1] > 0
+    const w = [lo[0], lo[1], lo[2]]
+    w[uA] = su ? hi[uA] : lo[uA]
+    w[vA] = sv ? hi[vA] : lo[vA]
+    pt.push([w[0] - O[0], w[1] - O[1], w[2] - O[2]])
+    uv.push([w[uA] / VX, w[vA] / VX])
+    col.push(tintRGB(colorHex, D.bias, ao[i]))
+  }
+  acc.quad(pt, D.n, uv, col)
+}
+
+// ===========================================================================
+// HEAD — brief §3. An 11 wide x 17 tall front-plane grid extruded 9 voxels deep.
+// r0 = crown, r16 = chin, c5 = centreline. Build this literally.
+// ===========================================================================
+//        c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10
+const FACE_MAP = [
+  '..#######..', // r0  crown cap, 7 wide
+  '.#SSSSSSS#.', // r1  9 wide
+  '#SSHSSSSSS#', // r2  11 wide from here down; H,H = the highlight DIAGONAL
+  '#SHSSSSSSS#', // r3
+  '#SSSSSSSSS#', // r4
+  '#SsssssssS#', // r5  brow shadow band
+  '#SEESSSEES#', // r6  eye row A — proud ink lid
+  '#SEESSSEES#', // r7  eye row B — recessed pupil + glint
+  '#SSSSSSSSS#', // r8
+  '#SSSSSSSSS#', // r9
+  '#SSS#s#SSS#', // r10 nostrils at c4/c6, proud bridge at c5
+  '#BBBBBBBBB#', // r11 stubble starts (dithered)
+  '#BBBBBBBBB#', // r12
+  '#BBB###BBB#', // r13 mouth bar, 3 wide, c4-c6
+  '#BBBBBBBBB#', // r14
+  '#BBBBBBBBB#', // r15
+  '.##BBBBB##.', // r16 chin taper
+]
+const GLYPH = { '#': 'ink', S: 'skinBase', s: 'skinShade', H: 'skinHilite', B: 'stubble' }
+
+/**
+ * The static skull: L1's map, the seven solid inner layers with their ink outer
+ * ring, the back plane with its scalp block, the eight deleted volume corners,
+ * the wrapped stubble, the ear + earring and the neck.
+ */
+function buildSkull(p, costume) {
+  const S = new VoxelSet('skull')
+  const rows = FACE_MAP.map((s) => s.split(''))
+  const mask = (r, c) => r >= 0 && r <= 16 && c >= 0 && c <= 10 && rows[r][c] !== '.'
+  // Costume 0's pushed-up goggles cover r1-r3, so the two skin-hilite voxels drop
+  // one row to r3 c3 / r4 c2 — same diagonal, still visible (brief §7.4).
+  if (costume === 0) {
+    rows[2][3] = 'S'; rows[3][2] = 'S'; rows[3][3] = 'H'; rows[4][2] = 'H'
+  }
+  const C = (g) => p[GLYPH[g]]
+
+  // --- L1 (d = 1): the front-plane map -------------------------------------
+  for (let r = 0; r <= 16; r++) {
+    for (let c = 0; c <= 10; c++) {
+      const g = rows[r][c]
+      if (g === '.') continue
+      if (g === 'E') { if (r === 6) S.set(1, r, c, p.skinShade); continue }  // r7 = open socket
+      if (r === 13 && c >= 4 && c <= 6) continue                             // recessed mouth
+      S.set(1, r, c, C(g))
+    }
+  }
+  // 1-voxel-period dither on the stubble boundary row (brief §6).
+  // ROUND-3 FIX: this used to alternate `skinBase` (luma 0.77) into the stubble
+  // row (0.46). A near-white checkerboard sitting under the nose and above the
+  // dark mouth bar reads as TEETH — the head came back as a grinning skull. The
+  // dither is now `skinShade` (0.61), an intermediate step between the skin
+  // field above and the stubble field below, so it can never out-value the skin
+  // it is supposed to be dissolving into.
+  for (let c = 2; c <= 8; c += 2) S.set(1, 11, c, p.skinShade)
+  // proud nose bridge (brief §3.6): total nose relief is 24 mm, never a wedge.
+  S.set(0, 10, 5, p.skinShade, F_FEATURE)
+
+  // --- L2..L8: solid skin, ink outer ring ----------------------------------
+  //
+  // ROUND-4 P0 — WHY THE HEAD READ AS AN OPEN CARDBOARD BOX.
+  //
+  // `ring()` is a test on the (r, c) grid, and the old loop applied it to every
+  // depth layer. Columns c0 and c10 are ring cells at every row, so the rule
+  // painted `voxel-ink` into c0 and c10 for ALL SEVEN interior layers — i.e.
+  // the head's entire 9 x 17 LEFT and RIGHT PLANES were solid near-black, not
+  // a one-voxel keyline. Measured on the shipped render: front plane luma 0.81,
+  // side plane 0.26, a 0.32 multiplier where §3.10.5 specifies 0.90 for +/-Z.
+  // The bias table was innocent; the ALBEDO was black. From any angle off dead
+  // centre the head read as a box with one printed face.
+  //
+  // §2 asks for "a one-voxel-thick shell of `voxel-ink` on the head's OUTER
+  // SILHOUETTE" — a keyline, not a filled plane. So the interior layers now
+  // take ink only on the crown row and the chin row (the two rows that ARE the
+  // silhouette from the side), and their side columns are `skin-base`. The
+  // resulting side plane is a 7 x 15 field of skin framed by a genuine 1-voxel
+  // ink border: L1 in front, L9 behind, the crown band above, the chin band
+  // below. The front silhouette keyline is untouched — that lives in L1's own
+  // c0/c10, straight out of the §3.2 map.
+  const ring = (r, c) => !mask(r - 1, c) || !mask(r + 1, c) || !mask(r, c - 1) || !mask(r, c + 1)
+  const capRow = (r, c) => !mask(r - 1, c) || !mask(r + 1, c)
+  for (let d = 2; d <= 8; d++) {
+    for (let r = 0; r <= 16; r++) {
+      for (let c = 0; c <= 10; c++) {
+        if (!mask(r, c)) continue
+        S.set(d, r, c, capRow(r, c) ? p.ink : p.skinBase)
+      }
+    }
+  }
+  // --- L9: back plane, skin-shade + a rear scalp block ---------------------
+  for (let r = 0; r <= 16; r++) {
+    for (let c = 0; c <= 10; c++) {
+      if (!mask(r, c)) continue
+      S.set(9, r, c, ring(r, c) ? p.ink : p.skinShade)
+    }
+  }
+  S.fill(9, 9, 0, 4, 4, 6, p.ink)
+  // --- stubble wrap (brief §3.9) -------------------------------------------
+  // Facial hair that stops dead at the silhouette edge looks painted on. With
+  // the side planes now skin rather than a black slab, the wrap can go where
+  // the brief actually asks for it: 2 voxels onto both side planes and 1 onto
+  // the back. It never touches L1 (d = 1), which is the front silhouette
+  // keyline, so the §2 keyline is still intact everywhere.
+  for (let r = 11; r <= 16; r++) {
+    for (const c of [0, 10]) {
+      if (!mask(r, c) || capRow(r, c)) continue      // never eat the ink border
+      for (const d of [2, 3]) S.set(d, r, c, p.stubble)
+    }
+    for (let c = 1; c <= 9; c++) if (mask(r, c) && !ring(r, c)) S.set(9, r, c, p.stubble)
+  }
+  // --- the eight deleted volume corners (brief §3.9) -----------------------
+  for (const d of [1, 9]) for (const r of [2, 15]) for (const c of [0, 10]) S.del(d, r, c)
+
+  // --- THE SOCKET FIX (round-3 P0) -----------------------------------------
+  // The pupil, glint and mouth-bar voxels are pose-toggled clusters that live
+  // at d = 2 (recessed one voxel, brief §3.4/§3.7). The skull's own L2 fill was
+  // ALSO writing `skinBase` into those same eight lattice cells, so the pose
+  // cube's front quad and the skull's front quad were coplanar at x = +0.084
+  // and z-fought: what shipped was a vacant grey-green socket with a dark smear
+  // in it and no pupil, no glint, and a mouth that flickered. Carve the cells
+  // out of the skull and let the pose clusters own them. When a pose hides them
+  // (KO, blink) L3 is exposed underneath, so the socket deepens to 2 vx — there
+  // is never a hole.
+  for (const c of [2, 3, 7, 8]) S.del(2, 7, c)      // pupil + glint row
+  for (let c = 4; c <= 6; c++) S.del(2, 13, c)      // mouth bar
+  // Same rule for the goggle window (costume 0): the emissive band lives at
+  // d = 1 so it is recessed inside the bezel, so L1 gives up those 7 cells.
+  if (costume === 0) for (let c = 2; c <= 8; c++) S.del(1, 2, c)
+
+  // --- ear + earring: the one permitted silhouette asymmetry (brief §3.8) --
+  S.set(3, 7, -1, p.skinBase, F_FEATURE); S.set(4, 7, -1, p.skinBase, F_FEATURE)
+  S.set(3, 8, -1, p.skinBase, F_FEATURE); S.set(4, 8, -1, p.skinBase, F_FEATURE)
+  S.set(2, 9, -1, p.ink, F_FEATURE)
+  S.set(3, 9, -1, p.gold, F_FEATURE)      // ONE cube. Never a torus.
+  S.set(4, 9, -1, p.ink, F_FEATURE)
+
+  // --- neck: 3 skin voxels wide, ink flanks, 3 rows (0.072 m) -------------
+  for (let r = 17; r <= 19; r++) {
+    S.fill(3, 7, r, r, 4, 6, p.skinBase)
+    S.fill(3, 7, r, r, 3, 3, p.ink); S.fill(3, 7, r, r, 7, 7, p.ink)
+  }
+  return S
+}
+
+/** Mohawk fin — brief §7.1. A stepped blade, welded to the crown. Never slopes. */
+function buildMohawk(p, costume) {
+  const M = new VoxelSet('fin')
+  const tall = costume === 1 ? 8 : 6                     // no fedora in costume 1
+  // leading-edge staircase: 1,2,3,4,5,5(,5,5) voxels of depth, top row first
+  for (let i = 0; i < tall; i++) {
+    const r = -tall + i                                   // r = -tall .. -1
+    const depth = Math.min(5, i + 1)
+    for (let d = 0; d < depth; d++) {
+      for (let c = 4; c <= 6; c++) {
+        const dark = d === 4 || r === -1
+        M.set(d, r, c, dark ? p.mohawkDark : p.mohawk, F_FEATURE)
+      }
+    }
+  }
+  return M
+}
+
+/**
+ * Costume 0: VR goggles worn PUSHED UP on the forehead, rows r1-r3, 9 vx wide.
+ * Costume 1: anaglyph 3D glasses worn ON the eyes, 11 vx wide, rows r5-r7.
+ * Nine and eleven — odd, so they centre on c5 (brief §7.4).
+ */
+function buildGoggles(p, costume) {
+  const G = new VoxelSet('goggles')
+  if (costume === 0) {
+    // ROUND-3 FIX. This used to occupy d = -1 AND d = 0, i.e. TWO voxels proud
+    // (front face x = +0.156). It read as an oversized smooth grey slab that
+    // overhung the head. Brief §7.4 asks for a front face at x = +0.132, which
+    // is d = 0 and d = 0 only: exactly ONE voxel proud, 9 vx (Z) x 3 vx (Y),
+    // rows r1-r3, columns c1-c9. Depth is 1 vx rather than the brief's 3
+    // because d = 1 and d = 2 are occupied by the skull's own front plane and
+    // L2 — carving them out would delete the r3 c3 `skin-hilite` voxel and open
+    // a 3-voxel crater in the forehead every time the goggles snap down.
+    // Declared as divergence D6.
+    for (let r = 1; r <= 3; r++) {
+      for (let c = 1; c <= 9; c++) {
+        if (r === 2 && c >= 2 && c <= 8) continue      // the window opening
+        const edge = r === 1 || r === 3 || c === 1 || c === 9
+        G.set(0, r, c, edge ? p.vrEdge : p.vrBody, F_FEATURE)
+      }
+    }
+    // 7 vx x 1 vx window, RECESSED one voxel inside the bezel opening so the
+    // emissive band sits in a real 24 mm socket and throws a hard top shadow
+    // instead of reading as paint on a flat face.
+    for (let c = 2; c <= 8; c++) G.set(1, 2, c, p.screen, F_FEATURE)
+    // strap: 1 vx, row r2, wrapping both side planes and the back
+    for (let d = 1; d <= 9; d++) { G.set(d, 2, -1, p.ink, F_FEATURE); G.set(d, 2, 11, p.ink, F_FEATURE) }
+    for (let c = 0; c <= 10; c++) G.set(10, 2, c, p.ink, F_FEATURE)
+  } else {
+    for (let r = 5; r <= 7; r++) {
+      for (let c = 0; c <= 10; c++) G.set(0, r, c, p.vrBody, F_FEATURE)
+    }
+    for (let r = 6; r <= 7; r++) {
+      for (let c = 2; c <= 4; c++) G.set(-1, r, c, p.vrEdge, F_FEATURE)   // blue, char's left
+      for (let c = 6; c <= 8; c++) G.set(-1, r, c, p.screen, F_FEATURE)   // red
+    }
+    for (let d = 1; d <= 9; d++) { G.set(d, 6, -1, p.vrBody, F_FEATURE); G.set(d, 6, 11, p.vrBody, F_FEATURE) }
+  }
+  return G
+}
+
+/** Pipe (costume 0) / cigarette (costume 1) — brief §7.3. */
+function buildPipe(p, costume) {
+  const P = new VoxelSet('pipe')
+  if (costume === 0) {
+    // THE STEM MUST READ AS A STEM. Shipped in `pipe-briar-dark` it was the
+    // same brown as the bowl, so bowl + stem merged into one featureless block
+    // hanging off the jaw — at 3 m the critic read it as a chin wound. It is
+    // now vulcanite (`pipe-stem`, roughness 0.16, the glossiest surface above
+    // the collar): a dark, specular, 1-voxel diagonal staircase running from
+    // the mouth bar's c6 edge out to the bowl, exactly as the source draws it.
+    // Three voxels long including the weld cell added at build time, so the
+    // mouth and the bowl are visibly one object.
+    P.set(-1, 13, 7, p.stem, F_FEATURE)                   // stem A, one vx proud
+    P.set(-2, 14, 8, p.stem, F_FEATURE)                   // stem B, one row lower
+    for (let d = -5; d <= -3; d++) {                      // 3x3x3 briar bowl
+      for (let r = 14; r <= 16; r++) {
+        for (let c = 7; c <= 9; c++) {
+          const shade = c === 9 || r === 16
+          P.set(d, r, c, shade ? p.briarDark : p.briar, F_FEATURE)
+        }
+      }
+    }
+    P.del(-4, 14, 8)                                      // the bore: recess 1 vx
+    P.set(-4, 15, 8, p.ink, F_FEATURE)                    // and recolour what it exposes
+  } else {
+    for (let d = -1; d >= -5; d--) P.set(d, 13, 7, p.cig, F_FEATURE)
+    P.set(-6, 13, 7, p.ember, F_FEATURE)
+  }
+  return P
+}
+
+/** Voxel smoke — parented to `head`, so it survives decapitation. Brief §7.3. */
+function buildSmoke(p, costume) {
+  const K = new VoxelSet('smoke')
+  if (costume === 0) {
+    K.set(-5, 10, 9, p.smoke, F_FEATURE)                  // trail A
+    K.set(-5, 6, 9, p.smoke, F_FEATURE)                   // trail B
+    for (let d = -6; d <= -4; d++) {                      // 3 x 2 x 2 puff = 12 voxels
+      for (let r = 1; r <= 2; r++) for (let c = 8; c <= 9; c++) K.set(d, r, c, p.smoke, F_FEATURE)
+    }
+  } else {
+    for (let r = 10; r >= 5; r--) K.set(-6, r, 7, p.smoke, F_FEATURE)
+  }
+  return K
 }
 
 // ---------------------------------------------------------------------------
-// model — faces +X, feet at y=0, ~1.85 m tall
+// model — faces +X, feet at y = 0, 1.85 m tall.
+// Above the collar: 24 mm voxel lattice, flat-shaded, constant roughness.
+// Below the collar: smooth, bevelled, tailored, spatially-varying roughness.
 // ---------------------------------------------------------------------------
 function buildModel(costume = 0) {
-  const p = PAL[costume === 1 ? 1 : 0]
+  const cos = costume === 1 ? 1 : 0
+  const p = PAL[cos]
   const group = new THREE.Group()
   const bones = {}
+  latticeBad = 0
 
-  const coatM = lamb(p.coat)
-  const coatDarkM = lamb(p.coatDark)
-  const trimM = lamb(p.trim)
-  trimM.emissive = new THREE.Color(0x0a3540)
-  const accentM = lamb(p.accent)
-  const skinM = lamb(p.skin)
-  const handM = lamb(p.hand)
-  const shirtM = lamb(p.shirt)
-  const hatM = lamb(p.hat)
-  const bandM = lamb(p.hatBand)
-  const shoeM = lamb(p.shoe)
-  const soleM = lamb(p.sole)
-  const ringM = lamb(p.lensRing)
-  const glassM = lamb(p.glass, { transparent: true, opacity: 0.45 })
+  // =========================================================================
+  // SURFACING — brief §6. Real pbr() presets everywhere; not one region is left
+  // on 'default'. The head deliberately withholds spatially varying roughness
+  // (divergence D2) — it is a picture, not a physical material.
+  // =========================================================================
+  const gridMaps = surfaceMaps('pixel-grid', { nearest: true, scale: 1 })
 
-  // --- hips -----------------------------------------------------------------
+  // Head: `plastic`, NORMAL MAP ONLY. Binding pixel-grid's roughnessMap would
+  // silently reintroduce the spatial variation the design forbids, so we ask for
+  // noMaps (which also makes `roughness` an absolute, not a multiplier) and hand
+  // the normal map back in explicitly.
+  //
+  // THE COOL FLOOR. `emissive` is the one term a warm directional key cannot
+  // rotate: it is added after the light loop, so a teal emissive survives an
+  // 0xffb066 sun where a teal albedo does not. The head — and only the head —
+  // therefore carries a small self-lit floor in its own hue. That is also the
+  // correct art argument: divergence D2 already says the head is a PICTURE, not
+  // a physical material, and a picture keeps its palette under any light.
+  // Sized to 0.55 (skin) so it holds the hue without flattening form; the key
+  // still supplies ~70% of the face's energy and the specular lobe below is
+  // what describes the relief. Well under the Pipeline's bloom threshold.
+  //
+  // ROUGHNESS DOWN, ACROSS THE BOARD (critic: "no specular lobe on the head at
+  // all"). D2 forbids roughness VARIATION on the head, not specular. Skin
+  // 0.62 -> 0.42, ink 0.48 -> 0.30, so the proud lids, the proud nose bridge,
+  // the crown's top chamfers and the keyline all catch a highlight sliver.
+  // envMapIntensity drops 0.55 -> 0.38 because the environment is the other
+  // warm term and it was the second half of the hue error.
+  const headMat = (hex, roughness, extra = {}) => pbr(hex, 'plastic', {
+    noMaps: true,
+    normalMap: gridMaps.normalMap,
+    roughness,
+    metalness: 0,
+    envMapIntensity: 0.38,
+    emissive: p.headGlow,
+    emissiveIntensity: 0.55,
+    flatShading: true,
+    vertexColors: true,
+    name: `punkd-head-${hex.toString(16)}`,
+    ...extra,
+  })
+  const finMat = (hex) => pbr(hex, 'plastic-gloss', {
+    noMaps: true, normalMap: gridMaps.normalMap, roughness: 0.26, metalness: 0,
+    envMapIntensity: 0.45, flatShading: true, vertexColors: true, clearcoat: 0.25,
+    emissive: p.finGlow, emissiveIntensity: 0.45,
+    name: `punkd-fin-${hex.toString(16)}`,
+  })
+  // Smoke, the goggle screen and the eye glints are driven at runtime -> unique.
+  // The detached smoke column is §2's silhouette event and nothing else in the
+  // roster has one, so it has to actually READ. At 0.74 opacity over a busy
+  // arena the four elements dissolved; 0.88 keeps them crisp translucent cubes
+  // with visible edges, which is the joke (his smoke is 8-bit too). Merged into
+  // closed hulls with interior faces culled, `depthWrite: true`, no billboards.
+  const smokeMat = pbr(p.smoke, 'plastic', {
+    unique: true, noMaps: true, roughness: 1.0, flatShading: true, vertexColors: true,
+    transparent: true, opacity: 0.88, depthWrite: true, side: THREE.FrontSide,
+    emissive: 0x424c56, emissiveIntensity: 0.28, name: 'punkd-smoke',
+  })
+  // The goggle window used to be the loudest, most saturated element on the
+  // model, sitting across the 5-row blank forehead §3.3 orders left empty, in
+  // the SAME cyan as the eye glints — three stacked cyan bars and the head read
+  // as a robot. It is now a deep indigo at 0.42 emissive: a different hue from
+  // the eyes, well below the face in value, and it no longer wins the frame.
+  const screenMat = pbr(p.screen, 'screen', {
+    unique: true, noMaps: true, roughness: 0.25, flatShading: true, vertexColors: true,
+    emissive: p.screen, emissiveIntensity: 0.42, envMapIntensity: 0.25, name: 'punkd-vr-screen',
+  })
+  // The glint is a CATCHLIGHT, not an LED. §3.4's own source note is that the
+  // second eye pixel is "a lighter SKIN tint, not white" — it shipped as a full
+  // 24 mm face of saturated cyan and read as a pilot light. Now a pale mint two
+  // steps above `skin-hilite` in the same hue family, so the eye reads as a
+  // highlight on skin. Emissive stays at §3.4's 0.35.
+  const glintMat = pbr(p.glint, 'plastic', {
+    unique: true, noMaps: true, roughness: 0.22, flatShading: true, vertexColors: true,
+    emissive: p.glint, emissiveIntensity: 0.35, envMapIntensity: 0.38, name: 'punkd-glint',
+  })
+  const matForVoxelColor = (hex) => {
+    if (hex === p.smoke) return smokeMat
+    if (hex === p.screen) return screenMat
+    if (hex === p.glint) return glintMat
+    // THE KEYLINE. Measured brown (#754d21, hue 30) on the round-3 shots — the
+    // same warm family and nearly the same luma as the arena wall, on the one
+    // element §2 calls non-negotiable. Cause: `voxel-ink` is 0.15 luma, so
+    // almost none of its screen value comes from its own albedo — it comes from
+    // the warm key and the warm environment, and both of those are orange. The
+    // ink now takes its own cool near-black emissive floor and drops its
+    // environment response to 0.20, which pins the keyline at a near-neutral
+    // luma ~0.24 against a 0.34 wall in every warm arena.
+    if (hex === p.ink) {
+      return headMat(hex, 0.30, {
+        envMapIntensity: 0.20, emissive: p.inkGlow, emissiveIntensity: 0.60,
+      })
+    }
+    if (hex === p.mohawk || hex === p.mohawkDark) return finMat(hex)
+    if (hex === p.stubble) return headMat(hex, 0.42)
+    // The single most common attribute in the source archetype (24.6%) is one
+    // cube 24 mm on a side. A metal with a broad lobe at that size is invisible,
+    // so the earring runs a tight lobe and a strong environment: it is meant to
+    // FLASH as the head turns, which is how a 24 mm stud reads at 3 m.
+    if (hex === p.gold) return pbr(hex, 'gold', {
+      noMaps: true, roughness: 0.18, metalness: 1.0, flatShading: true, vertexColors: true,
+      envMapIntensity: 1.6, emissive: 0x2a1e06, emissiveIntensity: 0.5, name: 'punkd-earring',
+    })
+    if (hex === p.briar || hex === p.briarDark) return pbr(hex, 'wood-rough', {
+      mapOpts: { scale: 30, repeat: [2, 2] }, roughness: 0.95, flatShading: true,
+      vertexColors: true, envMapIntensity: 0.7, name: `punkd-briar-${hex.toString(16)}`,
+    })
+    // Vulcanite pipe stem — §6's 0.16 roughness and the glossiest thing above
+    // the collar. It exists so the two stem voxels read as a STEM joining the
+    // mouth bar to the bowl, instead of the bowl reading as a detached lump on
+    // the jaw.
+    if (hex === p.stem) return pbr(hex, 'plastic-gloss', {
+      noMaps: true, roughness: 0.16, flatShading: true, vertexColors: true,
+      envMapIntensity: 0.5, name: 'punkd-pipe-stem',
+    })
+    if (hex === p.vrBody || hex === p.vrEdge) return headMat(hex, 0.40)
+    if (hex === p.cig || hex === p.ember) return headMat(hex, 0.55)
+    return headMat(hex, 0.42)             // skin family: constant scalar, no map (D2)
+  }
+
+  // Body — everything below the collar responds fully to the environment and
+  // carries real spatially varying roughness (0.16 pipe stem .. 0.86 hat felt).
+  // GABARDINE, NOT WICKER. The round-3 coat ran `cloth-weave` at scale 6 over a
+  // repeat of 3.5 x 4.5 on a 0.9 m panel — a ~10 mm cell, which is basketry at
+  // 3 m and hessian at 30 cm, and it was the ONLY nameable fabric on the whole
+  // model because the sleeves, skirt, trousers and hat all shared it. The cell
+  // is now ~2.5 mm (scale 20 at repeat 7 x 9): at that pitch a 2x2 twill stops
+  // being visible basketry and becomes the faint directional lustre that is
+  // gabardine's actual defining optical property. Three fabrics are now
+  // nameable blind: this twill, the trousers' coarser worsted (different scale
+  // AND a different repeat), and the waxed leather on belt/cuffs/boots.
+  // Sheen drops 0.18 -> 0.11: a fresnel sheen on a near-silhouette normal is
+  // the most likely source of the single-pixel white fizz the critic found
+  // along the coat's left edge and the fedora brim.
+  const coatM = pbr(p.coat, 'suit', {
+    mapOpts: { scale: 20, repeat: [7, 9], wear: 0.25 },
+    roughness: 1.0, sheen: 0.11, sheenRoughness: 0.60, envMapIntensity: 1.1, name: 'punkd-gabardine',
+  })
+  // The coat's roughness SWING (brief §6): 0.80 on dry unworn panels, 0.62 where
+  // the cloth is rubbed — shoulder tops, elbows, the belt line, the storm flap.
+  // One material cannot vary spatially without a mask, so the worn regions get
+  // their own instance and a visibly tighter specular lobe. This is what lets a
+  // highlight actually travel across the gabardine instead of returning one flat
+  // frontal wash from every panel.
+  const coatWornM = pbr(p.coat, 'suit', {
+    mapOpts: { scale: 20, repeat: [7, 9], wear: 0.55 },
+    roughness: 0.82, sheen: 0.16, sheenRoughness: 0.42, envMapIntensity: 1.25,
+    name: 'punkd-gabardine-worn',
+  })
+  const liningM = pbr(p.coatShadow, 'cloth', {
+    mapOpts: { scale: 16, repeat: [4, 4] }, roughness: 0.85, sheen: 0.20,
+    side: THREE.DoubleSide, envMapIntensity: 1.0, name: 'punkd-lining',
+  })
+  const feltM = pbr(p.hat, 'cloth', {
+    mapOpts: { scale: 3, repeat: [2.4, 2.4], wear: 0.3 },
+    roughness: 1.0, sheen: 0.30, sheenRoughness: 0.70, envMapIntensity: 1.1, name: 'punkd-felt',
+  })
+  // The brim is a 4 mm shell whose notch (see the fedora block) leaves two open
+  // cut edges — DoubleSide so you never see through them at a grazing angle.
+  const brimM = pbr(p.hat, 'cloth', {
+    mapOpts: { scale: 3, repeat: [2.4, 2.4], wear: 0.3 },
+    roughness: 1.0, sheen: 0.30, sheenRoughness: 0.70, envMapIntensity: 1.1,
+    side: THREE.DoubleSide, name: 'punkd-felt-brim',
+  })
+  const bandM = pbr(p.hatBand, 'cloth', {
+    mapOpts: { scale: 20, repeat: [8, 1.2] }, roughness: 0.9, envMapIntensity: 1.0, name: 'punkd-grosgrain',
+  })
+  // WAXED LEATHER — the third nameable material. It used to run a roughness
+  // MULTIPLIER of 1.12, i.e. rougher than the leather map's own authored value,
+  // which is why belt, cuff straps and boot uppers read as the same dull cloth
+  // as everything else. 0.62 on the strapping and 0.44 on the boot upper give a
+  // real, tight, waxed lobe, and the toe cap (0.30) is the polished one.
+  const beltM = pbr(p.hat, 'leather', {
+    mapOpts: { scale: 14, repeat: [5, 1.2], wear: 0.45 }, roughness: 0.62, envMapIntensity: 1.15,
+    name: 'punkd-belt',
+  })
+  const shoeM = pbr(p.hat, 'leather', {
+    mapOpts: { scale: 14, repeat: [4, 2.4], wear: 0.45 }, roughness: 0.44, envMapIntensity: 1.35,
+    name: 'punkd-shoe',
+  })
+  const capM = pbr(p.hat, 'leather', {
+    mapOpts: { scale: 14, repeat: [4, 2.4], wear: 0.20 }, roughness: 0.30, envMapIntensity: 1.5,
+    name: 'punkd-toecap',
+  })
+  // The sole shipped as an ALIASED BLACK QUAD — `hat-felt` (luma 0.19) lit only
+  // from below reads as a hole punched in the floor and breaches the contract's
+  // 30-sRGB albedo floor once shading lands. It gets its own lighter rubber
+  // (luma 0.27) and a real chamfered perimeter so it catches a rim.
+  const soleM = pbr(p.sole, 'rubber', {
+    mapOpts: { scale: 10, repeat: [4, 2] }, roughness: 0.8, envMapIntensity: 0.9,
+    name: 'punkd-sole',
+  })
+  const gloveM = pbr(p.hat, 'leather', {
+    mapOpts: { scale: 14, repeat: [6, 6], wear: 0.5 }, roughness: 0.70, envMapIntensity: 1.0,
+    name: 'punkd-glove',
+  })
+  const shirtM = pbr(p.shirt, 'cloth', {
+    mapOpts: { scale: 24, repeat: [3, 4] }, roughness: 0.95, envMapIntensity: 0.9, name: 'punkd-shirt',
+  })
+  const tieM = pbr(p.coatShadow, 'cloth', {
+    mapOpts: { scale: 24, repeat: [1.5, 6] }, roughness: 0.95, envMapIntensity: 0.95, name: 'punkd-tie',
+  })
+  // Trousers move from `coat-shadow` (luma 0.34) to `hat-felt` (0.19). §5's
+  // three-value ladder is head 0.77 / coat 0.51 / hat + shoes + trousers 0.19,
+  // and with the legs sitting at 0.34 the bottom of the figure was a fourth
+  // value that muddied the read at 160x90. Squint test: three greys, stacked.
+  // A DIFFERENT weave from the coat, deliberately: coarser worsted, half the
+  // cell density, no sheen. Two cloths at the same cell pitch are one cloth.
+  const trouserM = pbr(p.hat, 'suit', {
+    mapOpts: { scale: 11, repeat: [3, 4.5] }, roughness: 0.92, sheen: 0.06, envMapIntensity: 1.0,
+    name: 'punkd-trouser',
+  })
+  // Buttons are HORN (§6) — a lower-roughness top so each one catches a real
+  // highlight, plus a darker leather rim ring at each button (see the button
+  // loop) so they stop reading as flat decals sharing the coat's response.
+  const hornM = pbr(p.horn, 'horn', { mapOpts: { scale: 40, repeat: [1, 1] }, roughness: 0.34, envMapIntensity: 1.2, name: 'punkd-button' })
+  const steelM = pbr(0x9aa0a8, 'metal', { mapOpts: { scale: 18, repeat: [2, 2] }, roughness: 0.7, name: 'punkd-hardware' })
+  const goldM = pbr(p.gold, 'gold', { mapOpts: { scale: 22, repeat: [2, 2] }, roughness: 0.75, name: 'punkd-buckle' })
+  // THE FOUR MINT SLIVERS — deleted. `trim-cyan` was running as 4 mm x 380 mm
+  // unshaded strips down both lapels, a 4 mm strip across the under-collar and
+  // one at the cuff. At 4 mm they are sub-pixel in width at fighting-game
+  // distance, so they rendered as perfectly straight, hard-edged, falloff-free
+  // saturated lines with no thickness — indistinguishable from a z-fight or a
+  // stray emissive strip, and the first thing a stranger's eye landed on. A
+  // glitch artefact in a beauty shot is the fastest "amateur" signal there is.
+  // `trim-cyan` now survives on ONE object: the magnifying lens's inner bead,
+  // which is a 2.5 mm torus on a prop, reads as a coated optic, and is nowhere
+  // near a silhouette. Everything that used to be piping is coat lining.
+  const pipingM = pbr(p.trim, 'plastic-gloss', {
+    noMaps: true, roughness: 0.35, emissive: p.trim, emissiveIntensity: 0.08, name: 'punkd-piping',
+  })
+  const glassM = pbr(p.glass, 'glass', {
+    unique: true, noMaps: true, roughness: 0.04, ior: 1.5, thickness: 0.004,
+    transparent: true, opacity: 0.5, name: 'punkd-lens-glass',
+  })
+
+  // small local helpers ----------------------------------------------------
+  const pivot = (parent, x = 0, y = 0, z = 0) => {
+    const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g); return g
+  }
+  const bent = (parent, rz = 0, rx = 0, ry = 0) => {
+    const g = new THREE.Group(); g.rotation.set(rx, ry, rz); parent.add(g); return g
+  }
+  const put = (parent, geo, mat, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => {
+    const m = new THREE.Mesh(geo, mat)
+    m.position.set(x, y, z); m.rotation.set(rx, ry, rz)
+    parent.add(m); return m
+  }
+  /** Mesh a VoxelSet into one object with one merged geometry per colour. */
+  let headTris = 0, headFaces = 0, headCalls = 0
+  const voxObject = (vs, name, opts = {}) => {
+    const g = new THREE.Group()
+    g.name = name
+    const { geoms, tris, faces } = meshVoxels(vs, { origin: HEAD_PIVOT, ...opts })
+    headTris += tris; headFaces += faces
+    for (const [hex, geo] of geoms) {
+      const m = new THREE.Mesh(geo, matForVoxelColor(hex))
+      m.name = `${name}-${hex.toString(16)}`
+      m.userData.surface = 'plastic'
+      g.add(m); headCalls++
+    }
+    return g
+  }
+  /** A one-off relief cluster used by the face-pose table. */
+  const poseVox = (cells, hex, name) => {
+    const vs = new VoxelSet(name)
+    for (const [d, r, c] of cells) vs.set(d, r, c, hex, F_FEATURE)
+    const o = voxObject(vs, name)
+    return o
+  }
+
+  // Local vertex warp — the cached geometries are SHARED, so clone first.
+  const warp = (geo, fn) => {
+    const g = geo.clone()
+    const pos = g.attributes.position
+    const v = new THREE.Vector3()
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i); fn(v)
+      pos.setXYZ(i, v.x, v.y, v.z)
+    }
+    pos.needsUpdate = true
+    g.computeVertexNormals(); g.computeBoundingSphere(); g.computeBoundingBox()
+    return g
+  }
+  // rrp(widthZ, depthX, radius) — loft() reads roundedRectPoints(w, h) as w->Z, h->X.
+  const rrp = (wz, dx, r, seg = 3) => roundedRectPoints(wz, dx, r, seg)
+
+  /**
+   * A LOOSE voxel — one that lives off the head lattice (the wrist dissolve,
+   * the escaped voxel on the lens ring) but must wear a head material.
+   *
+   * Every head material carries `vertexColors: true`, because the lattice bake
+   * ships its face bias and AO in the colour attribute. A geometry with no
+   * `color` attribute under such a material gets the WebGL attribute default,
+   * (0, 0, 0), and the mesh renders BLACK. So these cubes get their own colour
+   * attribute, baked with the same per-face brightness bias as the lattice
+   * (AO = 1.0: nothing is adjacent to them) — which is also what makes them
+   * read as having come off the head rather than as stray boxes.
+   * roundedBox() hands back a CACHED buffer, so clone before writing to it.
+   */
+  const looseVoxel = (hex) => {
+    const g = roundedBox(VX, VX, VX, CHAMFER, 1).clone()
+    const nor = g.attributes.normal
+    const col = new Float32Array(nor.count * 3)
+    for (let i = 0; i < nor.count; i++) {
+      const t = tintRGB(hex, normalBias(nor.getX(i), nor.getY(i), nor.getZ(i)), 1.0)
+      col[i * 3] = t[0]; col[i * 3 + 1] = t[1]; col[i * 3 + 2] = t[2]
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3))
+    g.name = `loose-voxel-${hex.toString(16)}`
+    return g
+  }
+
+  // =========================================================================
+  // HIPS + LEGS — trousers, 1940s cap-toe oxfords, 5 degrees of toe spring.
+  // =========================================================================
   const hips = pivot(group, 0, 0.86, 0)
   bones.hips = hips
-  hips.add(box(0.34, 0.2, 0.42, coatDarkM, 0, 0.0, 0))
-  hips.add(box(0.36, 0.07, 0.44, accentM, 0, 0.08, 0)) // belt of glitch
+  put(hips, loft([
+    { y: -0.10, shape: rrp(0.330, 0.240, 0.055) },
+    { y: -0.02, shape: rrp(0.380, 0.270, 0.060) },
+    { y: 0.06, shape: rrp(0.372, 0.262, 0.060) },
+    { y: 0.12, shape: rrp(0.360, 0.250, 0.055) },
+  ], { subdivide: 3 }), trouserM, 0, 0, 0)
 
-  // --- legs: rectangular columns, square shoes -----------------------------
   for (const side of [1, -1]) {
-    const leg = pivot(hips, 0, -0.06, 0.13 * side)
+    const leg = pivot(hips, 0.05 * side, -0.02, 0.150 * side)
     bones[side === 1 ? 'legL' : 'legR'] = leg
-    leg.add(box(0.17, 0.42, 0.19, coatDarkM, 0, -0.21, 0))
+    // hip joint sleeved into the pelvis so the socket never opens
+    put(leg, sleeve(0.108, 0.092, 0.10, { radialSeg: 18 }), trouserM, 0, -0.02, 0, Math.PI, 0, 0)
+    put(leg, taperedCapsule(0.090, 0.072, 0.30, 4, 18), trouserM, 0, -0.22, 0)
     const shin = pivot(leg, 0, -0.42, 0)
     bones[side === 1 ? 'shinL' : 'shinR'] = shin
-    shin.add(box(0.15, 0.32, 0.17, skinM, 0, -0.17, 0))
-    shin.add(box(0.32, 0.11, 0.18, shoeM, 0.07, -0.325, 0))
-    shin.add(box(0.34, 0.035, 0.2, soleM, 0.07, -0.372, 0)) // glowing sole
+    put(shin, weld(0.072, 0.068, 0.03, { bulge: 0.16, radialSeg: 18 }), trouserM, 0, 0.005, 0)
+    put(shin, taperedCapsule(0.066, 0.052, 0.21, 4, 16), trouserM, 0, -0.16, 0)
+    // trouser break over the shoe
+    put(shin, skirt(0.056, 0.070, 0.070, { radialSeg: 18, curve: 0.7 }), trouserM, 0, -0.255, 0)
+    // --- shoe: cap-toe oxford, sole 24 mm, 5 deg toe spring ----------------
+    const foot = bent(shin, 0, 0, 0.30 * side)
+    foot.position.set(0, -0.42, 0)
+    foot.rotation.set(0, 0.30 * side, 0)
+    put(foot, taperedBox(0.185, 0.112, 0.150, 0.098, 0.085, 0.028, { rim: 0.020, cornerSeg: 3 }),
+      shoeM, 0.010, 0.043, 0)
+    put(foot, taperedBox(0.120, 0.104, 0.070, 0.070, 0.055, 0.026, { rim: 0.022, cornerSeg: 3 }),
+      capM, 0.118, 0.030, 0, 0, 0, -0.087)                        // cap toe + toe spring
+    // SOLE — its own lighter rubber (luma 0.27, not the 0.19 hat felt) and a
+    // 5 mm chamfer on the whole perimeter, so the bottom edge catches a rim
+    // from the floor bounce instead of dying as a pure-black aliased quad with
+    // a hole-in-the-floor read.
+    put(foot, roundedBox(0.290, 0.024, 0.120, 0.005, 2), soleM, 0.030, 0.012, 0)
+    put(foot, roundedBox(0.086, 0.030, 0.104, 0.005, 2), soleM, -0.075, 0.015, 0)  // heel block
+    // WELT — a real 5 mm leather rand standing proud of both sole and upper, so
+    // there is a modelled break line between them rather than one dark mass.
+    put(foot, roundedBox(0.296, 0.007, 0.126, 0.003, 2), beltM, 0.030, 0.026, 0)
+    // toe-cap seam at 62% of the length — real geometry, not a texture
+    put(foot, roundedBox(0.006, 0.030, 0.108, 0.002, 1), beltM, 0.057, 0.040, 0)
+    // laces
+    for (let i = 0; i < 3; i++) put(foot, roundedBox(0.008, 0.007, 0.062, 0.003, 1), beltM, -0.010 - i * 0.024, 0.078 - i * 0.004, 0)
   }
 
-  // --- torso + trench coat shell -------------------------------------------
+  // =========================================================================
+  // TORSO — one continuous lofted shell: pelvis -> waist pinch -> chest ->
+  // rolled shoulder. Rounded-rect cross-section, 0.05 m corner radius.
+  // =========================================================================
   const torso = pivot(hips, 0, 0.08, 0)
   bones.torso = torso
-  torso.add(box(0.46, 0.48, 0.34, shirtM, 0.01, 0.26, 0))
-  torso.add(box(0.5, 0.54, 0.42, coatM, -0.02, 0.27, 0)) // coat body
-  torso.add(box(0.52, 0.56, 0.1, coatM, -0.02, 0.27, 0.22))
-  torso.add(box(0.52, 0.56, 0.1, coatM, -0.02, 0.27, -0.22))
-  // lapels — angled cyan-trimmed slabs
-  torso.add(box(0.06, 0.3, 0.12, trimM, 0.24, 0.36, 0.1, 0, 0, -0.35))
-  torso.add(box(0.06, 0.3, 0.12, trimM, 0.24, 0.36, -0.1, 0, 0, -0.35))
-  torso.add(box(0.05, 0.18, 0.06, accentM, 0.26, 0.2, 0)) // tie of chaos
+  const T = (world) => world - 0.940                                // torso-local Y
+  put(torso, loft([
+    { y: T(0.900), shape: rrp(0.376, 0.268, 0.058) },
+    { y: T(1.010), shape: rrp(0.360, 0.250, 0.055) },               // belt line, waist 0.69 taper
+    { y: T(1.110), shape: rrp(0.400, 0.272, 0.058) },
+    { y: T(1.220), shape: rrp(0.440, 0.300, 0.062) },               // chest
+    { y: T(1.320), shape: rrp(0.474, 0.292, 0.070) },
+    { y: T(1.372), shape: rrp(0.430, 0.250, 0.075) },               // rolled shoulder
+    { y: T(1.412), shape: rrp(0.260, 0.180, 0.070) },
+    { y: T(1.446), shape: rrp(0.176, 0.150, 0.062) },               // collar stand
+  ], { subdivide: 3, caps: true }), coatM, -0.008, 0, 0)
 
-  // coat hem — extra bone, spring-follow secondary motion
-  const coat = pivot(torso, -0.04, 0.02, 0)
-  bones.coat = coat
-  const coatW = bent(coat, 0.06)
-  coatW.add(box(0.54, 0.46, 0.46, coatM, -0.04, -0.24, 0))
-  coatW.add(box(0.55, 0.06, 0.47, trimM, -0.04, -0.45, 0)) // glowing hem line
+  // shirt + tie showing through the open coat V
+  put(torso, loft([
+    { y: T(1.020), shape: rrp(0.230, 0.150, 0.050) },
+    { y: T(1.240), shape: rrp(0.270, 0.180, 0.055) },
+    { y: T(1.400), shape: rrp(0.210, 0.150, 0.050) },
+  ], { subdivide: 2 }), shirtM, 0.020, 0, 0)
+  put(torso, taperedBox(0.024, 0.070, 0.020, 0.044, 0.300, 0.010, { rim: 0.008 }),
+    tieM, 0.150, T(1.240), 0, 0, 0, -0.05)
+  put(torso, roundedBox(0.026, 0.046, 0.052, 0.012, 2), tieM, 0.152, T(1.408), 0)   // knot
 
-  // --- arms: rectangular, boxy shoulder pads -------------------------------
+  // --- lapels: two plates swung open, lining + one piping line -------------
+  const lapelOutline = superellipsePoints(0.100, 0.400, 3.4, 14)
   for (const side of [1, -1]) {
-    const arm = pivot(torso, 0, 0.42, 0.3 * side)
-    bones[side === 1 ? 'armL' : 'armR'] = arm
-    arm.add(box(0.2, 0.14, 0.2, coatDarkM, 0, 0.02, 0.02 * side)) // pad
-    arm.add(box(0.15, 0.36, 0.17, coatM, 0, -0.2, 0))
-    const fore = pivot(arm, 0, -0.4, 0)
-    bones[side === 1 ? 'forearmL' : 'forearmR'] = fore
-    fore.add(box(0.13, 0.3, 0.15, coatM, 0, -0.14, 0))
-    fore.add(box(0.14, 0.05, 0.16, trimM, 0, -0.29, 0)) // cuff
-    const hand = box(0.17, 0.14, 0.15, handM, 0.02, -0.38, 0)
-    fore.add(hand)
-    fore.userData.handMesh = hand // Detached-Hand Punch borrows this
+    const lp = bent(torso, -0.30 * side, 0, 0)
+    lp.position.set(0.108, T(1.230), 0.070 * side)
+    lp.rotation.set(0, 0, 0.16)
+    const pl = put(lp, plate(lapelOutline, 0.014, 0.005, { crown: 0.006, faceSeg: 2 }), coatM, 0, 0, 0, 0, Math.PI / 2, 0)
+    pl.rotation.set(0, Math.PI / 2, 0)
+    put(lp, plate(superellipsePoints(0.088, 0.380, 3.4, 12), 0.004, 0.0015), liningM, -0.010, 0, 0, 0, Math.PI / 2, 0)
+    // (the 4 mm cyan lapel piping that used to live here is gone — see pipingM)
+  }
+  // =========================================================================
+  // THE POPPED COLLAR — brief §1's SINGLE STRONGEST CUE, rebuilt from scratch.
+  //
+  // §1: "the strongest cue is not the mohawk or the pipe — it is the RESOLUTION
+  // MISMATCH AT THE COLLAR: a stepped, aliased, staircase-edged cube head
+  // emerging from a soft, draped, bevelled gabardine collar."
+  //
+  // What shipped was a pair of 76 mm wings at z = +/-0.078 and x = -0.010 —
+  // i.e. INSIDE the skull's own footprint (the head spans z +/-0.132 and
+  // x +/-0.108) and behind it from every camera angle short of full profile.
+  // The head simply sat on a shoulder mass and the cue the whole brief was
+  // built around was invisible in all three shots.
+  //
+  // Rebuilt to actually frame the jaw:
+  //   - both wings moved OUTBOARD to z = +/-0.150, clear of the skull's 0.132
+  //     half-width, so an 18 mm strip of coat runs up either side of the chin;
+  //   - top edge at world y = 1.489 (chin 1.442 + 0.047), so the collar
+  //     OVERLAPS and frames the jaw exactly as §4.1 requires, instead of
+  //     butting against the neck;
+  //   - a back stand behind the head at x = -0.130, which is what makes a
+  //     popped collar read as popped from the front;
+  //   - a 4 mm rolled top edge (§6 micro-detail e) in lining, so the thing the
+  //     eye lands on where the aliased voxel chin meets the collar is a soft
+  //     BEVELLED roll — the resolution mismatch, staged.
+  // =========================================================================
+  const collar = bent(torso, 0, 0, 0)
+  collar.position.set(0.010, T(1.408), 0)
+  for (const side of [1, -1]) {
+    const wing = pivot(collar, -0.030, 0.028, 0.150 * side)
+    wing.rotation.set(0.20 * side, 0, 0.16)
+    put(wing, taperedBox(0.150, 0.015, 0.122, 0.012, 0.105, 0.006, { rim: 0.005 }), coatM, 0, 0, 0)
+    // lining on the inboard face — a popped collar shows its underside, and
+    // this is the darker value that separates the collar from the head above it
+    put(wing, taperedBox(0.140, 0.005, 0.114, 0.004, 0.098, 0.002), liningM, 0, 0, -0.010 * side)
+    // 4 mm collar roll along the top edge — the soft bevelled edge that the
+    // aliased chin sits against
+    put(wing, taperedCapsule(0.005, 0.004, 0.120, 3, 10), liningM, 0.006, 0.052, 0, 0, 0, Math.PI / 2)
+    // topstitched collar seam, 3 mm so it never fizzes at a silhouette
+    put(wing, roundedBox(0.132, 0.003, 0.003, 0.001, 1), coatWornM, 0, -0.040, -0.009 * side)
+  }
+  // back stand — leaning back off the shoulder line, wider than the head
+  put(collar, taperedBox(0.032, 0.260, 0.028, 0.216, 0.112, 0.012, { rim: 0.010 }),
+    coatM, -0.130, 0.032, 0, 0, 0, 0.18)
+  put(collar, taperedBox(0.008, 0.240, 0.008, 0.200, 0.104, 0.004, { rim: 0.003 }),
+    liningM, -0.112, 0.032, 0, 0, 0, 0.18)
+  put(collar, taperedCapsule(0.005, 0.004, 0.210, 3, 10), liningM, -0.140, 0.086, 0, Math.PI / 2, 0, 0)
+  // throat-latch tab, hanging open on the left lapel
+  put(collar, roundedBox(0.008, 0.070, 0.030, 0.003, 1), beltM, 0.062, -0.010, 0.086, 0, 0, 0.25)
+  put(collar, filletRing(0.012, 0.004, 6, 12), steelM, 0.064, -0.048, 0.090, Math.PI / 2, 0, 0)
+
+  // --- storm flap (character's right only), epaulettes, back yoke ----------
+  // All three are WORN panels: they carry `coatWornM` (roughness 0.74, sheen
+  // 0.26) against the shell's 0.95, so the shoulder line and the flap edge pick
+  // up a highlight the flat panels do not. That is the coat's roughness swing.
+  // STORM FLAP — it read as a decal: a rectangle flush on the chest with a
+  // hairline outline, no thickness and no cast shadow. Now 18 mm thick, stood
+  // 14 mm off the chest on a recessed lining backing panel, and free at the
+  // bottom edge — so there is a real dark gap under its lower edge for the key
+  // to throw a shadow into, which is the whole reason a gun flap reads.
+  // The chest shell's front face at this height sits at x = +0.142. The flap's
+  // BACK face is at +0.150 — a real 8 mm air gap, not a decal flush on the
+  // panel — and the dark lining strip below it fills the shadow the free bottom
+  // edge throws into that gap.
+  put(torso, plate(superellipsePoints(0.180, 0.140, 4.0, 14), 0.016, 0.006, { crown: 0.004 }),
+    coatWornM, 0.158, T(1.294), -0.090, 0, Math.PI / 2, 0)
+  put(torso, roundedBox(0.014, 0.012, 0.176, 0.004, 2), liningM, 0.147, T(1.294) - 0.072, -0.090)
+  // 3 mm double-needle topstitch on three sides — real relief, not albedo, and
+  // never sub-millimetre: a 1.5 mm strip is under a pixel wide at match
+  // distance and fizzes into the single-white-dot artefact on the silhouette.
+  for (const [dy, dz, h, w] of [[0.070, 0, 0.003, 0.176], [-0.070, 0, 0.003, 0.176],
+    [0, 0.088, 0.140, 0.003], [0, -0.088, 0.140, 0.003]]) {
+    put(torso, roundedBox(0.005, h + 0.003, w + 0.003, 0.0015, 1), coatWornM,
+      0.167, T(1.294) + dy, -0.090 + dz)
+  }
+  for (const side of [1, -1]) {
+    // epaulette: a real strap with a rolled edge and its own topstitch line,
+    // standing 10 mm off the shoulder, buttoned inboard.
+    put(torso, taperedBox(0.042, 0.112, 0.038, 0.102, 0.010, 0.004, { rim: 0.003 }),
+      coatWornM, 0.010, T(1.374), 0.180 * side, 0, 0, 0)
+    put(torso, roundedBox(0.090, 0.003, 0.004, 0.0012, 1), coatWornM, 0.010, T(1.381), 0.166 * side)
+    put(torso, roundedBox(0.090, 0.003, 0.004, 0.0012, 1), coatWornM, 0.010, T(1.381), 0.194 * side)
+    put(torso, roundedCylinder(0.006, 0.004, 0.0015, 12, 2), hornM, 0.010, T(1.383), 0.132 * side)
+  }
+  // back yoke / storm cape: a panel with a free, thickened bottom hem so it
+  // terminates on a real edge instead of fading into the shell.
+  put(torso, plate(superellipsePoints(0.460, 0.180, 4.0, 16), 0.007, 0.003), coatWornM,
+    -0.142, T(1.270), 0, 0, Math.PI / 2, 0)
+  put(torso, roundedBox(0.010, 0.006, 0.436, 0.0025, 1), coatWornM, -0.146, T(1.182), 0)
+  // Double-breasted: 6 horn buttons, 2 columns of 3. They used to be featureless
+  // domes sharing the coat's albedo AND its roughness, i.e. decals. Each one now
+  // sits in a darker leather rim ring and carries a low-roughness horn top, so
+  // it catches its own highlight and reads as a separate object at 30 cm.
+  for (const yy of [1.02, 1.16, 1.30]) {
+    for (const side of [1, -1]) {
+      put(torso, filletRing(0.011, 0.0035, 6, 14), beltM, 0.144, T(yy), 0.050 * side, 0, 0, Math.PI / 2)
+      put(torso, roundedCylinder(0.009, 0.006, 0.0025, 14, 2), hornM, 0.147, T(yy), 0.050 * side, 0, 0, Math.PI / 2)
+      // real buttonhole: a 12 mm slit cut into the button stand
+      put(torso, roundedBox(0.004, 0.013, 0.005, 0.0015, 1), liningM, 0.150, T(yy), 0.084 * side)
+    }
+  }
+  // Slanted welt pockets, 22 deg off horizontal, 0.150 m opening. Built as THREE
+  // pieces so they catch light: a recessed lining slot, a 6 mm welt lip standing
+  // proud below it, and a topstitch bead above. The previous build was one flat
+  // 6 mm plank per side with no lip and no recess — detail painted into albedo,
+  // which is exactly what the checklist forbids.
+  for (const side of [1, -1]) {
+    const pk = pivot(torso, 0.118, T(1.000), 0.116 * side)
+    pk.rotation.set(0.38 * side, 0, 0)
+    put(pk, roundedBox(0.010, 0.016, 0.150, 0.003, 1), liningM, 0, 0, 0)           // the slot
+    put(pk, roundedBox(0.016, 0.014, 0.152, 0.005, 2), coatM, 0.006, -0.012, 0)    // welt lip
+    put(pk, roundedBox(0.005, 0.003, 0.150, 0.0012, 1), coatWornM, 0.012, 0.010, 0) // topstitch
+  }
+  // belt — tied in a knot on the character's left, buckle hanging unused
+  put(torso, loft([
+    { y: T(0.982), shape: rrp(0.372, 0.262, 0.056) },
+    { y: T(1.038), shape: rrp(0.372, 0.262, 0.056) },
+  ], { subdivide: 1 }), beltM, -0.008, 0, 0)
+  put(torso, roundedBox(0.030, 0.062, 0.048, 0.010, 2), beltM, 0.128, T(1.010), 0.096)     // the knot
+  put(torso, taperedBox(0.014, 0.036, 0.010, 0.028, 0.160, 0.006, { rim: 0.004 }),
+    beltM, 0.124, T(0.930), 0.120, 0, 0, 0.10)                                             // tail
+  put(torso, filletRing(0.014, 0.004, 6, 14), steelM, 0.118, T(1.010), 0.030, 0, 0, Math.PI / 2)
+  put(torso, filletRing(0.014, 0.004, 6, 14), steelM, 0.118, T(1.010), -0.030, 0, 0, Math.PI / 2)
+  put(torso, roundedBox(0.010, 0.046, 0.032, 0.004, 2), goldM, 0.126, T(1.010), -0.076)    // unused buckle
+
+  // =========================================================================
+  // COAT HEM — bone `coat` (spring-follow). A-line trapezoid, 0.640 m at the
+  // hem, an inverted box pleat vent below the belt, lining on the inside.
+  // =========================================================================
+  const coat = pivot(torso, -0.008, T(1.010), 0)
+  bones.coat = coat
+  const coatW = bent(coat, 0.02)
+  const hemSecs = [
+    { y: 0.010, shape: rrp(0.372, 0.262, 0.056) },
+    { y: -0.140, shape: rrp(0.430, 0.300, 0.062) },
+    { y: -0.330, shape: rrp(0.530, 0.360, 0.075) },
+    { y: -0.590, shape: rrp(0.640, 0.412, 0.090) },
+  ]
+  // ===== NEGATIVE SPACE: THE OPEN COAT =====================================
+  // §2 lists FOUR negative-space cues as "what defines the shape". Two of them
+  // did not exist: the trench shipped as a CLOSED CYLINDER with a lit flat
+  // underside quad at the hem, front panels fully shut, no shin ever visible.
+  //
+  // `openFront` cuts them both out of the lofted shell. It rides the hem's
+  // bottom rings UP wherever a vertex is forward of the belt line and near the
+  // centreline, which — because the loft already runs `caps: false` — turns the
+  // front of the skirt into a real opening you see the shins through, not a
+  // painted seam. Falloff is smooth in Z so the cut reads as two panels swung
+  // open rather than as a rectangular bite:
+  //   - full 0.300 m of lift on the centreline (the open-coat V),
+  //   - fading to zero by |z| = 0.235 (the two hem triangles either side of the
+  //     shins, ~0.10 m wide x 0.30 m tall, exactly §2's numbers),
+  //   - nothing at all behind x = 0, so the back vent and the A-line trapezoid
+  //     that carry the whole lower silhouette are untouched.
+  const openFront = (v) => {
+    if (v.y > -0.150 || v.x <= 0.02) return
+    const zFall = clamp01((0.235 - Math.abs(v.z)) / 0.150)
+    const xFall = clamp01((v.x - 0.02) / 0.110)
+    const depth = clamp01((-0.150 - v.y) / 0.440)
+    v.y += 0.300 * zFall * zFall * xFall * depth
+  }
+  put(coatW, warp(loft(hemSecs, { subdivide: 3, caps: false }), openFront), coatM, 0, 0, 0)
+  // The lining shell used to be the same loft translated UP 4 mm. On an A-line
+  // skirt that is a 4 mm offset along Y, not along the surface normal, so on the
+  // steep panels the two shells sat well under a millimetre apart and z-fought —
+  // which is the most likely source of the bright single-pixel dots the critic
+  // found running along the coat's left edge and the left leg. The lining is now
+  // a genuine INSET: every section scaled to 0.972 (a real 5-9 mm normal gap all
+  // the way round) and lifted 2 mm, so the two surfaces can never trade depth.
+  put(coatW, warp(loft(hemSecs.map((s) => ({
+    y: s.y + 0.002,
+    shape: s.shape.map((q) => q * 0.972),          // flat [x, y, x, y, ...] ring
+  })), { subdivide: 3, caps: false }), openFront), liningM, 0, 0, 0)
+  // Hem lip. This used to be a CIRCULAR skirt of radius 0.334 hung on an
+  // ELLIPTICAL hem (0.640 Z x 0.412 X): it stood 0.128 m proud of the coat front
+  // and back, which is the "dead-straight conical lip that reads as a lampshade"
+  // and it is where the model's x-extent came from. Squashed to 0.644 in X so it
+  // follows the A-line exactly and reads as a turned hem.
+  // The hem lip follows the same cut — it is the turned edge of the panels that
+  // just swung open, so it has to open with them. (It is also what used to give
+  // the hem its LIT FLAT UNDERSIDE: a closed ring seen from below.)
+  put(coatW, warp(warp(skirt(0.318, 0.328, 0.026, { radialSeg: 30, curve: 0.4 }),
+    (v) => { v.x *= 0.644 }), (v) => { v.y -= 0.588; openFront(v); v.y += 0.588 }),
+  liningM, 0, -0.588, 0)
+  // Back vent: an inverted box pleat that HUGS the coat's back surface. It used
+  // to be a 0.130-deep slab centred 0.190 behind the coat bone, i.e. a plank
+  // hanging 45 mm clear of the shell in mid-air with an unattached hard end.
+  // Now it is a 22 mm ridge, tilted 0.127 rad to follow the A-line's back rake,
+  // so it starts inside the belt loft and ends inside the hem.
+  put(coatW, taperedBox(0.078, 0.022, 0.078, 0.022, 0.470, 0.010, { rim: 0.008 }),
+    coatM, -0.170, -0.300, 0, 0, 0, -0.127)
+  put(coatW, roundedCylinder(0.008, 0.005, 0.002, 12, 2), hornM, -0.146, -0.072, 0, 0, 0, Math.PI / 2)
+  // The two front panels are cut 20 mm longer — the lowest points of the hem.
+  // Moved OUTBOARD from z = +-0.150 to +-0.238: at z = +-0.150 these corner
+  // pieces occupied exactly the same 0.085..0.215 z-band as the shin capsule
+  // and the coat visibly clipped through the leg.
+  for (const side of [1, -1]) {
+    put(coatW, taperedBox(0.062, 0.090, 0.056, 0.106, 0.030, 0.012, { rim: 0.008 }),
+      coatM, 0.170, -0.602, 0.250 * side)
   }
 
-  // magnifying lens — extra bone parented to the right hand
-  const lens = pivot(bones.forearmR, 0.05, -0.44, 0)
+  // =========================================================================
+  // ARMS — raglan shoulder, sleeved joints, gloved four-finger mitt hands.
+  // Reach is preserved EXACTLY: shoulder -> hand centre = 0.360 + 0.420 = 0.780 m,
+  // the same as the pre-overhaul rig, so no hitbox `forward` constant moves.
+  // =========================================================================
+  for (const side of [1, -1]) {
+    const arm = pivot(torso, 0, 0.420 + (side === -1 ? 0.020 : 0), 0.230 * side)
+    bones[side === 1 ? 'armL' : 'armR'] = arm
+    // Deltoid + raglan seam. The shoulder is a rounded cap, not a pad.
+    // JOINT FIX: the cap used to be a lone superellipsoid that the upper-arm
+    // capsule simply drove through, leaving a visible value seam where the two
+    // surfaces crossed. The cap now wears the worn-panel material (so the
+    // shoulder top is the brightest specular event on the coat), an inboard
+    // sleeve closes it into the torso shell, and a `weld` barrel bridges cap to
+    // upper arm so the deltoid-to-bicep transition is one continuous form.
+    // ROUND-4: THREE VISIBLE INTERSECTIONS PER ARM, all fixed by one rule.
+    // The deltoid ellipsoid wore `coatWornM` while the sleeve and the upper arm
+    // wore `coatM` — two different roughness/sheen responses meeting along an
+    // intersection curve, which is exactly what draws a lens-shaped seam across
+    // a shoulder. A surface intersection you cannot see is not a defect; one
+    // with a value break on it is. The whole shoulder assembly — cap, inboard
+    // sleeve, raglan sleeve and the weld barrel down to the bicep — is now ONE
+    // material, so cap, deltoid and bicep read as a single continuous form and
+    // only the raglan seam ridge (which is supposed to be visible) breaks it.
+    put(arm, superellipsoid(0.084, 0.092, 0.088, 2.9, 2.9, 24), coatM, 0, -0.010, 0.008 * side)
+    put(arm, sleeve(0.088, 0.076, 0.10, { radialSeg: 20, bulge: 0.05 }), coatM, 0, -0.020, 0, Math.PI, 0, 0)
+    put(arm, sleeve(0.090, 0.078, 0.070, { radialSeg: 20, bulge: 0.10 }), coatM,
+      0, 0.004, -0.026 * side, 0, 0, 1.30 * side)
+    put(arm, weld(0.084, 0.074, 0.048, { bulge: 0.16, radialSeg: 20 }), coatM, 0, -0.076, 0)
+    put(arm, roundedBox(0.005, 0.170, 0.150, 0.002, 1), coatWornM, 0.058, -0.010, 0.020 * side, 0, 0, 0.55 * side)
+    put(arm, taperedCapsule(0.072, 0.058, 0.24, 4, 18), coatM, 0, -0.190, 0)
+    const fore = pivot(arm, 0, -0.360, 0)
+    bones[side === 1 ? 'forearmL' : 'forearmR'] = fore
+    put(fore, weld(0.058, 0.056, 0.03, { bulge: 0.18, radialSeg: 18 }), coatM, 0, 0.005, 0)
+    put(fore, taperedCapsule(0.056, 0.046, 0.22, 4, 16), coatM, 0, -0.150, 0)
+    // cuff strap: sleeves the forearm->hand joint with 15 mm of overlap each side
+    put(fore, sleeve(0.050, 0.052, 0.048, { radialSeg: 18, bulge: 0.08 }), beltM, 0, -0.320, 0)
+    put(fore, filletRing(0.050, 0.005, 6, 18), beltM, 0, -0.296, 0)
+    put(fore, roundedBox(0.012, 0.018, 0.012, 0.003, 1), steelM, 0.050, -0.300, 0)
+    // (the cyan cuff tab that used to sit here is gone — see pipingM. It was the
+    // fifth of the six mint slivers a stranger's eye found before the face.)
+    // --- the wrist dissolve (divergence D5) ------------------------------
+    // Six 24 mm cubes on the resolution seam. Deterministic (no Math.random),
+    // parented to the FOREARM so a detaching hand leaves the pixels behind, and
+    // each shares a full 24x24 face with the cuff or with another cube. The
+    // joint underneath stays fully closed: hide these and the arm still reads.
+    const DISSOLVE = [
+      [0.036, -0.318, 0.024, 0], [0.036, -0.342, 0.024, 1],
+      [-0.036, -0.330, -0.018, 1], [-0.036, -0.354, -0.018, 0],
+      [0.012, -0.354, -0.042, 0], [0.012, -0.354, -0.018, 1],
+    ]
+    for (const [dx, dy, dz, dark] of DISSOLVE) {
+      const hex = dark ? p.ink : p.skinShade
+      put(fore, looseVoxel(hex), matForVoxelColor(hex), dx, dy, dz)
+    }
+    // --- gloved hand: rounded palm + fused four-finger mitt + opposed thumb --
+    const hand = new THREE.Mesh(roundedBox(0.090, 0.055, 0.100, 0.018, 2), gloveM)
+    hand.position.set(0.004, -0.420, 0)
+    hand.name = 'hand'
+    fore.add(hand)
+    const mitt = put(hand, roundedBox(0.082, 0.075, 0.096, 0.020, 2), gloveM, 0.004, -0.058, 0)
+    for (let k = 0; k < 3; k++) {                                   // one groove per knuckle
+      put(mitt, roundedBox(0.086, 0.004, 0.004, 0.0015, 1), beltM, 0, 0.008, -0.036 + k * 0.024)
+    }
+    put(hand, taperedCapsule(0.014, 0.011, 0.036, 3, 12), gloveM, 0.020, -0.030, 0.052 * side,
+      0, 0, -0.70 * side)
+    put(hand, roundedBox(0.070, 0.006, 0.084, 0.002, 1), beltM, 0.004, -0.026, 0)  // glove seam
+    fore.userData.handMesh = hand                     // Detached-Hand Punch borrows this
+  }
+
+  // =========================================================================
+  // MAGNIFYING LENS — bone `lens` on forearmR. Knurled brushed-metal ring,
+  // 3-facet grip, real glass, and one escaped voxel welded to the ring at 12.
+  // =========================================================================
+  const lens = pivot(bones.forearmR, 0.050, -0.460, 0)
   bones.lens = lens
   const lensW = bent(lens, -0.5)
-  lensW.add(cyl(0.03, 0.035, 0.22, ringM, 0, 0.09, 0))
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.035, 6, 12), ringM)
-  ring.position.y = 0.34
-  ring.rotation.y = Math.PI / 2
-  lensW.add(ring)
-  const glassMesh = cyl(0.145, 0.145, 0.02, glassM, 0, 0.34, 0, Math.PI / 2)
-  lensW.add(glassMesh)
+  put(lensW, taperedCapsule(0.013, 0.011, 0.086, 3, 12), beltM, 0, 0.062, 0)
+  for (let f = 0; f < 3; f++) {                                     // 3-facet grip
+    put(lensW, roundedBox(0.010, 0.040, 0.018, 0.001, 1), beltM,
+      Math.cos(f * 2.094) * 0.011, 0.062, Math.sin(f * 2.094) * 0.011, 0, -f * 2.094, 0)
+  }
+  put(lensW, filletRing(0.014, 0.008, 6, 14), steelM, 0, 0.118, 0)
+  const ring = put(lensW, filletRing(0.058, 0.007, 8, 30), steelM, 0, 0.190, 0)
+  ring.rotation.x = Math.PI / 2
+  for (let k = 0; k < 16; k++) {                                    // 16 knurls, 2 mm deep
+    const a = (k / 16) * Math.PI * 2
+    put(lensW, roundedBox(0.005, 0.005, 0.014, 0.0012, 1), steelM,
+      Math.sin(a) * 0.064, 0.190 + Math.cos(a) * 0.064, 0, a, Math.PI / 2, 0)
+  }
+  put(lensW, filletRing(0.050, 0.0025, 6, 26), pipingM, 0, 0.190, 0).rotation.x = Math.PI / 2
+  const glassMesh = put(lensW, roundedCylinder(0.050, 0.004, 0.0015, 30, 2), glassM, 0, 0.190, 0)
+  glassMesh.rotation.x = Math.PI / 2
+  glassMesh.castShadow = false
+  // the escaped voxel — same 1.2 mm chamfer as every head voxel, welded flush
+  put(lensW, looseVoxel(p.ink), matForVoxelColor(p.ink), 0, 0.190 + 0.065 + VX / 2, 0)
   lens.userData.glassMat = glassM
   lens.userData.glassBaseHex = glassM.color.getHex()
 
-  // --- head: perfect cube with digital face screen -------------------------
-  const head = pivot(torso, 0.01, 0.46, 0)
+  // =========================================================================
+  // HEAD — the voxel block. Everything here snaps to the 24 mm lattice.
+  // =========================================================================
+  const head = pivot(torso, 0.045, 0.454, 0)
   bones.head = head
-  head.add(box(0.12, 0.1, 0.14, skinM, 0, 0.02, 0)) // neck
-  head.add(box(0.42, 0.42, 0.42, skinM, 0, 0.24, 0))
-  head.add(box(0.43, 0.045, 0.43, accentM, 0, 0.08, 0)) // jaw seam accent
-  const face = makeFace(p)
-  if (face) {
-    const faceMat = new THREE.MeshBasicMaterial({ map: face.tex })
-    const faceMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.36), faceMat)
-    faceMesh.position.set(0.2151, 0.24, 0)
-    faceMesh.rotation.y = Math.PI / 2
-    head.add(faceMesh)
-    faceMesh.onBeforeRender = () => {
-      try { face.draw(typeof performance !== 'undefined' ? performance.now() : Date.now()) } catch { /* face stays */ }
-    }
-    head.userData.faceTex = face.tex
-  } else {
-    // node/canvas-less fallback: static pixel eyes as geometry
-    head.add(box(0.02, 0.3, 0.3, lamb(0x07080f), 0.215, 0.24, 0))
-    head.add(box(0.02, 0.07, 0.07, trimM, 0.226, 0.26, 0.08))
-    head.add(box(0.02, 0.07, 0.07, trimM, 0.226, 0.26, -0.08))
-    head.add(box(0.02, 0.03, 0.11, accentM, 0.226, 0.15, 0))
+
+  const skull = buildSkull(p, cos)
+  const fin = buildMohawk(p, cos)
+  const goggles = buildGoggles(p, cos)
+  const pipe = buildPipe(p, cos)
+  const smokeSet = buildSmoke(p, cos)
+  if (cos === 0) pipe.set(0, 13, 7, p.stem, F_FEATURE)        // weld the stem to the mouth bar
+
+  const skullG = voxObject(skull, 'skull', { occlude: [fin, pipe, goggles], assertWelded: true })
+  head.add(skullG)
+  head.add(voxObject(fin, 'fin', { occlude: [skull], assertWelded: true }))
+  const gogglesG = voxObject(goggles, 'goggles', { occlude: [skull], assertWelded: true })
+  head.add(gogglesG)
+  head.add(voxObject(pipe, 'pipe', { occlude: [skull], assertWelded: true }))
+  const smokeG = voxObject(smokeSet, 'smoke')
+  smokeG.traverse((o) => { if (o.isMesh) o.castShadow = false })
+  head.add(smokeG)
+
+  // --- face poses: voxel geometry driven by a table, never a painted quad ---
+  const F = {}
+  const mk = (name, cells, hex) => { const o = poseVox(cells, hex, name); head.add(o); F[name] = o; return o }
+  mk('lids', [[0, 6, 2], [0, 6, 3], [0, 6, 7], [0, 6, 8]], p.ink)
+  mk('pupils', [[2, 7, 3], [2, 7, 8]], p.ink)
+  mk('glints', [[2, 7, 2], [2, 7, 7]], p.glint)
+  mk('mouth3', [[2, 13, 4], [2, 13, 5], [2, 13, 6]], p.ink)
+  mk('mouth5', [[0, 13, 3], [0, 13, 4], [0, 13, 5], [0, 13, 6], [0, 13, 7]], p.ink)
+  mk('smirk', [[0, 12, 3]], p.ink)
+  mk('frown', [[0, 14, 3]], p.ink)
+  mk('shout', [[0, 12, 3], [0, 12, 7]], p.ink)
+  mk('slack', [[0, 14, 3], [0, 14, 7]], p.ink)
+  mk('browAngry', [[0, 5, 2], [0, 6, 3], [0, 5, 8], [0, 6, 7]], p.ink)
+  mk('browBlock', [[0, 5, 2], [0, 5, 8]], p.ink)
+  mk('koEyes', [[0, 6, 2], [0, 7, 3], [0, 6, 8], [0, 7, 7]], p.ink)
+  mk('hurtEyes', [[2, 7, 3], [2, 7, 8]], p.skinHilite)
+  mk('finShine', [[0, cos === 1 ? -8 : -6, 5]], p.skinHilite)
+
+  // Every pose is a set of whole-voxel visibility toggles plus integer lattice
+  // translations (brief §8.1). Nothing interpolates; a pixel face that eases is
+  // the single most immersion-breaking thing available here.
+  const POSES = {
+    idle: ['lids', 'pupils', 'glints', 'mouth3'],
+    attack: ['lids:drop', 'pupils', 'mouth5', 'shout', 'browAngry'],
+    hurt: ['hurtEyes', 'mouth3', 'frown'],
+    ko: ['koEyes', 'mouth5', 'slack'],
+    taunt: ['lids', 'pupils', 'glints', 'mouth3', 'smirk'],
+    block: ['lids:drop', 'pupils', 'mouth3', 'browBlock'],
+    victory: ['lids', 'pupils', 'glints', 'mouth3', 'smirk', 'finShine'],
+    blink: ['lids:drop', 'mouth3'],
   }
-  // glitch chips floating off the head corner
-  head.add(box(0.05, 0.05, 0.05, trimM, -0.18, 0.46, 0.18))
-  head.add(box(0.04, 0.04, 0.04, accentM, -0.25, 0.4, 0.24))
+  let facePose = 'idle'
+  const setFace = (name) => {
+    const want = POSES[name] || POSES.idle
+    facePose = POSES[name] ? name : 'idle'
+    for (const k of Object.keys(F)) { F[k].visible = false; F[k].position.y = 0 }
+    for (const entry of want) {
+      const drop = entry.endsWith(':drop')
+      const k = drop ? entry.slice(0, -5) : entry
+      if (!F[k]) continue
+      F[k].visible = true
+      if (drop) F[k].position.y = -VX                 // one whole voxel, no easing
+    }
+    if (glintMat) glintMat.emissiveIntensity = name === 'victory' ? 0.6 : name === 'ko' ? 0 : 0.35
+    if (screenMat) screenMat.emissiveIntensity = name === 'ko' ? 0 : 0.9
+  }
+  setFace('idle')
 
-  // small geometric hat — extra bone, spring-follow
-  const hat = pivot(head, -0.01, 0.44, 0)
-  bones.hat = hat
-  const hatW = bent(hat, 0.05)
-  hatW.add(box(0.54, 0.045, 0.54, hatM, 0.01, 0.01, 0)) // brim
-  hatW.add(box(0.32, 0.14, 0.32, hatM, -0.01, 0.095, 0)) // crown
-  hatW.add(box(0.34, 0.05, 0.34, bandM, -0.01, 0.045, 0)) // band
-
-  group.traverse((o) => {
-    if (o.isMesh) { o.castShadow = true; o.receiveShadow = true }
+  // --- glitch, reimplemented as GEOMETRY (brief §8.2) ----------------------
+  const ghostSet = new VoxelSet('ghost')
+  for (const cell of [[0, 6, 2], [0, 6, 3], [0, 6, 7], [0, 6, 8], [2, 7, 2], [2, 7, 3], [2, 7, 7],
+    [2, 7, 8], [0, 10, 5], [2, 13, 4], [2, 13, 5], [2, 13, 6]]) {
+    // Neutral bake key only — the shipped colour is `ghostA`/`ghostB` on the
+    // unlit material below; this hex just drives the face-bias vertex tint.
+    // Deliberately NOT #F0F0F0: that is a source-measured hex and brief §9.1
+    // bans it appearing anywhere on the model, key or albedo.
+    ghostSet.set(cell[0], cell[1], cell[2], 0xb4b8b6, F_FEATURE)
+  }
+  const ghostGeo = [...meshVoxels(ghostSet, { origin: HEAD_PIVOT }).geoms.values()][0]
+  const ghosts = [p.ghostA, p.ghostB].map((hex) => {
+    const m = new THREE.Mesh(ghostGeo, new THREE.MeshBasicMaterial({
+      color: hex, transparent: true, opacity: 0.5, depthWrite: false, vertexColors: true,
+    }))
+    m.visible = false; m.castShadow = false; m.name = 'glitch-ghost'
+    head.add(m)
+    return m
   })
+  const scanline = new THREE.Mesh(
+    roundedBox(0.230, VX, 0.290, 0.001, 1),
+    new THREE.MeshBasicMaterial({ color: p.trim, transparent: true, opacity: 0.35, depthWrite: false }))
+  scanline.visible = false; scanline.castShadow = false; scanline.name = 'crt-tear'
+  scanline.position.set(-0.045, 0.2, 0)
+  head.add(scanline)
 
+  // =========================================================================
+  // FEDORA — bone `hat` (spring-follow). Built FLAT on the crown-base plane,
+  // then the whole group is rotated once: 18 deg back, 6 deg yaw (brief §7.2).
+  // =========================================================================
+  const hat = pivot(head, -0.060, 0.432, 0)
+  bones.hat = hat
+  // 18 deg back (lifts the brim front, exposes the forehead) + 6 deg yaw. The
+  // yaw is trimmed to 3.4 deg in costume 0 because the brim's mohawk notch is
+  // cut symmetrically about the hat's own +X and a 6 deg yaw walked one cut
+  // edge into the fin.
+  const hatW = bent(hat, 0.314, 0, cos === 0 ? 0.060 : 0.105)
+  if (cos === 0) {
+    // ROUND-3 REBUILD. What shipped was a bowler: a 0.276 x 0.230 rounded rect
+    // at a 0.085 corner radius is an ELLIPSE, so the crown lofted into a smooth
+    // mushroom dome, the brim was a circular ring (0.404 in Z, 0.360 in X — the
+    // brief's two numbers swapped), and the crown sat at CX = +0.015, i.e.
+    // straight through the mohawk fin's 0.012..0.132 footprint. Three fixes:
+    //
+    //   1. Corner radius down to 0.048 and a taller taper, so the crown reads
+    //      as a blocked felt crown with corners, not a dome.
+    //   2. Crown pulled back to CX = -0.045 so the fin's front four voxel
+    //      columns and its whole tip stand PROUD of the crown instead of being
+    //      swallowed by it, and the crown top (y 1.952) sits 42 mm below the
+    //      fin tip (1.994).
+    //   3. The brim carries a 2 x 0.33 rad notch at the front centre. §2's
+    //      negative-space wedge between the fin's rear edge and the brim's
+    //      front edge is geometrically UNREACHABLE at this brim size: a 0.404 m
+    //      brim rotated 18 deg about a pivot inside the skull always sweeps
+    //      through the fin's root, at any tilt short of 49 deg. The notch is
+    //      how the wedge actually gets built, it removes the last hard
+    //      interpenetration on the model, and a fedora slotted for a mohawk is
+    //      a legible gag rather than a bug. Declared as divergence D7.
+    // ROUND-4: crown pulled back another 17 mm (-0.045 -> -0.062). At -0.045 the
+    // crown's front face landed at x = +0.055, which swallowed the fin's rear
+    // two voxel columns and left "about two voxels of fin clearing the hat".
+    // At -0.062 the crown front is at +0.038, so FOUR of the fin's five depth
+    // columns and its whole 0.144 m height stand proud in front of the crown —
+    // the fin spikes off the FRONT of the hat, which is the silhouette §2 asks
+    // for, and the brim notch below opens the negative-space wedge behind it.
+    const CX = -0.062                                    // crown centre in hatW-local X
+    const crown = loft([
+      { at: [0, 0.000, 0], shape: rrp(0.268, 0.200, 0.048) },
+      { at: [0, 0.040, 0], shape: rrp(0.264, 0.198, 0.050) },
+      { at: [0, 0.082, 0], shape: rrp(0.250, 0.188, 0.052) },
+      { at: [0, 0.115, 0], shape: rrp(0.214, 0.160, 0.050) },
+    ], { subdivide: 3, caps: true })
+    // teardrop: a centre crease running front->back, 0.030 m deep at the front
+    // tapering to 0.008 at the rear, plus two side pinches 0.035 m in from the
+    // front at 0.022 deep. MODELLED, per brief §7.2 — never a texture.
+    put(hatW, warp(crown, (v) => {
+      const t = clamp01((v.x + 0.100) / 0.200)                     // 0 rear .. 1 front
+      if (v.y > 0.058) {
+        const depth = 0.008 + 0.022 * t
+        const g = Math.exp(-((v.z / 0.038) ** 2))
+        v.y -= depth * g * clamp01((v.y - 0.058) / 0.050)
+      }
+      const pinch = Math.exp(-(((v.x - 0.065) / 0.030) ** 2)) * clamp01((v.y - 0.050) / 0.055)
+      v.z -= Math.sign(v.z) * 0.022 * pinch
+    }), feltM, CX, 0, 0)
+    // grosgrain band: a conformal loft, not a circle scaled to fit — 5 mm proud
+    // of the crown all round, 0.028 tall, with the flat bow on the character's
+    // LEFT (+z). No cyan piping on the hat: §5 caps `trim-cyan` at 2% of the
+    // model's surface and the under-collar and cuff tab already spend it.
+    put(hatW, loft([
+      { at: [0, 0.004, 0], shape: rrp(0.278, 0.210, 0.050) },
+      { at: [0, 0.032, 0], shape: rrp(0.276, 0.209, 0.050) },
+    ], { subdivide: 1, caps: false }), bandM, CX, 0, 0)
+    put(hatW, roundedBox(0.006, 0.026, 0.048, 0.002, 1), bandM, CX - 0.030, 0.018, 0.140)   // bow wings
+    put(hatW, roundedBox(0.006, 0.018, 0.020, 0.002, 1), bandM, CX - 0.030, 0.018, 0.112)   // bow knot
+    // snap brim: front third down 14 deg, rear third up 9 deg, 4 mm thick with a
+    // rolled outer edge, elliptical 0.404 (X) x 0.360 (Z) = 1.53 x head width.
+    const snap = (v) => {
+      v.z *= 0.891
+      const rr = Math.hypot(v.x, v.z)
+      const w = rr > 1e-4 ? v.x / rr : 0
+      v.y += (rr - 0.132) * (w > 0 ? -0.249 * w : -0.158 * w)
+    }
+    const NOTCH = 0.42
+    // 5.6 mm through the brim with a 2.4 mm rolled edge (was 4 mm / 1.2 mm).
+    // A 1.2 mm rolled edge is sub-pixel at match distance, and a sub-pixel edge
+    // under a fresnel sheen is where the single-white-dot fizz along the brim
+    // silhouette came from. Thicken it and the specular has somewhere to sit.
+    const brimProfile = [0.090, -0.0028, 0.186, -0.0028, 0.1985, -0.0024,
+      0.2020, 0, 0.1985, 0.0024, 0.186, 0.0028, 0.090, 0.0028]
+    put(hatW, warp(profileLathe(brimProfile, 44, {
+      phase: NOTCH, thetaLength: Math.PI * 2 - 2 * NOTCH, creaseAngle: 40, unique: true,
+    }), snap), brimM, CX, 0.004, 0)
+  } else {
+    // costume 1: no fedora, but `hat` must still drive visible geometry — a pixel
+    // headband, one voxel proud on all four sides of row r1 (brief §7.2).
+    const band = new VoxelSet('headband')
+    for (let d = 0; d <= 10; d++) {
+      for (let c = -1; c <= 11; c++) {
+        if (d === 0 || d === 10 || c === -1 || c === 11) band.set(d, 1, c, p.ink, F_FEATURE)
+      }
+    }
+    const bandG = new THREE.Group()
+    const meshed = meshVoxels(band, { origin: [HEAD_PIVOT[0] - 0.060, HEAD_PIVOT[1] + 0.432, 0] })
+    headTris += meshed.tris; headFaces += meshed.faces
+    for (const [hex, geo] of meshed.geoms) { bandG.add(new THREE.Mesh(geo, matForVoxelColor(hex))); headCalls++ }
+    // The band goes on `hat` UNTILTED, not on `hatW`. It is a voxel object and
+    // it must stay lattice-aligned with the skull; rotating it 18 deg both broke
+    // the lattice read and swung its front-centre cells up into the 8-vx fin
+    // (72 vertices of hard interpenetration). The `hat` spring-follow still
+    // drives it, which is the whole point of §7.2's costume-1 clause.
+    hat.add(bandG)
+  }
+
+  // =========================================================================
+  // runtime: 8 Hz lattice-quantised smoke drift + the geometry glitch burst.
+  // Deterministic PRNG — GRAPHICS_CONTRACT §2 forbids Math.random() here.
+  // =========================================================================
+  let seed = 0x9e3779b9 >>> 0
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296 }
+  let lastTick = -1e9, burst = 0, blinkAt = 3200
+  const driver = (now) => {
+    if (now - lastTick < 110) return
+    lastTick = now
+    const t = now / 1000
+    smokeG.position.set(0, Math.round(Math.sin(t * 0.45)) * VX, Math.round(Math.sin(t * 0.7) * 1.5) * VX)
+    if (burst > 0) {
+      burst--
+      const oz = (1 + ((rnd() * 2) | 0)) * VX, oy = (1 + ((rnd() * 2) | 0)) * VX
+      ghosts[0].position.set(0, oy, oz); ghosts[1].position.set(0, -oy, -oz)
+      scanline.position.y = 0.10 + Math.round(rnd() * 16) * VX
+      if (burst === 0) { ghosts[0].visible = ghosts[1].visible = scanline.visible = false }
+    } else if (rnd() < 0.09) {
+      burst = 2 + ((rnd() * 3) | 0)
+      ghosts[0].visible = ghosts[1].visible = scanline.visible = true
+    } else if (facePose === 'idle' && now > blinkAt) {
+      blinkAt = now + 3200 + rnd() * 900
+      F.lids.position.y = -VX
+      setTimeout(() => { try { if (facePose === 'idle') F.lids.position.y = 0 } catch { /* gone */ } }, 90)
+    }
+  }
+  skullG.children[0].onBeforeRender = () => {
+    try { driver(typeof performance !== 'undefined' ? performance.now() : Date.now()) } catch { /* never crash a frame */ }
+  }
+
+  head.userData.setFace = setFace
+  head.userData.faceTex = null            // legacy key, kept null-safe (brief §8.1)
+  head.userData.goggles = gogglesG
+  // Snap down 5 rows (r1 -> r6, i.e. onto the eye band) in two frames, no easing.
+  // It also steps 2 vx FORWARD: the goggle's faces were culled against the skull
+  // in the bind pose, so sliding it down into the forehead's occupied cells
+  // would z-fight the skull's own L1 at c4-c6. Two voxels proud clears it and
+  // reads correctly — goggles pulled down sit ON the face, not in it.
+  head.userData.snapGoggles = (down) => {
+    gogglesG.position.set(down ? 2 * VX : 0, down ? -5 * VX : 0, 0)
+  }
+
+  // =========================================================================
+  // DRAW-CALL PASS. The render layer's auto-merger deliberately refuses
+  // fighters (geometry.js `_mergeEligible` bails on any material Fighter.js
+  // has renamed `<name>#fighter`), so a rigged character has to collapse its
+  // own static clusters. This merges, PER BONE, every mesh that shares a
+  // material and never moves relative to that bone — 16 knurls, 11 coat
+  // panels, 8 buttons, 6 dissolve cubes each become one buffer.
+  //
+  // Everything the runtime moves, hides or reads back is marked dynamic first
+  // and is skipped entirely: the skull (it carries the onBeforeRender driver),
+  // the goggle group (snaps down 5 vx), the smoke (8 Hz lattice drift), every
+  // face-pose cluster, both glitch ghosts, the CRT tear, both hand meshes
+  // (`handMesh`, hidden by the Detached-Hand Punch) and the lens glass
+  // (`lensStrikeScript` tints `glassMat`). Child bones are excluded by the
+  // filter, so no bone's triangles are ever baked into its parent.
+  // =========================================================================
+  for (const o of [skullG, gogglesG, smokeG, ...Object.values(F), ...ghosts, scanline, glassMesh]) markDynamic(o)
+  markDynamic(bones.forearmL.userData.handMesh)
+  markDynamic(bones.forearmR.userData.handMesh)
+  const BONE_NODES = new Set(Object.values(bones))
+  // geometry.js `normaliseForMerge` keeps position/normal/uv/index and DROPS
+  // every other attribute, so a merged voxel buffer would come out with no
+  // `color` — and a vertexColors material over a missing colour attribute
+  // reads (0, 0, 0) and paints the mesh black. Everything carrying the lattice
+  // bake therefore stays unmerged; it is 13 meshes and the bake is the whole
+  // shading system on this character.
+  const ownedDirectlyBy = (b) => (mesh) => {
+    if (mesh.material && mesh.material.vertexColors) return false
+    for (let q = mesh.parent; q; q = q.parent) {
+      if (q === b) return true
+      if (BONE_NODES.has(q)) return false
+    }
+    return false
+  }
+  let callsBefore = 0, callsAfter = 0
+  group.traverse((o) => { if (o.isMesh) callsBefore++ })
+  for (const b of Object.values(bones)) mergeParts(b, { inPlace: true, filter: ownedDirectlyBy(b) })
+  group.traverse((o) => { if (o.isMesh) callsAfter++ })
+
+  group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true } })
+  smokeG.traverse((o) => { if (o.isMesh) o.castShadow = false })
+
+  if (latticeBad) console.warn(`[crypto-punkd] ${latticeBad} off-lattice voxel coordinates`)
+
+  // Rim-light INTENT (brief §5). The character does not own the rig — arenas do
+  // — so the requirement is published here where a lighting pass can read it.
+  // Without a cool rim from behind-and-above, the mid-khaki coat has no edge
+  // against a pale arena floor and the crown voxels' top chamfers never light,
+  // which is what makes the staircase read.
+  group.userData.rimLight = {
+    color: 0x7fe8ff, intensity: 0.85, offCameraAxisDeg: 35, elevationDeg: 30,
+    warmFallback: 0xffc98a, note: 'flip to warmFallback on arctic-day / any cool-key arena',
+  }
+  group.userData.stats = {
+    headTris, headFaces, headCalls, clampLo: bakeAudit.clampLo, clampHi: bakeAudit.clampHi,
+    bakeMaxLuma: +bakeAudit.maxLuma.toFixed(3),
+    bakeMaxLumaHex: `#${bakeAudit.maxLumaHex.toString(16).padStart(6, '0')}`,
+    bakeTopLuma: [...bakeAudit.perHex].sort((a, b) => b[1] - a[1]).slice(0, 5)
+      .map(([h, l]) => `#${h.toString(16).padStart(6, '0')}:${l.toFixed(3)}`),
+    latticeBad,
+    drawCallsBefore: callsBefore, drawCalls: callsAfter,
+  }
   return { group, bones }
 }
+
 
 // ---------------------------------------------------------------------------
 // animation clips — keyframe shorthand
@@ -468,15 +2058,19 @@ const clips = {
     tracks: {
       hips: [K(0, Z, [0, 0.98, 0]), K(0.1, [0, 0.5, 0], [0, 0.9, 0]), K(0.16, [0, -0.4, 0], [0, 1.04, 0]), K(0.22, [0, 0.2, 0], [0, 0.94, 0]), K(0.3, Z, HIP), K(2.4, Z, HIP)],
       torso: [K(0, [0, 0, 0.3]), K(0.3, Z), K(0.6, [0, 0.15, -0.05]), K(1.6, [0, 0.15, -0.05]), K(1.9, Z), K(2.4, Z)],
-      head: [K(0, [0, 0.6, 0]), K(0.14, [0, -0.5, 0]), K(0.3, Z), K(0.6, [0, 0.12, 0.12]), K(1.6, [0, 0.12, 0.12]), K(1.9, [0, 0, -0.1]), K(2.15, Z), K(2.4, Z)],
+      // The stare and the hat tip both finish by 1.80 so the clip ENDS on a
+      // 0.60 s dead-frontal hold — head yaw = pitch = roll = 0, both arms down,
+      // the lens clear of the face. That is the round-start frame the 2-second
+      // test is run on (brief §1 / §4.5).
+      head: [K(0, [0, 0.6, 0]), K(0.14, [0, -0.5, 0]), K(0.3, Z), K(0.5, [0, 0.12, 0.12]), K(1.3, [0, 0.12, 0.12]), K(1.55, [0, 0, -0.1]), K(1.8, Z), K(2.4, Z)],
       // lens up to the eye, long suspicious stare
-      armR: [K(0, Z), K(0.6, [0, 0, 1.9]), K(1.6, [0, 0, 1.9]), K(1.9, [0, 0, 0.5]), K(2.4, [0, 0, 0.35])],
-      forearmR: [K(0, [0, 0, 1.0]), K(0.6, [0, 0, 2.1]), K(1.6, [0, 0, 2.1]), K(1.9, [0, 0, 1.2]), K(2.4, [0, 0, 1.15])],
-      lens: [K(0, Z), K(0.6, [0, 0, -0.6]), K(1.6, [0, 0, -0.6]), K(1.9, Z), K(2.4, Z)],
+      armR: [K(0, Z), K(0.5, [0, 0, 1.9]), K(1.3, [0, 0, 1.9]), K(1.6, [0, 0, 0.5]), K(1.8, [0, 0, 0.35]), K(2.4, [0, 0, 0.35])],
+      forearmR: [K(0, [0, 0, 1.0]), K(0.5, [0, 0, 2.1]), K(1.3, [0, 0, 2.1]), K(1.6, [0, 0, 1.2]), K(1.8, [0, 0, 1.15]), K(2.4, [0, 0, 1.15])],
+      lens: [K(0, Z), K(0.5, [0, 0, -0.6]), K(1.3, [0, 0, -0.6]), K(1.6, Z), K(2.4, Z)],
       // hat tip with the left hand
-      armL: [K(0, Z), K(1.9, [0, 0, 0.1]), K(2.05, [-0.3, 0, 2.3]), K(2.25, [-0.3, 0, 2.3]), K(2.4, [0, 0, 0.08])],
-      forearmL: [K(0, [0, 0, 0.25]), K(2.05, [0, 0, 0.9]), K(2.25, [0, 0, 0.9]), K(2.4, [0, 0, 0.25])],
-      hat: [K(0, Z), K(2.05, [0, 0, 0.35]), K(2.25, [0, 0, 0.35]), K(2.4, Z)],
+      armL: [K(0, Z), K(1.35, [0, 0, 0.1]), K(1.5, [-0.3, 0, 2.3]), K(1.68, [-0.3, 0, 2.3]), K(1.8, [0, 0, 0.08]), K(2.4, [0, 0, 0.08])],
+      forearmL: [K(0, [0, 0, 0.25]), K(1.5, [0, 0, 0.9]), K(1.68, [0, 0, 0.9]), K(1.8, [0, 0, 0.25]), K(2.4, [0, 0, 0.25])],
+      hat: [K(0, Z), K(1.5, [0, 0, 0.35]), K(1.68, [0, 0, 0.35]), K(1.8, Z), K(2.4, Z)],
       legL: [K(0, [0, 0, 0.04])], legR: [K(0, [0, 0, -0.04])],
       coat: [K(0, [0, 0, -0.6]), K(0.3, [0, 0, 0.15]), K(0.6, Z), K(2.4, Z)],
     },
@@ -486,16 +2080,22 @@ const clips = {
   win: {
     duration: 2.4, loop: true,
     tracks: {
-      hips: [K(0, Z, HIP), K(0.5, Z, [0, 1.02, 0]), K(1.2, [0, 0.3, 0], [0, 0.98, 0]), K(1.8, [0, -0.3, 0], [0, 1.0, 0]), K(2.4, Z, HIP)],
-      armR: [K(0, [0, 0, 0.35]), K(0.4, [0, 0, 2.9]), K(1.9, [0, 0, 2.9]), K(2.4, [0, 0, 0.35])],
-      forearmR: [K(0, [0, 0, 1.15]), K(0.4, [0, 0, 0.2]), K(1.9, [0, 0, 0.2]), K(2.4, [0, 0, 1.15])],
-      lens: [K(0, Z), K(0.4, [0, 0.4, 0]), K(1.0, [0, -0.4, 0]), K(1.6, [0, 0.4, 0]), K(2.4, Z)],
-      armL: [K(0, [0, 0, 0.08]), K(0.5, [-0.3, 0, 2.2]), K(0.9, [-0.3, 0, 2.2]), K(1.2, [0, 0, 0.08]), K(2.4, [0, 0, 0.08])],
-      forearmL: [K(0, [0, 0, 0.25]), K(0.5, [0, 0, 1.0]), K(0.9, [0, 0, 1.0]), K(1.2, [0, 0, 0.25])],
-      hat: [K(0, Z), K(0.55, [0, 0, 0.45]), K(0.85, [0, 0.6, 0.45]), K(1.1, Z), K(2.4, Z)],
-      head: [K(0, Z), K(0.4, [0, 0, 0.3]), K(1.9, [0, 0, 0.28]), K(2.4, Z)],
-      torso: [K(0, Z), K(0.4, [0, 0, 0.12]), K(1.9, [0, 0, 0.1]), K(2.4, Z)],
-      coat: [K(0, Z), K(0.5, [0, 0, -0.35]), K(1.2, [0, 0, -0.2]), K(1.8, [0, 0, -0.35]), K(2.4, Z)],
+      // THE DEAD-FRONTAL HOLD (brief §1 / §4.5). The source archetype is always
+      // a straight-on portrait, and the 2-second test is run on that frame. The
+      // first 0.75 s of `win` therefore holds head yaw = pitch = roll = 0 with
+      // BOTH arms down and the lens clear of the face — a full 0.75 s window,
+      // comfortably over the 0.6 s minimum, with the fedora's 18 deg supplying
+      // all the character. Only after 0.75 s does the lens go up.
+      hips: [K(0, Z, HIP), K(0.75, Z, HIP), K(1.1, Z, [0, 1.02, 0]), K(1.6, [0, 0.3, 0], [0, 0.98, 0]), K(2.0, [0, -0.3, 0], [0, 1.0, 0]), K(2.4, Z, HIP)],
+      armR: [K(0, [0, 0, 0.35]), K(0.75, [0, 0, 0.35]), K(1.05, [0, 0, 2.9]), K(2.05, [0, 0, 2.9]), K(2.4, [0, 0, 0.35])],
+      forearmR: [K(0, [0, 0, 1.15]), K(0.75, [0, 0, 1.15]), K(1.05, [0, 0, 0.2]), K(2.05, [0, 0, 0.2]), K(2.4, [0, 0, 1.15])],
+      lens: [K(0, Z), K(1.05, [0, 0.4, 0]), K(1.5, [0, -0.4, 0]), K(1.9, [0, 0.4, 0]), K(2.4, Z)],
+      armL: [K(0, [0, 0, 0.08]), K(1.1, [0, 0, 0.08]), K(1.35, [-0.3, 0, 2.2]), K(1.7, [-0.3, 0, 2.2]), K(1.95, [0, 0, 0.08]), K(2.4, [0, 0, 0.08])],
+      forearmL: [K(0, [0, 0, 0.25]), K(1.1, [0, 0, 0.25]), K(1.35, [0, 0, 1.0]), K(1.7, [0, 0, 1.0]), K(1.95, [0, 0, 0.25])],
+      hat: [K(0, Z), K(0.9, Z), K(1.2, [0, 0, 0.45]), K(1.45, [0, 0.6, 0.45]), K(1.7, Z), K(2.4, Z)],
+      head: [K(0, Z), K(0.75, Z), K(1.05, [0, 0, 0.3]), K(2.05, [0, 0, 0.28]), K(2.4, Z)],
+      torso: [K(0, Z), K(0.75, Z), K(1.05, [0, 0, 0.12]), K(2.05, [0, 0, 0.1]), K(2.4, Z)],
+      coat: [K(0, Z), K(0.8, Z), K(1.1, [0, 0, -0.35]), K(1.6, [0, 0, -0.2]), K(2.0, [0, 0, -0.35]), K(2.4, Z)],
       legL: [K(0, Z)], legR: [K(0, Z)],
     },
   },
@@ -891,7 +2491,7 @@ function labelPanel(w, h, lines, opts = {}) {
     ? new THREE.MeshBasicMaterial({ map: tex, transparent: !!opts.transparent, opacity: opts.opacity ?? 1 })
     : basic(opts.fallback ?? 0xf2f0e6, { transparent: !!opts.transparent, opacity: opts.opacity ?? 1 })
   const side = basic(opts.sideColor ?? 0xd9d6c6)
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, opts.depth ?? 0.12),
+  const mesh = new THREE.Mesh(new GEO.BoxGeometry(w, h, opts.depth ?? 0.12),
     [side, side, side, side, face, face.clone ? face.clone() : face])
   return mesh
 }
@@ -902,7 +2502,7 @@ function ghostDummy(height, colorHex, opacity) {
   const mat = basic(colorHex, { transparent: true, opacity, depthWrite: false })
   const s = height / 1.85
   const add = (w, h, d, x, y, z) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w * s, h * s, d * s), mat)
+    const m = new THREE.Mesh(new GEO.BoxGeometry(w * s, h * s, d * s), mat)
     m.position.set(x * s, y * s, z * s)
     g.add(m)
   }
@@ -993,8 +2593,8 @@ function handPunchScript(fx) {
     try { if (handMesh) handMesh.visible = false } catch { /* mesh */ }
     fist = new THREE.Group()
     const fm = basic(0x59637d)
-    fist.add(new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.22, 0.22), fm))
-    const cuff = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.26, 0.26), basic(0x2ee6ff))
+    fist.add(new THREE.Mesh(new GEO.BoxGeometry(0.26, 0.22, 0.22), fm))
+    const cuff = new THREE.Mesh(new GEO.BoxGeometry(0.08, 0.26, 0.26), basic(0x2ee6ff))
     cuff.position.x = -0.16
     fist.add(cuff)
     fist.position.set(fx.self.pos.x + F * 0.6, fx.self.pos.y + 1.25, 0)
@@ -1070,7 +2670,7 @@ function pixelVolleyScript(fx) {
   const cleanup = () => { for (const c of cubes) dropMesh(c.m); cubes.length = 0 }
   for (let i = 0; i < 4; i++) {
     fx.after(12 + i * 6, () => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, 0.22),
+      const m = new THREE.Mesh(new GEO.BoxGeometry(0.22, 0.22, 0.22),
         basic(i % 2 ? 0x2ee6ff : 0x8b5cf6))
       m.position.set(fx.self.pos.x + F * 0.7, fx.self.pos.y + 1.15 + (i % 2) * 0.25, 0)
       if (addFxMesh(fx, m)) cubes.push({ m, live: true })
@@ -1246,10 +2846,11 @@ function floorPriceScript(fx) {
     const panel = labelPanel(2.7, 1.7, ['FLOOR:', '0.0001'],
       { w: 256, h: 160, size: 44, bg: '#f6f2e2', fg: '#14161a', border: '#8b5cf6', depth: 0.2, sideColor: 0xd9d6c6 })
     tag.add(panel)
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.06, 6, 12), basic(0xd7b45a))
+    const ring = new THREE.Mesh(filletRing(0.22, 0.06, 6, 12), basic(0xd7b45a))
+    ring.rotation.x = Math.PI / 2          // filletRing lies in XZ; face it at camera
     ring.position.set(-1.5, 0.95, 0)
     tag.add(ring)
-    const rope = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.4, 0.06), basic(0xd7b45a))
+    const rope = new THREE.Mesh(new GEO.BoxGeometry(0.06, 1.4, 0.06), basic(0xd7b45a))
     rope.position.set(-1.5, 1.9, 0)
     rope.rotation.z = 0.2
     tag.add(rope)
@@ -1310,7 +2911,7 @@ function blockchainDetectiveScript(fx) {
   let scrollFace = null
   const cleanup = () => { dropMesh(beam); beam = null; dropMesh(scroll); scroll = null }
   fx.after(8, () => {
-    beam = new THREE.Mesh(new THREE.BoxGeometry(1, 0.14, 0.14),
+    beam = new THREE.Mesh(new GEO.BoxGeometry(1, 0.14, 0.14),
       basic(0x2ee6ff, { transparent: true, opacity: 0.55, depthWrite: false }))
     if (!addFxMesh(fx, beam)) beam = null
     fx.sfx('menu_back', { pitch: 2.4 })
@@ -1341,7 +2942,7 @@ function blockchainDetectiveScript(fx) {
         { w: 256, h: 320, size: 24, bg: '#efe9d2', fg: '#2a1e45', border: '#2ee6ff', depth: 0.08, transparent: true, opacity: 0.55, sideColor: 0xd9d6c6 })
       scrollFace = body
       scroll.add(body)
-      const roller = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 2.2, 8), basic(0xd7b45a))
+      const roller = new THREE.Mesh(new GEO.CylinderGeometry(0.12, 0.12, 2.2, 8), basic(0xd7b45a))
       roller.rotation.x = Math.PI / 2
       roller.position.y = 1.32
       scroll.add(roller)
@@ -1398,13 +2999,14 @@ function notYourKeysScript(fx) {
   fx.after(10, () => {
     key = new THREE.Group()
     const gold = basic(0xd7b45a)
-    const shaft = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.14, 0.14), gold)
+    const shaft = new THREE.Mesh(new GEO.BoxGeometry(1.5, 0.14, 0.14), gold)
     key.add(shaft)
-    const bow = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.09, 6, 10), gold)
+    const bow = new THREE.Mesh(filletRing(0.3, 0.09, 6, 10), gold)
+    bow.rotation.x = Math.PI / 2           // filletRing lies in XZ; face it at camera
     bow.position.x = -0.85
     key.add(bow)
     for (let i = 0; i < 2; i++) {
-      const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.3, 0.14), gold)
+      const tooth = new THREE.Mesh(new GEO.BoxGeometry(0.14, 0.3, 0.14), gold)
       tooth.position.set(0.55 + i * 0.22, -0.2, 0)
       key.add(tooth)
     }
@@ -1421,7 +3023,7 @@ function notYourKeysScript(fx) {
       key = null
       const gold = basic(0xd7b45a)
       for (const dir of [-1, 1]) {
-        const m = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.14, 0.14), gold)
+        const m = new THREE.Mesh(new GEO.BoxGeometry(0.7, 0.14, 0.14), gold)
         m.position.set(kx + dir * 0.35, ky, 0)
         if (addFxMesh(fx, m)) halves.push({ m, vx: dir * 0.05, vy: 0.12, vr: dir * 0.2 })
       }
@@ -1722,18 +3324,18 @@ export const CryptoPunkdDef = {
         for (const fxx of frameXs) {
           const g = new THREE.Group()
           const gray = basic(0xb8bcc8)
-          const top = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.3, 2.0), basic(0x2050c8))
+          const top = new THREE.Mesh(new GEO.BoxGeometry(0.14, 0.3, 2.0), basic(0x2050c8))
           top.position.y = 2.15
           g.add(top)
-          const xBtn = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.2, 0.2), basic(0xd23c3c))
+          const xBtn = new THREE.Mesh(new GEO.BoxGeometry(0.16, 0.2, 0.2), basic(0xd23c3c))
           xBtn.position.set(0.01, 2.15, 0.82)
           g.add(xBtn)
           for (const zz of [-0.95, 0.95]) {
-            const side = new THREE.Mesh(new THREE.BoxGeometry(0.14, 2.1, 0.14), gray)
+            const side = new THREE.Mesh(new GEO.BoxGeometry(0.14, 2.1, 0.14), gray)
             side.position.set(0, 1.0, zz)
             g.add(side)
           }
-          const bottom = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 2.0), gray)
+          const bottom = new THREE.Mesh(new GEO.BoxGeometry(0.14, 0.14, 2.0), gray)
           bottom.position.y = 0.07
           g.add(bottom)
           g.position.x = fxx
@@ -1741,17 +3343,17 @@ export const CryptoPunkdDef = {
         }
         bin = new THREE.Group()
         const binM = basic(0x3b6ea5)
-        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.65, 1.7, 10), binM)
+        const body = new THREE.Mesh(new GEO.CylinderGeometry(0.85, 0.65, 1.7, 10), binM)
         body.position.y = 0.85
         bin.add(body)
-        const rim = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.09, 6, 12), basic(0x2a5178))
-        rim.rotation.x = Math.PI / 2
+        const rim = new THREE.Mesh(filletRing(0.85, 0.09, 6, 12), basic(0x2a5178))
+        // no rotation: filletRing already lies in XZ, a ring around a +Y limb
         rim.position.y = 1.7
         bin.add(rim)
         // chunky recycle arrows
         for (let i = 0; i < 3; i++) {
           const a = (i / 3) * Math.PI * 2
-          const arrow = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.1), basic(0x2ee6ff))
+          const arrow = new THREE.Mesh(new GEO.BoxGeometry(0.3, 0.12, 0.1), basic(0x2ee6ff))
           arrow.position.set(Math.cos(a) * 0.72, 0.95, Math.sin(a) * 0.72)
           arrow.rotation.y = -a + 0.7
           bin.add(arrow)
@@ -1775,7 +3377,7 @@ export const CryptoPunkdDef = {
         const cols = [0x9fb6c9, 0x2ee6ff, 0x8b5cf6, 0x59637d, 0xd7b45a]
         for (let i = 0; i < 11; i++) {
           const s = 0.2 + Math.random() * 0.16
-          const m = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), basic(cols[i % cols.length]))
+          const m = new THREE.Mesh(new GEO.BoxGeometry(s, s, s), basic(cols[i % cols.length]))
           const ox = (Math.random() - 0.5) * 0.7
           const oy = (Math.random() * 1.5) - 0.6
           const oz = (Math.random() - 0.5) * 0.5

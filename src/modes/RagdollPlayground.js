@@ -9,7 +9,7 @@ import { MatchScreen } from '../combat/MatchScreen.js'
 import { RosterOrder } from '../characters/index.js'
 import { Arenas } from '../arenas/index.js'
 import { GameConfig } from '../config/GameConfig.js'
-import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle } from '../ui/uiKit.js'
+import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, touchUI, hintHTML } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 class InertControl {
@@ -158,9 +158,9 @@ export class PlaygroundScreen {
     if (this.ring) this.ring.position.copy(this._cursor)
   }
 
-  render(renderer) {
-    if (this.phase === 'pick') this.backdrop?.render(renderer)
-    else this.match?.render(renderer)
+  render(renderer, dt) {
+    if (this.phase === 'pick') this.backdrop?.render(renderer, dt)
+    else this.match?.render(renderer, dt)
   }
 
   // ------------------------------------------------------------------ picker
@@ -181,7 +181,7 @@ export class PlaygroundScreen {
           <div class="who"><b></b><i></i></div><span class="arr" data-d="1">▶</span></div>
         <div class="wcs-btn pg-start">OPEN THE TOYBOX</div>
       </div>
-      <div class="wcs-hintbar"><b>↑↓</b> ROW &nbsp; <b>←→</b> PICK &nbsp; <b>ENTER</b> NEXT/START &nbsp; <b>ESC</b> BACK</div>
+      ${hintHTML(this.game, '<b>↑↓</b> ROW &nbsp; <b>←→</b> PICK &nbsp; <b>ENTER</b> NEXT/START &nbsp; <b>ESC</b> BACK', 'TAP THE ARROWS ▸ OPEN THE TOYBOX')}
     `
     this.game.ui.appendChild(this.pickRoot)
     this.pickRows = [...this.pickRoot.querySelectorAll('.pg-pickrow')]
@@ -532,7 +532,9 @@ export class PlaygroundScreen {
     })
     this.gravSlider = slider
     this.hint = el('div', 'pg-hint',
-      '<b>CLICK</b> DROP PROP AT CURSOR &nbsp; <b>ESC</b> BACK TO MENU')
+      touchUI(this.game)
+        ? '<b>TAP</b> DROP PROP'
+        : '<b>CLICK</b> DROP PROP AT CURSOR &nbsp; <b>ESC</b> BACK TO MENU')
     this.game.ui.appendChild(this.hint)
     this._syncLegend()
   }
