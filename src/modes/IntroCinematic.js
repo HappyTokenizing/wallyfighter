@@ -3,10 +3,13 @@
 // ----------------------------------------------------------------------------
 // A ~36 second in-engine attract-mode movie: the Permanent Reserve is unstable,
 // the onchain world is collapsing, and all ten idiots enter the Smackdown.
-// Eleven hard-cut shots (prologue + one per fighter), each built lazily from a
-// tiny reusable scene shell (sky dome + ground disc + lights + 1-2 real fighter
-// models + a couple of props + one camera move) and fully disposed at the cut,
-// so memory stays flat across the whole reel.
+// Eleven hard-cut shots (prologue + one per fighter), each a small scene of its
+// own (HDR sky + ground disc + a cinematic rig + 1-2 real fighter models + a
+// couple of props + one camera move). Since v3.7 those scenes are ASSEMBLED
+// AHEAD OF THE CUT — during the loading screen if it drove the prewarm hook,
+// otherwise in the leftover milliseconds of the shots that precede them — and
+// the whole set is freed in exit(). See "v3.7 — THE TRANSITION PASS" below for
+// why that replaced the old build-and-dispose-at-every-cut shell.
 //
 //   - SKIPPABLE from frame 1: any key / click / gamepad button -> title.
 //   - SUBTITLED: chunky retro captions bottom-center, letterboxed.
@@ -1717,6 +1720,541 @@ const SHOTS = [
   },
 ]
 
+// ===========================================================================
+// v3.7 — THE TRANSITION PASS.  Nothing below changes what a shot LOOKS like.
+// ---------------------------------------------------------------------------
+// THE BUG, measured on the production build: the reel ran at a median 8.3 ms a
+// frame — and then froze for 2 to 4.6 SECONDS at every single cut, ~19.9 s of
+// dead frame inside a 36 s movie. renderer.info across one play: programs
+// 79 -> 91, geometries 217 -> 269. Each cut was building a scene from nothing
+// on the main thread while the player watched: an analytic sky + its PMREM, a
+// 140 m ground disc whose concrete texture alone costs ~346 ms, a light rig,
+// one or two real fighter models (each dragging a procedural skin/fur bake),
+// a material sweep, and then a dozen fresh MeshPhysicalMaterial shader
+// variants compiled at first draw.
+//
+// THE FIX is not to make any of that cheaper — it is to stop doing it AT THE
+// CUT. A shot is now a `record` that can be assembled ahead of time, in small
+// schedulable STEPS, into its OWN THREE.Scene:
+//
+//   * The loading screen drives `prewarmIntro(game)` while its bar animates
+//     (that bar previously waited on literally nothing), so by the time shot 0
+//     appears every scene exists and every shader variant is compiled.
+//   * If prewarm never ran — "REPLAY INTRO" from the menu, or a boot where the
+//     player skipped the loader — the screen builds the shots it still needs
+//     DURING playback, spending a few milliseconds of leftover frame time per
+//     rAF tick. The cost is spread instead of spiked.
+//   * The cut itself is now a scene-pointer swap plus the pipeline's per-shot
+//     grade. No allocation, no compile.
+//
+// WHAT CHANGED ABOUT MEMORY: the old shell disposed each shot at the cut and
+// rebuilt the next one from scratch, which is exactly what made the cut cost
+// seconds. Shots are now held resident for the length of the reel and the
+// whole set is freed in exit(). Peak is higher for ~36 s; it is flat again the
+// moment the intro ends, and no cached geometry is ever torn out from under a
+// shot that is still going to be shown.
+// ===========================================================================
+
+// Discover, statically, which fighters a shot's build() will ask cx.actor()
+// for. Reading a function's own source is unusual, but it survives production
+// minification (identifiers get renamed, string literals do not) and it is the
+// only way to hoist the single most expensive thing in a shot — a character's
+// buildModel(), which bakes a procedural skin or fur texture on the way past —
+// out of the atomic build(cx) call and into its own schedulable step. If the
+// scan finds nothing, cx.actor() just builds inline exactly as it always did.
+const _actorIdCache = new WeakMap()
+function shotActorIds(shot) {
+  let ids = _actorIdCache.get(shot)
+  if (ids) return ids
+  ids = []
+  try {
+    const src = String(shot.build)
+    const re = /\.actor\(\s*['"`]([A-Za-z0-9_-]+)['"`]/g
+    let m
+    while ((m = re.exec(src)) !== null) ids.push(m[1])
+  } catch (e) { ids = [] }
+  _actorIdCache.set(shot, ids)
+  return ids
+}
+
+// Build a real fighter model. Never throws — the reel must not die because of
+// somebody else's character file.
+function buildActorModel(id) {
+  try {
+    const def = Characters[id]
+    const model = def?.buildModel ? def.buildModel(0) : fallbackFigure()
+    return (model && model.group) ? model : fallbackFigure()
+  } catch (e) {
+    console.warn(`[intro] buildModel(${id}) failed`, e)
+    return fallbackFigure()
+  }
+}
+
+// Park a (possibly pre-built) model in a shot and wire its clip sampler.
+function attachActor(rec, group, id, opts = {}, model = null) {
+  const { x = 0, y = 0, z = 0, rotY = 0, scale = 1, clip = ['idle'], speed = 1 } = opts
+  const m = model || buildActorModel(id)
+  m.group.position.set(x, y, z)
+  m.group.rotation.y = rotY
+  m.group.scale.setScalar(scale)
+  // Tag the whole subtree so the end-of-build material sweep steps around it —
+  // a fighter's surfaces are its own file's business. The root tag is what the
+  // rig's contact shadows track.
+  m.group.userData.__introActorRoot = true
+  m.group.traverse((o) => {
+    o.userData.__introActor = true
+    // Exactly what Fighter.js does when a fighter enters a match. `receiveShadow`
+    // is deliberately left alone: WALLY opts out on purpose.
+    if (o.isMesh || o.isSkinnedMesh) o.castShadow = true
+  })
+  group.add(m.group)
+  // First actor in a shot is the hero: the DoF focus target and the point the
+  // rig fits its shadow frustum and swings its rim around.
+  if (!rec.hero) rec.hero = m.group
+
+  let clips = {}
+  try { clips = Characters[id]?.clips || {} } catch (e) { /* no def, no clips */ }
+  const anim = new Animator(m.bones || {}, clips)
+  const wanted = Array.isArray(clip) ? clip : [clip]
+  const first = wanted.find((c) => anim.has(c))
+  if (first) anim.play(first, { restart: true, speed })
+  rec.updaters.push((dt) => anim.update(dt))
+
+  return {
+    group: m.group,
+    anim,
+    play: (name, o = {}) => { if (anim.has(name)) anim.play(name, o) },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// planShot() — a shot, expressed as an ordered list of small steps.
+//
+// Every step is sized to be runnable inside one frame's leftover time. The
+// order matters: the environment first (its PMREM is what the material sweep
+// wants to see), then floor + rig, then the actors one at a time, then the
+// shot's own build(), then the sweep, then the shader compile.
+// ---------------------------------------------------------------------------
+function planShot(game, camera, shot, idx) {
+  const rec = {
+    idx, shot,
+    scene: null, group: null, rig: null, env: null,
+    updaters: [], disposers: [],
+    hero: null, pool: null,
+    built: false, ready: false, disposed: false, claimed: false,
+  }
+  const steps = []
+  const push = (label, run) => steps.push({ rec, label, run })
+
+  push(`shot${idx}:env`, () => {
+    const scene = new THREE.Scene()
+    scene.name = `introScene${idx}`
+    const group = new THREE.Group()
+    group.name = `introShot${idx}`
+    scene.add(group)
+    rec.scene = scene
+    rec.group = group
+
+    // Fallback background: if the environment fails to build the frame must
+    // still be the shot's colour and not a black void.
+    scene.background = new THREE.Color(shot.bg || '#000000')
+    // Makes the scene self-describing to the pipeline's mood autodetection.
+    scene.userData.mood = shot.mood || 'studio'
+
+    const renderer = game?.renderer || null
+    if (renderer) {
+      try {
+        rec.env = applyEnvironment(scene, shot.mood || 'studio', renderer, {
+          resolution: game?.quality?.envResolution ?? 256,
+          overrides: shot.env || null,
+          intensity: shot.envInt ?? 1,
+          background: true,
+          backgroundBlurriness: shot.skyBlur ?? 0.08,
+        })
+      } catch (e) { console.warn('[intro] applyEnvironment failed', e) }
+    }
+  })
+
+  push(`shot${idx}:ground`, () => {
+    if (!shot.ground || !rec.group) return
+    const g = shot.ground
+    rec.group.add(groundDisc(g.color, g.surface, g))
+  })
+
+  push(`shot${idx}:rig`, () => {
+    if (!rec.scene) return
+    try {
+      const rig = makeCinematicRig(rec.scene, game?.quality || {}, {
+        mood: shot.mood || 'studio',
+        camera,
+        focus: shot.focus || [0, 1.2, 0],
+        groundY: 0,
+        contactShadows: true,
+        fog: shot.fog || false,
+        ...(shot.rig || {}),
+      })
+      rig.group.name = 'introRig'
+      rec.group.add(rig.group)
+      rec.rig = rig
+    } catch (e) {
+      console.warn('[intro] makeCinematicRig failed — falling back to a flat wrap', e)
+      rec.group.add(new THREE.HemisphereLight(0xcfeeff, 0x86b978, 1.0))
+      if (shot.fog) rec.scene.fog = new THREE.Fog(shot.fog.color, shot.fog.near, shot.fog.far)
+    }
+  })
+
+  // One step per fighter this shot is going to ask for. This is the split that
+  // matters most: a character's buildModel() is routinely the 200-400 ms half
+  // of a shot's cost, and there is no other seam inside build(cx).
+  for (const id of shotActorIds(shot)) {
+    push(`shot${idx}:actor:${id}`, () => {
+      if (!rec.pool) rec.pool = new Map()
+      const list = rec.pool.get(id) || []
+      list.push(buildActorModel(id))
+      rec.pool.set(id, list)
+    })
+  }
+
+  push(`shot${idx}:build`, () => {
+    if (!rec.group) return
+    const cx = {
+      g: rec.group,
+      rng: makeRng(shot.seed || 1),
+      add: (obj) => rec.group.add(obj),
+      onUpdate: (fn) => rec.updaters.push(fn),
+      onDispose: (fn) => rec.disposers.push(fn),
+      actor: (id, opts) => {
+        // Consume a pre-built model if the static scan found this one.
+        let model = null
+        const list = rec.pool?.get(id)
+        if (list && list.length) model = list.shift()
+        return attachActor(rec, rec.group, id, opts, model)
+      },
+    }
+    try { shot.build(cx) } catch (e) { console.warn('[intro] shot build failed', e) }
+    // Drop anything the static scan over-counted (a cx.actor call behind a
+    // branch that did not run). Dropping the reference is the whole cleanup:
+    // a model that was never added to a scene was never uploaded, so it holds
+    // no GPU memory — and calling disposeObject() on it could free a MATERIAL
+    // that the character file shares with the copy that IS on screen.
+    rec.pool = null
+  })
+
+  push(`shot${idx}:sweep`, () => {
+    if (!rec.group || !rec.scene) return
+    // SURFACE SWEEP — see the long note this used to carry in _buildShot():
+    // `enrichStandard: false` leaves anything that already came from pbr()
+    // strictly alone, actors are excluded outright, and the black-floor sweep
+    // still runs over the whole group.
+    try {
+      upgradeMaterials(rec.group, {
+        enrichStandard: false,
+        upgradeBasic: false,
+        hints: INTRO_HINTS,
+        filter: introUpgradeFilter,
+        env: rec.scene.environment || null,
+      })
+    } catch (e) { console.warn('[intro] material sweep failed', e) }
+
+    // Contact discs under the actors and any prop that asked for one, so
+    // nothing in the frame is floating.
+    if (rec.rig) {
+      try {
+        const subjects = []
+        rec.group.traverse((o) => { if (o.userData.__introActorRoot) subjects.push(o) })
+        if (subjects.length) rec.rig.setSubjects(subjects)
+        rec.rig.addPropShadows?.(rec.group)
+      } catch (e) { console.warn('[intro] contact shadows failed', e) }
+    }
+    rec.built = true
+  })
+
+  push(`shot${idx}:compile`, () => {
+    // `ready` is set HERE, not after the sweep: a scene that exists but whose
+    // programs have not been created is still a two-second freeze on its first
+    // draw, so "ready" has to mean compiled.
+    rec.ready = true
+    const renderer = game?.renderer || null
+    if (!renderer || !rec.scene) return
+    // THE shader step. renderer.compile() creates every program this scene
+    // needs; compileAsync additionally waits on KHR_parallel_shader_compile so
+    // the LINK stall lands off the critical path too. Either way the compile
+    // happens here and not on the first frame of the shot.
+    try {
+      if (typeof renderer.compileAsync === 'function') {
+        const p = renderer.compileAsync(rec.scene, camera)
+        if (p && typeof p.catch === 'function') p.catch(() => { /* fall through to lazy compile */ })
+      } else {
+        renderer.compile(rec.scene, camera)
+      }
+    } catch (e) { console.warn('[intro] shader prewarm failed', e) }
+  })
+
+  return { rec, steps }
+}
+
+// Free the depth targets a finished shot's lights allocated on their first
+// drawn frame. Cheap, safe, and the difference between "ten scenes resident"
+// costing tens of megabytes and costing hundreds.
+function releaseShadowMaps(rec) {
+  if (!rec || rec.disposed || !rec.scene) return
+  try {
+    rec.scene.traverse((o) => {
+      const sh = o.isLight ? o.shadow : null
+      if (sh && sh.map) { try { sh.dispose() } catch (e) { /* fine */ } }
+    })
+  } catch (e) { /* not worth a frame */ }
+}
+
+// Free one shot record. Called from exit() (and from prewarm.dispose() for
+// records nobody ever claimed) — never at a cut, because two shots may share a
+// cached geometry and tearing one down mid-reel could gut a later one.
+function disposeShotRecord(rec) {
+  if (!rec || rec.disposed) return
+  rec.disposed = true
+  for (const fn of rec.disposers) { try { fn() } catch (e) { /* fine */ } }
+  rec.disposers = []
+  rec.updaters = []
+  rec.hero = null
+  if (rec.rig) {
+    try { rec.rig.dispose() } catch (e) { console.warn('[intro] rig dispose failed', e) }
+    rec.rig = null
+  }
+  // Restores scene.environment / background. Never frees the PMREM — that is
+  // shared and cached per mood, which is what makes an intro REPLAY free.
+  if (rec.env) {
+    try { rec.env.dispose() } catch (e) { /* fine */ }
+    rec.env = null
+  }
+  rec.pool = null   // never uploaded, never on screen — see the build step
+  if (rec.group) {
+    rec.scene?.remove(rec.group)
+    try { disposeObject(rec.group) } catch (e) { console.warn('[intro] shot dispose failed', e) }
+  }
+  rec.group = null
+  if (rec.scene) {
+    rec.scene.fog = null
+    rec.scene.environment = null
+    rec.scene.background = null
+  }
+  rec.scene = null
+}
+
+// ---------------------------------------------------------------------------
+// THE PREWARM HOOK.
+//
+// This is the object the loading screen (and src/render/prewarm.js) drives.
+// It is a plain step queue over every shot in the reel, in play order, so
+// partial progress is always useful: whatever got built is what the cut will
+// not have to pay for.
+//
+//   const pre = prewarmIntro(game)
+//   pre.run(6)          // spend up to 6 ms of this frame; returns true if more
+//   pre.progress        // 0..1, for a progress bar that finally means something
+//   pre.done            // no work left
+//   pre.scenes          // THREE.Scene[] built so far (for an external compiler)
+//   pre.camera          // the camera those scenes were composed/compiled for
+//   pre.dispose()       // free anything the intro never claimed
+//
+// Aliases (`step`, `stepFor`, `advance`, `runAll`, `update`) exist so a caller
+// does not have to guess the verb.
+// ---------------------------------------------------------------------------
+export class IntroPrewarm {
+  constructor(game, opts = {}) {
+    this.game = game || null
+    this.camera = opts.camera || new THREE.PerspectiveCamera(BASE_FOV, _frameAspect(game), 0.1, 240)
+    this._plans = SHOTS.map((s, i) => planShot(game, this.camera, s, i))
+    this._queue = []
+    for (const p of this._plans) for (const st of p.steps) this._queue.push(st)
+    this.total = this._queue.length
+    // `_cursor` is where the in-order drain has got to; `_ran` is the set of
+    // steps that have actually executed. They differ because prebuildShot() can
+    // jump the queue (prewarm.js schedules per-shot tasks in its own order), and
+    // a step must never run twice — the second run would build a second copy of
+    // the same scene into the same record.
+    this._cursor = 0
+    this._ran = new Set()
+    this.disposed = false
+  }
+
+  get index() { return this._ran.size }
+  get done() { return this._ran.size >= this.total }
+  get remaining() { return Math.max(0, this.total - this._ran.size) }
+  get progress() { return this.total ? Math.min(1, this._ran.size / this.total) : 1 }
+  get label() { return this._queue[Math.min(this._cursor, this.total - 1)]?.label || 'done' }
+  /** Every shot scene built so far, in play order. */
+  get scenes() { return this._plans.map((p) => p.rec.scene).filter(Boolean) }
+  /** How many complete, compiled, ready-to-show shots are banked. */
+  get shotsReady() { return this._plans.reduce((n, p) => n + (p.rec.ready ? 1 : 0), 0) }
+  get shotCount() { return this._plans.length }
+
+  /** Run the next un-run step. Returns true while work remains. */
+  step() {
+    if (this.disposed || this.done) return false
+    while (this._cursor < this.total) {
+      const st = this._queue[this._cursor++]
+      if (this._ran.has(st)) continue
+      this._runStep(st)
+      break
+    }
+    return !this.done
+  }
+
+  _runStep(st) {
+    this._ran.add(st)
+    try { st.run() } catch (e) { console.warn(`[intro] prewarm step ${st.label} failed`, e) }
+  }
+
+  /** Spend up to `ms` of this frame on the queue. Returns true while work remains. */
+  run(ms = 6) {
+    if (this.disposed || this.done) return false
+    const t0 = performance.now()
+    do { this.step() } while (!this.done && performance.now() - t0 < ms)
+    return !this.done
+  }
+
+  /** Build everything, right now, on this thread. Only for tooling/tests. */
+  runAll() { while (this.step()) { /* spin */ } return this }
+
+  /** Force shot `i` complete (used at a cut the prewarm did not reach in time). */
+  ensure(i) {
+    const plan = this._plans[i]
+    if (!plan || plan.rec.disposed) return plan?.rec || null
+    if (!plan.rec.ready) this.prebuildShot(i)
+    return plan.rec
+  }
+
+  /** Take ownership of a shot record; the caller becomes responsible for it. */
+  take(i) {
+    const rec = this.ensure(i)
+    if (rec) rec.claimed = true
+    return rec
+  }
+
+  has(i) { return !!this._plans[i]?.rec?.ready }
+  record(i) { return this._plans[i]?.rec || null }
+
+  /**
+   * Build shot `i` to completion and hand back its scene. This is the shape
+   * src/render/prewarm.js asks for in a `tasks[]` entry: a task may return the
+   * scene it built and the prewarmer shader-warms it automatically.
+   */
+  prebuildShot(i) {
+    const plan = this._plans[i]
+    if (!plan || this.disposed) return null
+    for (const st of plan.steps) {
+      if (this._ran.has(st)) continue
+      this._runStep(st)
+    }
+    return plan.rec.scene
+  }
+
+  /** prewarm.js-compatible progress report. */
+  status() {
+    return {
+      done: this.done,
+      progress: this.progress,
+      label: this.label,
+      unitsDone: this.index,
+      unitsTotal: this.total,
+      shotsReady: this.shotsReady,
+      shotCount: this.shotCount,
+    }
+  }
+
+  dispose({ unclaimedOnly = true } = {}) {
+    this.disposed = true
+    for (const p of this._plans) {
+      if (unclaimedOnly && p.rec.claimed) continue
+      disposeShotRecord(p.rec)
+    }
+    this._queue = []
+    this._plans = []
+    this._ran = new Set()
+    this._cursor = 0
+    this.total = 0   // -> done: true, progress: 1
+  }
+}
+// Aliases — same object, whichever verb the caller reaches for.
+IntroPrewarm.prototype.stepFor = IntroPrewarm.prototype.run
+IntroPrewarm.prototype.advance = IntroPrewarm.prototype.run
+IntroPrewarm.prototype.update = IntroPrewarm.prototype.run
+
+let _prewarm = null
+
+/**
+ * Get (or start) the intro's prewarm queue. Idempotent: calling it twice with
+ * the same game hands back the same queue with its progress intact, so the
+ * loading screen and the intro screen cooperate instead of racing.
+ */
+export function prewarmIntro(game, opts = {}) {
+  if (_prewarm && !_prewarm.disposed && (!game || _prewarm.game === game)) return _prewarm
+  if (_prewarm && !_prewarm.disposed) _prewarm.dispose()
+  _prewarm = new IntroPrewarm(game, opts)
+  return _prewarm
+}
+export const getIntroPrewarm = () => (_prewarm && !_prewarm.disposed ? _prewarm : null)
+export function disposeIntroPrewarm() {
+  if (_prewarm) { try { _prewarm.dispose() } catch (e) { /* fine */ } }
+  _prewarm = null
+}
+/** How many shots the reel has — a caller sizing a progress bar wants this. */
+export const INTRO_SHOT_COUNT = SHOTS.length
+
+/**
+ * Build one shot to completion and return its THREE.Scene. Safe to call twice
+ * (the second call is free), safe to call before the intro screen exists, and
+ * the scene it returns is the exact object the cut will show.
+ */
+export function prebuildIntroShot(game, i) {
+  return prewarmIntro(game).prebuildShot(i)
+}
+
+/**
+ * The reel, expressed as src/render/prewarm.js `tasks[]`. Each task builds one
+ * shot and RETURNS its scene, which is the contract that module documents for a
+ * task ("may return the object/scene it built and it will be shader-warmed
+ * automatically"), so the loading screen gets both halves — the build and the
+ * compile — out of one list:
+ *
+ *   import { createPrewarmer } from '../../render/prewarm.js'
+ *   import { introPrewarmTasks, introPrewarmCamera } from '../../modes/IntroCinematic.js'
+ *
+ *   const pw = createPrewarmer(game.renderer, {
+ *     camera: introPrewarmCamera(game),
+ *     tasks: introPrewarmTasks(game),
+ *   })
+ *
+ * Weights are the step count of each shot, so a bar driven by the prewarmer's
+ * own progress tracks real work rather than shot index.
+ */
+export function introPrewarmTasks(game, opts = {}) {
+  const pre = prewarmIntro(game, opts)
+  return pre._plans.map((plan, i) => ({
+    key: `intro:shot${i}`,
+    label: i === 0 ? 'Destabilizing the Reserve…' : `Waking up fighter ${i}…`,
+    weight: plan.steps.length,
+    run: () => pre.prebuildShot(i),
+  }))
+}
+
+/** The camera the intro's scenes are composed and compiled against. */
+export function introPrewarmCamera(game) { return prewarmIntro(game).camera }
+
+/**
+ * Is the reel actually about to play? Mirrors LoadingScreen's own first-boot
+ * condition. Prewarming ten scenes for a movie nobody is going to watch is a
+ * memory leak with a progress bar in front of it, so GATE ON THIS before
+ * scheduling any of the tasks above — and call `disposeIntroPrewarm()` if a
+ * decision changes after the fact.
+ */
+export function shouldPrewarmIntro(game) {
+  try {
+    if (!game?.screens?.screens?.has?.('intro')) return false
+    return !game.save?.get?.('introSeen', false)
+  } catch (e) { return false }
+}
+
 // ---------------------------------------------------------------------------
 // The screen
 // ---------------------------------------------------------------------------
@@ -1729,21 +2267,30 @@ export class IntroScreen {
     this.idx = -1
     this.t = 0
     this._shake = 0
-    this._shotGroup = null
-    this._updaters = []
-    this._disposers = []
     this._soundIdx = 0
     this._capIdx = -1
-    this._rig = null
-    this._env = null
     this._focus = new THREE.Vector3(0, 1.3, 0)
-    this._hero = null
+    this._rec = null
+    this._played = []
 
-    this.scene = new THREE.Scene()
-    // BASE_FOV is the reference focal length every shot's framing was authored
-    // against. _updateCamera() re-projects the dolly about the look target for
-    // any other `fov`, so a shot can change lens without changing composition.
-    this.camera = new THREE.PerspectiveCamera(BASE_FOV, _frameAspect(this.game), 0.1, 240)
+    // THE PREWARM QUEUE. If the loading screen already drove one, adopt it with
+    // its progress intact — that is the whole point, and it is what makes the
+    // first cut free. If nothing warmed it (REPLAY INTRO from the menu, or a
+    // player who skipped the loader), we start one here and feed it leftover
+    // frame time during playback: spread instead of spiked.
+    this._pre = prewarmIntro(this.game)
+
+    // The scenes were composed and compiled against the prewarm's camera, so
+    // that is the camera that has to draw them. BASE_FOV is the reference focal
+    // length every shot's framing was authored against; _updateCamera()
+    // re-projects the dolly about the look target for any other `fov`, so a
+    // shot can change lens without changing composition.
+    this.camera = this._pre.camera
+    this.camera.fov = BASE_FOV
+    this.camera.aspect = _frameAspect(this.game)
+    this.camera.updateProjectionMatrix()
+    // `this.scene` follows the active shot; there is one scene per shot now.
+    this.scene = null
 
     // -- claim the post stack for the duration of the reel -------------------
     // The pipeline is shared with every other screen, so everything touched
@@ -1804,7 +2351,7 @@ export class IntroScreen {
     removeEventListener('pointerdown', this._onPointer)
     removeEventListener('resize', this._onResize)
     try { this._offResize?.() } catch { /* already gone */ }
-    this._clearShot()
+    this._releaseAll()
     this._restorePost()
     this.root?.remove()
     this.root = null
@@ -1853,87 +2400,69 @@ export class IntroScreen {
       this.game.screens.goto('title')
       return
     }
-    this._buildShot(SHOTS[this.idx])
+    this._activateShot(SHOTS[this.idx])
   }
 
-  // -- shot shell: dispose previous, assemble sky/ground/lights, build -----
-
-  _clearShot() {
-    for (const fn of this._disposers) { try { fn() } catch (e) { /* fine */ } }
-    this._disposers = []
-    this._updaters = []
-    this._hero = null
-    // The rig owns the scene's fog and a chained scene.onBeforeRender probe;
-    // its dispose() puts both back. Do it BEFORE the group teardown so the
-    // walk cannot free a light the rig is still holding.
-    if (this._rig) {
-      try { this._rig.dispose() } catch (e) { console.warn('[intro] rig dispose failed', e) }
-      this._rig = null
+  // Free every shot the reel built. Deliberately end-of-reel, not per-cut:
+  // teardown walks and disposes geometry, and two shots can legitimately share
+  // a cached buffer, so freeing shot 0 at its cut could gut shot 5. Holding ten
+  // scenes for 36 seconds is the trade that buys a movie with no freezes.
+  _releaseAll() {
+    for (const rec of this._played) disposeShotRecord(rec)
+    this._played = []
+    this._rec = null
+    this.scene = null
+    if (this._pre) {
+      try { this._pre.dispose({ unclaimedOnly: false }) } catch (e) { /* fine */ }
+      if (getIntroPrewarm() === this._pre) disposeIntroPrewarm()
     }
-    // Restores scene.environment / background. Never frees the PMREM — that is
-    // shared and cached per mood, which is what makes an intro REPLAY free.
-    if (this._env) {
-      try { this._env.dispose() } catch (e) { /* fine */ }
-      this._env = null
-    }
-    if (this._shotGroup && this.scene) {
-      this.scene.remove(this._shotGroup)
-      disposeObject(this._shotGroup)
-    }
-    this._shotGroup = null
-    if (this.scene) {
-      this.scene.fog = null
-      this.scene.environment = null
-      this.scene.background = null
-    }
+    this._pre = null
   }
 
-  _buildShot(shot) {
-    this._clearShot()
+  // -- the cut ---------------------------------------------------------------
+  //
+  // This used to be `_buildShot()`: dispose the last scene, raise a sky, bake a
+  // ground texture, compose a rig, build ten props and two fighters, sweep the
+  // materials and then let the driver compile a dozen shader variants on the
+  // first draw — all inside the one frame the audience was watching. It is now
+  // a POINTER SWAP plus the pipeline's per-shot grade. Everything expensive
+  // happened in planShot(), off the cut.
+  //
+  // `_pre.take()` is the safety net: if prewarm never got far enough (a menu
+  // replay, a slow first boot) it finishes this shot synchronously right here.
+  // That is the old behaviour and the old stall — but only for the shots the
+  // background builder did not reach, and never for shot 0 after a normal boot.
+  _activateShot(shot) {
     this.t = 0
     this._soundIdx = 0
     this._capIdx = -1
     if (this.caption) this.caption.style.display = 'none'
 
-    const group = new THREE.Group()
-    group.name = `introShot${this.idx}`
-    this.scene.add(group)
-    this._shotGroup = group
-
-    const mood = shot.mood || 'studio'
-    const rng = makeRng(shot.seed || 1)
-
-    // Fallback background: if the environment fails to build (no renderer, a
-    // PMREM that would not compile) the frame must still be the shot's colour
-    // and not a black void.
-    this.scene.background = new THREE.Color(shot.bg || '#000000')
-
-    // 1. THE ENVIRONMENT. One HDR analytic sky, used as BOTH the image-based
-    //    light and the visible backdrop, so the sun in the sky, the glint on
-    //    the coin and the direction of the key are the same fact stated once.
-    //    `scene.userData.mood` also makes the scene self-describing to the
-    //    pipeline's mood autodetection.
-    this.scene.userData.mood = mood
-    const renderer = this.game?.renderer || null
-    if (renderer) {
-      try {
-        this._env = applyEnvironment(this.scene, mood, renderer, {
-          resolution: this.game?.quality?.envResolution ?? 256,
-          overrides: shot.env || null,
-          intensity: shot.envInt ?? 1,
-          background: true,
-          backgroundBlurriness: shot.skyBlur ?? 0.08,
-        })
-      } catch (e) { console.warn('[intro] applyEnvironment failed', e) }
+    const prev = this._rec
+    const rec = this._pre ? this._pre.take(this.idx) : null
+    this._rec = rec || null
+    // Hand back the outgoing shot's SHADOW MAPS. Ten resident scenes is a fine
+    // trade for a movie with no freezes; ten resident depth targets is not —
+    // that is the one thing in a shot record big enough to matter and safe to
+    // free at a cut, because unlike geometry a shadow map is owned by exactly
+    // one light and the renderer reallocates it if the scene is ever drawn
+    // again (it never is). Everything else waits for exit().
+    if (prev && prev !== rec) releaseShadowMaps(prev)
+    this.scene = rec?.scene || null
+    if (rec && this._played.indexOf(rec) < 0) this._played.push(rec)
+    if (!rec || !rec.scene) {
+      console.warn(`[intro] shot ${this.idx} has no scene — skipping ahead`)
+      return
     }
 
-    // 2. THE GRADE. Per-shot exposure on top of the mood's calibration, plus
-    //    its bloom threshold and AO kernel. This is what stops one global
-    //    exposure having to serve a near-black colosseum and a snowfield.
+    // THE GRADE. Per-shot exposure on top of the mood's calibration, plus its
+    // bloom threshold and AO kernel. This is what stops one global exposure
+    // having to serve a near-black colosseum and a snowfield. It is per-frame
+    // state on the shared pipeline, so it belongs at the cut, not in the build.
     const pipeline = this.game?.pipeline
     if (pipeline) {
       try {
-        pipeline.setMood(mood, { auto: true, exposureScale: shot.exposure ?? 1 })
+        pipeline.setMood(shot.mood || 'studio', { auto: true, exposureScale: shot.exposure ?? 1 })
         pipeline.setCinematic(shot.dof ?? 0.7)
         // Snap the focus plane onto the new framing (setDoF clears the tracked
         // target), THEN re-arm tracking. Without the snap the bokeh would ease
@@ -1949,77 +2478,6 @@ export class IntroScreen {
       } catch (e) { console.warn('[intro] pipeline shot setup failed', e) }
     }
 
-    if (shot.ground) {
-      const g = shot.ground
-      group.add(groundDisc(g.color, g.surface, g))
-    }
-
-    // 3. THE RIG. Key aimed off the mood's own sun direction, fill, a
-    //    camera-relative fresnel rim (the thing that separates a fighter from
-    //    a dark background in every frame), floor bounce, a guaranteed
-    //    non-zero ambient floor, a fitted shadow frustum and contact shadows.
-    //    Replaces the two hand-rolled lights this file used to ship with.
-    try {
-      const rig = makeCinematicRig(this.scene, this.game?.quality || {}, {
-        mood,
-        camera: this.camera,
-        focus: shot.focus || [0, 1.2, 0],
-        groundY: 0,
-        contactShadows: true,
-        fog: shot.fog || false,
-        ...(shot.rig || {}),
-      })
-      rig.group.name = 'introRig'
-      group.add(rig.group)
-      this._rig = rig
-    } catch (e) {
-      console.warn('[intro] makeCinematicRig failed — falling back to a flat wrap', e)
-      group.add(new THREE.HemisphereLight(0xcfeeff, 0x86b978, 1.0))
-      if (shot.fog) this.scene.fog = new THREE.Fog(shot.fog.color, shot.fog.near, shot.fog.far)
-    }
-
-    // per-shot context passed to build()
-    const cx = {
-      g: group,
-      rng,
-      add: (obj) => group.add(obj),
-      onUpdate: (fn) => this._updaters.push(fn),
-      onDispose: (fn) => this._disposers.push(fn),
-      actor: (id, opts) => this._actor(group, id, opts),
-    }
-    try { shot.build(cx) } catch (e) { console.warn('[intro] shot build failed', e) }
-
-    // 4. SURFACE SWEEP. Everything built by hand above already asks for a real
-    //    preset, but the shared ArenaBase helpers still hand back a Lambert
-    //    here and there (makeCoinMesh's face is the notable one — the reason
-    //    every coin in the old reel was a flat disc). `enrichStandard: false`
-    //    means anything that already came from pbr() is left strictly alone,
-    //    so this cannot copy-on-write a cached material for no reason, and
-    //    actors are excluded outright: a fighter's materials are its own file's
-    //    business. The black-floor sweep runs over the whole group regardless,
-    //    which is what guarantees no pure-zero surface reaches the frame.
-    try {
-      upgradeMaterials(group, {
-        enrichStandard: false,
-        upgradeBasic: false,
-        hints: INTRO_HINTS,
-        filter: introUpgradeFilter,
-        env: this.scene.environment || null,
-      })
-    } catch (e) { console.warn('[intro] material sweep failed', e) }
-
-    // 5. SHADOWS. Contact discs under the actors and any prop that asked for
-    //    one (desks, the loco, the vault, the gate pillars), so nothing in the
-    //    frame is floating.
-    if (this._rig) {
-      try {
-        const subjects = []
-        group.traverse((o) => { if (o.userData.__introActorRoot) subjects.push(o) })
-        if (subjects.length) this._rig.setSubjects(subjects)
-        this._rig.addPropShadows?.(group)
-      } catch (e) { console.warn('[intro] contact shadows failed', e) }
-    }
-
     // announcer calls the fighter's name as the shot cuts in (§22)
     this._announceFighter(shot)
 
@@ -2032,7 +2490,8 @@ export class IntroScreen {
       // single-target focus would make the fighter the soft one at the exact
       // moment the announcer says his name. Given two, the pipeline fits the
       // sharp band to span both.
-      try { pipeline.autoFocus(this._hero || this._focus, this._hero ? this._focus : null) } catch (e) { /* optional */ }
+      const hero = rec.hero || null
+      try { pipeline.autoFocus(hero || this._focus, hero ? this._focus : null) } catch (e) { /* optional */ }
     }
   }
 
@@ -2049,52 +2508,6 @@ export class IntroScreen {
     if (now - _lastNameCall < 1200) return
     _lastNameCall = now
     try { this.game.audio.announcer(name) } catch (e) { /* silent movie, then */ }
-  }
-
-  // Build a real fighter model + clip sampler. Never throws.
-  _actor(group, id, opts = {}) {
-    const { x = 0, y = 0, z = 0, rotY = 0, scale = 1, clip = ['idle'], speed = 1 } = opts
-    let model
-    try {
-      const def = Characters[id]
-      model = def?.buildModel ? def.buildModel(0) : fallbackFigure()
-      if (!model?.group) model = fallbackFigure()
-    } catch (e) {
-      console.warn(`[intro] buildModel(${id}) failed`, e)
-      model = fallbackFigure()
-    }
-    model.group.position.set(x, y, z)
-    model.group.rotation.y = rotY
-    model.group.scale.setScalar(scale)
-    // Tag the whole subtree so the end-of-build material sweep steps around it
-    // — a fighter's surfaces are its own file's business, and re-presetting
-    // WALLY's flocked-vinyl body from a generic hint table would undo a whole
-    // character round. The root tag is what the rig's contact shadows track.
-    model.group.userData.__introActorRoot = true
-    model.group.traverse((o) => {
-      o.userData.__introActor = true
-      // Exactly what Fighter.js:735 does when a fighter enters a match, so the
-      // reel's shadows match the game's. `receiveShadow` is deliberately left
-      // alone: WALLY opts out of receiving on purpose (wally.js round 7) and
-      // that decision belongs to the character file.
-      if (o.isMesh || o.isSkinnedMesh) o.castShadow = true
-    })
-    group.add(model.group)
-    // First actor in a shot is the hero: the DoF focus target and the point the
-    // rig fits its shadow frustum and swings its rim around.
-    if (!this._hero) this._hero = model.group
-
-    const anim = new Animator(model.bones || {}, Characters[id]?.clips || {})
-    const wanted = Array.isArray(clip) ? clip : [clip]
-    const first = wanted.find((c) => anim.has(c))
-    if (first) anim.play(first, { restart: true, speed })
-    this._updaters.push((dt) => anim.update(dt))
-
-    return {
-      group: model.group,
-      anim,
-      play: (name, o = {}) => { if (anim.has(name)) anim.play(name, o) },
-    }
   }
 
   // -- per-frame -----------------------------------------------------------
@@ -2231,37 +2644,64 @@ export class IntroScreen {
 
     this._shake = Math.max(0, this._shake - dt * 1.6)
     this._updateCamera(shot)
-    for (const fn of this._updaters) {
-      try { fn(dt, this.t) } catch (e) { console.warn('[intro] updater failed', e) }
-    }
+    const rec = this._rec
+    if (rec) {
+      for (const fn of rec.updaters) {
+        try { fn(dt, this.t) } catch (e) { console.warn('[intro] updater failed', e) }
+      }
 
-    // The rig has to be driven every frame or the shadow frustum never fits,
-    // the camera-relative rim never swings onto the subject and the contact
-    // discs never re-place under a moving actor. Track the hero when there is
-    // one (the frog's leap, the punk's walk, Wally's approach), otherwise the
-    // shot's own look target.
-    if (this._rig) {
-      try {
-        if (this._hero) {
-          this._hero.getWorldPosition(_tmpFocus)
-          _tmpFocus.y += 1.0
-          this._rig.setFocus(_tmpFocus, 5.0)
-          this._rig.update(dt, null, this.camera)
-        } else {
-          this._rig.update(dt, this._focus, this.camera)
+      // The rig has to be driven every frame or the shadow frustum never fits,
+      // the camera-relative rim never swings onto the subject and the contact
+      // discs never re-place under a moving actor. Track the hero when there is
+      // one (the frog's leap, the punk's walk, Wally's approach), otherwise the
+      // shot's own look target.
+      if (rec.rig) {
+        try {
+          if (rec.hero) {
+            rec.hero.getWorldPosition(_tmpFocus)
+            _tmpFocus.y += 1.0
+            rec.rig.setFocus(_tmpFocus, 5.0)
+            rec.rig.update(dt, null, this.camera)
+          } else {
+            rec.rig.update(dt, this._focus, this.camera)
+          }
+        } catch (e) {
+          console.warn('[intro] rig update threw — dropping the rig for this shot', e)
+          rec.rig = null
         }
-      } catch (e) {
-        console.warn('[intro] rig update threw — dropping the rig for this shot', e)
-        this._rig = null
       }
     }
 
     if (this.t >= shot.dur) this._next()
   }
 
+  // ---------------------------------------------------------------------------
+  // BUILDING AHEAD, in the gaps.
+  //
+  // Only does anything when the loading screen did NOT finish the prewarm — a
+  // menu replay, a boot where the player hammered a key through the loader. The
+  // budget is deliberately small: the reel's own frame costs ~8 ms, so a few
+  // milliseconds of build on top drops the frame rate a little instead of
+  // stopping the movie dead. It widens as a cut approaches, because a shot that
+  // is not ready AT the cut is the one thing that still costs a visible freeze.
+  //
+  // Called from render(), AFTER the draw: the frame the player is looking at
+  // goes out first, and only the time left over gets spent on the next shot.
+  _buildAhead() {
+    const pre = this._pre
+    if (!pre || pre.done || this.done) return
+    const shot = SHOTS[this.idx]
+    const left = shot ? Math.max(0, shot.dur - this.t) : 0
+    const nextReady = pre.has(this.idx + 1)
+    let ms = 4
+    if (!nextReady) ms = left < 0.5 ? 14 : left < 1.2 ? 9 : 6
+    pre.run(ms)
+  }
+
   render(renderer, dt = 1 / 60) {
     // §8: through the shared post stack. The intro runs on wall-clock time, so
     // the dt it hands the pipeline is the real frame delta from Game's loop.
     if (this.scene && this.camera) renderScene(this.game || renderer, this.scene, this.camera, dt)
+    this._buildAhead()
   }
 }

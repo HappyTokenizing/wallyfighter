@@ -236,3 +236,46 @@ export {
 } from './geometry.js'
 
 export { __adoptionBaseline, __autoMergeBaseline } from './geometry.js'
+
+// ---------------------------------------------------------------------------
+// prewarm.js — PAY THE SHOT-BOUNDARY COST ON THE LOADING SCREEN INSTEAD.
+// Appended by the prewarm agent; nothing above this line was touched.
+//
+// The intro's frozen frames are not download time (TTFB 110 ms, load 1409 ms).
+// They are geometry, materials and SHADER COMPILES happening at every shot
+// change: programs 79 -> 91 across one replay, ~19.9 s of stall inside a ~36 s
+// cinematic. Meanwhile LoadingScreen.js runs a 1.5 s bar off `this.t / 1.4`
+// that waits on nothing at all. This module moves the work into that wait.
+//
+//   import { createPrewarmer } from '../render/index.js'
+//
+//   const pw = createPrewarmer(renderer, {
+//     camera,
+//     scenes: [cinematic.scene],        // or thunks, or { scene, camera, lightsFrom }
+//     sceneNames: ['settlementExpress'],// textures.js SESSION_SCENES working sets
+//     kinds: ['concrete', 'marble'],    // or 'session' / 'all'
+//     tasks: [{ key, label, weight, run }],
+//     budgetMs: 10,
+//   })
+//   const s = pw.step()   // -> { done, progress, label, unitsDone, unitsTotal,
+//                         //      cancelled, waiting, elapsedMs }
+//   await pw.run()        // yields via requestIdleCallback / rAF / setTimeout
+//   pw.cancel()           // the player pressed a key; abandon cleanly
+//
+// Warming the same material, surface or keyed task twice is free (module-level
+// memo), so every screen can warm what it needs without coordinating.
+//
+// NAME COLLISION: prewarm.js also exports `__selfTest`; it is re-exported here
+// as `__prewarmSelfTest`, matching the textures/materials/geometry convention.
+// It is async (it awaits a run), so unlike the others it is not folded into the
+// local `__selfTest()` above.
+// ---------------------------------------------------------------------------
+
+export {
+  createPrewarmer, Prewarmer, prewarmScene, prewarmSurfaces,
+  prewarmSupport, canPrewarmShaders, canPrewarmShadersAsync,
+  normalizeAsks, sceneNameAsks,
+  prewarmStats, resetPrewarmMemo,
+} from './prewarm.js'
+
+export { __selfTest as __prewarmSelfTest } from './prewarm.js'
