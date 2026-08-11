@@ -92,12 +92,66 @@ import {
 } from './textures.js'
 
 // ---------------------------------------------------------------------------
+// §0a THE SURFACE QUEUE, EXPOSED — why a caller outside this file needs it
+//
+// textures.js drives its own queue from a rAF + setTimeout heartbeat, and its
+// per-frame budget SCALES WITH QUEUE DEPTH:
+//
+//     const depth = Math.min(3, Math.floor(_jobQueue.length / 4))
+//     drainQueue(gap > 120 ? IDLE_BUDGET_MS : TICK_BUDGET_MS * (1 + depth))
+//
+// so twelve or more pending surfaces means 20 ms of generation on EVERY
+// presented frame, whether or not anything is on the loading screen. That is
+// the whole explanation for the cinematic's opening: with a deep queue left
+// over from boot, shots 0 and 1 ran at ~19 fps (52 ms frames = 8.3 ms of
+// rendering + 20 ms of texture generation + build steps), shot 2 recovered to
+// 61 fps as the queue crossed back under twelve, and shot 3 onward held 120 fps
+// because by then the queue was empty. Nothing was wrong with the renderer.
+//
+// A screen that hands off to something frame-rate-sensitive therefore has to
+// know two things: how deep the queue is, and how to drain it on its own terms.
+// Both are one-liners over textures.js, but they belong next to the rest of the
+// warm-up vocabulary rather than making every screen import the texture module.
+// ---------------------------------------------------------------------------
+
+/** How many surfaces are still queued for generation. */
+export function surfacesPending() {
+  try { return textureQueueStats().pending } catch (e) { return 0 }
+}
+
+/**
+ * Spend `budgetMs` draining the surface queue right now, on this thread, and
+ * return how many surfaces are still pending. Also resets textures.js's own
+ * heartbeat clock, so the module's next self-tick sees a short gap and stays on
+ * its small per-frame budget instead of deciding nobody is presenting frames.
+ */
+export function drainSurfaces(budgetMs = 4) {
+  try { return pumpTextureQueue(Math.max(1, budgetMs)) } catch (e) { return 0 }
+}
+
+/**
+ * The depth at and above which textures.js widens its own per-frame budget
+ * (12 pending -> 20 ms/frame, 8 -> 15, 4 -> 10, under 4 -> 5). A caller that
+ * wants to stay at frame rate while surfaces are still being made should keep
+ * the queue under this.
+ */
+export const SURFACE_QUEUE_QUIET = 4
+
+// ---------------------------------------------------------------------------
 // §0 Small helpers
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BUDGET_MS = 10
 const MIN_BUDGET_MS = 2
-const MAX_BUDGET_MS = 40
+// v3.8: was 40. A LOADING SCREEN IS NOT A GAME LOOP. The clamp exists so a
+// caller cannot accidentally hand us a whole second, not to stop a DOM screen
+// with nothing animating on the main thread from using most of its frame. The
+// measured consequence of 40 was a duty cycle of ~65% on the boot screen: 8 s
+// of wall clock bought 5.6 s of work and the remaining ~8.4 s of build leaked
+// into the first three shots of the cinematic at 20-30 fps. Callers that must
+// stay interactive still pass their own small budget; the ceiling is only a
+// ceiling.
+const MAX_BUDGET_MS = 120
 
 // How long we are willing to WAIT for the driver to report programs linked
 // before shrugging and moving on. Never let a loading screen hang on a vendor
@@ -322,11 +376,37 @@ function markObjectWarm(obj) {
 // first cut had W_DRAIN as a flat 6 and the bar sat at 74-80 % for two thirds of
 // the run.
 //
-// Order is deliberate: TASKS first (they create the objects), then texture ASKS
-// (they enqueue generation for those objects' materials), then the texture
-// DRAIN, then SHADER COMPILE last — compile has to see the final materials, and
-// a material whose maps are still placeholders compiles the same program, so
-// draining first costs nothing and keeps the compile pass honest.
+// ORDER — and this changed in v3.8, for a measured reason.
+//
+// It was: TASKS, ASKS, DRAIN, COMPILE. The argument for putting the drain first
+// was that it "costs nothing", because a material whose maps are still
+// placeholder DataTextures compiles the exact same program — three keys a
+// program on which map SLOTS are populated, never on their contents, and
+// textures.js fills its placeholder arrays in place and flips `needsUpdate`
+// rather than swapping the texture objects out.
+//
+// That argument is right about correctness and wrong about scheduling. Draining
+// is the single largest block of work in a warm-up (~2.4 s for ten kinds, and
+// textures.js's own note records that total throughput is FLAT from a 1 ms
+// slice to a 10 ms one — the budget buys the shape of the hitch, not the
+// finish time). Putting it in front of the compile pass meant that on any run
+// that ran out of loading screen, the phase that got dropped was always the
+// shader compile. Measured on the shipped boot: 95 programs (121 -> 216) were
+// still being linked DURING the cinematic, because phase 2 never once
+// executed.
+//
+// The two phases are not equally droppable. A surface that has not finished
+// generating shows its placeholder for a few more frames and then quietly gains
+// its relief — textures.js keeps draining on its own heartbeat and nothing
+// stalls. A program that has not been linked stalls the frame that first draws
+// it, for hundreds of milliseconds, in the middle of a camera move. So the
+// cheap-to-drop phase now goes last:
+//
+//     TASKS -> ASKS -> COMPILE -> DRAIN
+//
+// Compile still sees the final materials, because the tasks and asks that
+// create them both run ahead of it.
+
 
 const W_TASK = 4
 const W_ASK = 0.25         // per ask: allocate placeholders + enqueue
@@ -479,7 +559,18 @@ function makeDrainUnit(pw, expected = 0) {
         this.done = true
         return
       }
-      if (pending > this._peak) this._peak = pending
+      if (pending > this._peak) {
+        this._peak = pending
+        // The drain is usually the biggest single block of work in a warm-up
+        // and it is constructed before anyone knows how big it is (the asks
+        // that fill the queue may not have run yet, and TASKS enqueue surfaces
+        // of their own). Re-weight as the queue reveals its depth so the bar's
+        // last segment is not a flat 3 units standing in for two seconds.
+        // `status()` clamps progress monotonically, so a growing denominator
+        // parks the bar rather than rewinding it.
+        this.weight = Math.max(W_DRAIN, this._peak * W_DRAIN)
+        if (pw) pw._totalsDirty = true
+      }
       if (pending <= 0) this.done = true
       else this.label = `Generating surfaces (${pending} left)`
     },
@@ -707,19 +798,21 @@ class Prewarmer {
     this._running = null
     this._runStop = null
 
-    // ORDER: build the objects, ask for their surfaces, drain the surface
-    // queue, compile the shaders. See §4.
+    // ORDER: build the objects, ask for their surfaces, compile the shaders,
+    // drain the surface queue LAST. See the long note in §4 for why the drain
+    // moved behind the compile in v3.8.
     const tasks = Array.isArray(opts.tasks) ? opts.tasks : (opts.tasks ? [opts.tasks] : [])
     tasks.forEach((t, i) => { if (t) this._units.push(makeTaskUnit(this, t, i)) })
 
     const asks = normalizeAsks(opts.kinds).concat(sceneNameAsks(opts.sceneNames, opts.withArenaBase !== false))
     if (asks.length) this._units.push(makeAskUnit(this, asks))
-    if (asks.length || opts.drainTextures !== false) this._units.push(makeDrainUnit(this, asks.length))
 
     const scenes = Array.isArray(opts.scenes) ? opts.scenes : (opts.scenes ? [opts.scenes] : [])
     scenes.forEach((s, i) => {
       if (s) this._units.push(makeCompileUnit(this, s, scenes.length > 1 ? `Compiling shaders (${i + 1}/${scenes.length})` : null))
     })
+
+    if (asks.length || opts.drainTextures !== false) this._units.push(makeDrainUnit(this, asks.length))
   }
 
   // ---- adding work after construction -------------------------------------
@@ -744,10 +837,16 @@ class Prewarmer {
     return this
   }
 
-  /** Append a scene / object / `{ scene, camera, lightsFrom }` / thunk to compile. */
+  /**
+   * Append a scene / object / `{ scene, camera, lightsFrom }` / thunk to
+   * compile. Inserted at the COMPILE phase point rather than pushed onto the
+   * end: the drain now sits last, and a scene handed back by a task must be
+   * compiled before that drain rather than behind two seconds of surface
+   * generation that may never finish inside the loading window.
+   */
   addScene(entry, label) {
     if (!entry) return this
-    this._units.push(makeCompileUnit(this, entry, label))
+    this._units.splice(this._insertPoint('compile'), 0, makeCompileUnit(this, entry, label))
     this._totalsDirty = true
     return this
   }
@@ -755,7 +854,7 @@ class Prewarmer {
   // Keep the phase ordering when work arrives late: a task added during the
   // compile pass still has to run before the compile units that follow it.
   _insertPoint(type) {
-    const rank = { task: 0, ask: 1, drain: 2, compile: 3 }
+    const rank = { task: 0, ask: 1, compile: 2, drain: 3 }
     const r = rank[type]
     for (let i = Math.max(0, this._cursor); i < this._units.length; i++) {
       if ((rank[this._units[i].type] ?? 3) > r) return i
@@ -792,7 +891,30 @@ class Prewarmer {
       if (this.cancelled) break
       const u = this._units[this._cursor]
       if (u.done) { this._cursor++; continue }
-      if (u.pending) break            // waiting on a promise: yield, never spin
+      if (u.pending) {
+        // The head unit is parked on a promise — a driver link, an async task.
+        // Never spin on it. It used to be a plain `break`, which was fine when
+        // the drain ran FIRST and the awaits were the last thing in the queue;
+        // now that compiling comes before draining (see §4), a link wait that
+        // the driver is slow to report — bounded at AWAIT_LINK_MS, i.e. up to
+        // four seconds — would idle the whole loading screen with two seconds
+        // of surface generation sitting untouched behind it. So step past it
+        // and spend the slice on the next unit that is not blocked. The units
+        // behind a pending one are independent of it by construction: the only
+        // ordering this queue enforces is that a thing is BUILT before it is
+        // compiled, and building is what the pending unit already finished.
+        const v = this._nextRunnable(this._cursor + 1)
+        if (!v) break
+        try {
+          v.run(deadline)
+        } catch (err) {
+          console.warn(`[prewarm] unit "${v.label}" threw — skipping it`, err)
+          v.done = true
+        }
+        if (now() >= deadline) break
+        if (++guard > 8192) break
+        continue
+      }
       try {
         u.run(deadline)
       } catch (err) {
@@ -861,6 +983,15 @@ class Prewarmer {
     }
     if (this._runStop) this._runStop()
     return this.status()
+  }
+
+  /** First unit at or after `from` that is neither finished nor blocked. */
+  _nextRunnable(from) {
+    for (let i = from; i < this._units.length; i++) {
+      const u = this._units[i]
+      if (!u.done && !u.pending) return u
+    }
+    return null
   }
 
   isDone() {

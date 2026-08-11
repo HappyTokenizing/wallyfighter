@@ -2050,6 +2050,16 @@ let ASYNC = typeof requestAnimationFrame === 'function'
 const TICK_BUDGET_MS = 5      // per presented frame
 const IDLE_BUDGET_MS = 60     // when frames clearly are not being presented
 const STARVED_MS = 400        // tick gap above which nobody is presenting frames
+
+// True when the page is actually putting frames on screen. A long tick gap on
+// its own does NOT mean starvation — a visible page having one slow frame looks
+// identical to a hidden tab from inside a setTimeout. Only a genuinely hidden
+// document (or a non-DOM host such as the node harnesses) may take the
+// drain-everything path in onTick(); see the comment there.
+function isPresenting() {
+  if (typeof document === 'undefined') return false
+  return document.visibilityState === 'visible'
+}
 const BAND_ROWS = 32          // rows of the height field per build step
 
 const _jobQueue = []
@@ -2344,12 +2354,23 @@ function onTick() {
   const t = now()
   const gap = _lastTick ? t - _lastTick : 0
   _lastTick = t
-  if (gap > STARVED_MS) {
+  if (gap > STARVED_MS && !isPresenting()) {
     // Nothing is presenting frames — rAF is frozen and our only heartbeat is a
     // throttled setTimeout. This is the hidden-tab / capture-rig case
     // (DRIVER.md): there is no frame to drop, and dribbling 60 ms per second
     // would leave screenshots showing preview-resolution surfaces forever. Take
     // the whole queue.
+    //
+    // THE isPresenting() GUARD IS LOAD-BEARING. Without it, a *visible* page
+    // that merely had one slow frame — an intro shot build, an arena entering —
+    // trips the same branch, because the tick gap is measured in wall time and
+    // does not know why it was long. The queue then drains synchronously, which
+    // makes that frame far longer, which makes the next gap longer still: a
+    // positive feedback loop. Measured during the intro before this guard: a
+    // single rAF callback of 1547 ms, and four multi-second freezes per reel
+    // that together cost 8.9 s against a 2.42 s baseline. A page that is
+    // presenting frames must always take the budgeted path below, however slow
+    // the last frame was.
     flushTextureQueue()
   } else {
     // Deep queue == a scene is loading, and a loading screen can afford a longer

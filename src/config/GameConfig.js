@@ -100,6 +100,13 @@ export const GameConfig = {
   controls: {
     // v2.0 free-roam scheme: WASD moves on the arena floor (camera-relative),
     // Space jumps, Shift blocks, C crouches.
+    //
+    // NOTE — there is deliberately NO 'finisher' binding. v2.1 (§23) replaced
+    // the manual finisher with automatic KO executions: MatchScreen.onKO runs
+    // the cutscene itself and nothing in the engine reads a finisher input.
+    // Every key listed here must also appear in InputManager's ACTIONS list
+    // (it polls that list, not this object) AND have a consumer — otherwise
+    // it is a dead key that still shows up as a rebindable row in Settings.
     p1: {
       left: 'KeyA', right: 'KeyD', fwd: 'KeyW', back: 'KeyS',
       jump: 'Space', crouch: 'KeyC',

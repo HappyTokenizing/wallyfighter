@@ -1,8 +1,11 @@
 // Tutorial (v2.0 §20) — TutorialDirector turns STORY chapter 1's first round
 // into a guided controls tutorial: eleven sequential objectives with chunky
 // retro prompt cards, a docile Dogey (aiLevel 0 dummy), a scripted poke to
-// block, granted meter for the super, a forced item airdrop and a granted
-// finisher setup. Skippable ANYTIME (Esc / on-screen button, touch included);
+// block, granted meter for the super, a forced item airdrop and a Dogey
+// dropped to 10% HP so the last step is a real KO. v2.1 (§23): the execution
+// cutscene is AUTOMATIC — there is no finisher input, chord or key anywhere in
+// the engine, so that card asks for the KO and says the cutscene plays itself.
+// Skippable ANYTIME (Esc / on-screen button, touch included);
 // completion or skip flips save 'story.tutorialDone' and hands the match to a
 // live aiLevel-1 opponent.
 //
@@ -35,6 +38,15 @@ const TOUCH_GLYPHS = {
   grab: 'GRAB', special: 'SPEC', super: 'HOLD SPEC', item: 'USE', crouch: 'CROUCH',
 }
 
+// One keycap. Anything longer than two glyphs (SPACE, SHIFT, ATTACK,
+// HOLD SPEC, LEFT STICK, NUM 1) gets the `wide` cap so word labels stay on
+// one line while single letters keep the uniform square-cap min-width.
+function cap(glyph) {
+  const g = String(glyph == null ? '?' : glyph)
+  const esc = g.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return `<kbd${g.length > 2 ? ' class="wide"' : ''}>${esc}</kbd>`
+}
+
 function codeGlyph(code) {
   if (!code) return '?'
   if (CODE_GLYPHS[code]) return CODE_GLYPHS[code]
@@ -63,12 +75,29 @@ const STYLE = `
                           text-shadow: 3px 3px 0 rgba(0,0,0,0.6); }
   .wcs-tut-card .tbody { margin-top: 6px; font-family: var(--wcs-mono, 'Courier New', monospace);
                          font-weight: bold; font-size: clamp(11px, 1.5vw, 16px); letter-spacing: 1px;
-                         color: #e8ecff; text-shadow: 1px 1px 0 #000; line-height: 2; }
-  .wcs-tut-card kbd { display: inline-block; margin: 0 3px; padding: 0.12em 0.5em 0.06em;
-                      font-family: var(--wcs-font, Impact); font-size: 1.08em; letter-spacing: 1px;
-                      color: #1a1405; border: 3px solid #000; border-radius: 6px;
+                         color: #e8ecff; text-shadow: 1px 1px 0 #000; line-height: 2.3; }
+  /* KEYCAPS. Deliberately NOT --wcs-font: Impact is a condensed display face
+     whose cap I is a bare stroke and whose U/O/E collapse into each other at
+     this size — the exact complaint. The stack below prefers faces whose
+     uppercase I carries crossbars (Menlo, Consolas, DejaVu/Liberation Mono,
+     Verdana) so I never reads as l/1/|, and the fixed min-width + centering
+     makes every single-letter cap the same physical size. Same arcade cap
+     (gold gradient, black border, hard drop shadow) — legibility only. */
+  .wcs-tut-card kbd { display: inline-block; box-sizing: border-box;
+                      min-width: 2.1em; margin: 0 4px; padding: 0.1em 0.42em;
+                      font-family: var(--wcs-keycap, Menlo, Consolas, 'DejaVu Sans Mono',
+                                   'Liberation Mono', Verdana, 'Courier New', monospace);
+                      font-weight: 700; font-size: 1.22em; line-height: 1.15;
+                      letter-spacing: 0; text-align: center; text-transform: uppercase;
+                      color: #1a1405; text-shadow: none;
+                      border: 3px solid #000; border-radius: 6px;
                       background: linear-gradient(180deg, #ffe98a, var(--wcs-gold, #ffd94a) 55%, var(--wcs-gold-deep, #c99a12));
-                      box-shadow: 0 3px 0 #000; vertical-align: middle; }
+                      box-shadow: 0 3px 0 #000, inset 0 1px 0 rgba(255,255,255,0.55);
+                      vertical-align: middle; }
+  /* word caps (SPACE / SHIFT / ATTACK / HOLD SPEC / LEFT STICK) drop a step so
+     they stay inside the card instead of forcing a wrap */
+  .wcs-tut-card kbd.wide { min-width: 0; font-size: 1.02em; letter-spacing: 1px;
+                           padding: 0.2em 0.6em; }
   .wcs-tut-card .thint { display: none; margin-top: 5px; font-family: var(--wcs-mono, monospace);
                          font-weight: bold; font-size: clamp(10px, 1.3vw, 14px);
                          color: var(--wcs-red, #ff3b4d); text-shadow: 1px 1px 0 #000; }
@@ -105,7 +134,11 @@ const STYLE = `
   @media (max-height: 500px) {
     .wcs-tut-card { bottom: 4vh; padding: 8px 14px 10px; }
     .wcs-tut-card .ttitle { font-size: 20px; }
-    .wcs-tut-card .tbody { line-height: 1.6; }
+    /* keep the line box taller than the keycap so short viewports don't clip
+       the caps into each other */
+    .wcs-tut-card .tbody { line-height: 2.05; }
+    .wcs-tut-card kbd { font-size: 1.1em; padding: 0.06em 0.36em; margin: 0 3px; }
+    .wcs-tut-card kbd.wide { font-size: 0.96em; padding: 0.14em 0.5em; }
     .wcs-tut-skip { top: 70px; }
   }
 `
@@ -123,7 +156,6 @@ export class TutorialDirector {
     this._extDriven = false
     this._advanceIn = null
     this._disposeIn = null
-    this._forcedFinisher = false
     this._finisherAnnounced = false
     this._escAt = 0
     this._hintT = 0
@@ -283,7 +315,11 @@ export class TutorialDirector {
       { id: 'special', title: 'SPECIAL DELIVERY', body: `UNLEASH A SPECIAL — ${k('special')}` },
       { id: 'super', title: 'FULL SEND', body: `METER'S ON THE HOUSE<br>HIT ${k('super')} FOR YOUR SUPER` },
       { id: 'item', title: 'FREE AIRDROP', body: `AN ITEM LANDED IN YOUR HANDS<br>PRESS ${k('item')} TO USE IT` },
-      { id: 'finish', title: 'CLOSE THE POSITION', body: `DOGEY IS DOWN BAD<br>PRESS ${k('special')} + ${k('heavy')} TOGETHER!` },
+      // v2.1 (§23) killed the manual finisher: there is no chord and no
+      // finisher key — MatchScreen.onKO auto-plays the execution cutscene. The
+      // step therefore asks for the one thing it really needs, the KO itself,
+      // and names a single real key to land it with.
+      { id: 'finish', title: 'CLOSE THE POSITION', body: `DOGEY IS DOWN BAD — DROP HIM WITH ${k('heavy')}<br>THE KO EXECUTION PLAYS ITSELF` },
     ]
   }
 
@@ -321,7 +357,6 @@ export class TutorialDirector {
       case 'finish': {
         const d = this.dummy
         try { if (d && d.hp > 0) d.setHp(Math.max(1, Math.round(d.maxHp * 0.1))) } catch { /* stub */ }
-        this._forcedFinisher = true
         if (!this._finisherAnnounced) {
           this._finisherAnnounced = true
           // v2.1 (§23): finisher:ready prompt removed — KO auto-plays the execution
@@ -376,11 +411,9 @@ export class TutorialDirector {
         }
         break
       }
-      case 'finish':
-        // grant the chord: MatchScreen only arms finisherReady in the final
-        // round, so the director pins it armed itself (and cleans it on skip)
-        try { if (m.phase === 'fight' && m.finisherReady) m.finisherReady[0] = true } catch { /* stub */ }
-        break
+      // 'finish' has no per-frame work: v2.1 removed the manual finisher, so
+      // there is nothing to arm. The step completes off 'fighter:ko' (slot 1)
+      // or 'finisher:start' (slot 0) — see _onKo / _onFinisherStart.
     }
   }
 
@@ -563,7 +596,8 @@ export class TutorialDirector {
       try { m.timeLeft = (m.rules?.roundTime ?? 99) * 60 } catch { /* stub */ }
       try { if (this.player && this.player.hp > 0) this.player.setHp(this.player.maxHp) } catch { /* stub */ }
       try { if (skipped && this.dummy && this.dummy.hp > 0) this.dummy.setHp(this.dummy.maxHp) } catch { /* stub */ }
-      if (this._forcedFinisher) { try { m.finisherReady[0] = false } catch { /* stub */ } }
+      // (nothing to un-arm: v2.1 executions are automatic, the director never
+      // pins match.finisherReady any more)
     }
     this._poke = null
     this._clearCard()
@@ -663,13 +697,12 @@ export class TutorialDirector {
   }
 
   _kbd(action) {
-    if (this.game?.isTouch) return `<kbd>${TOUCH_GLYPHS[action] || String(action).toUpperCase()}</kbd>`
-    const code = this.game?.input?.bindings?.[0]?.[action]
-    return `<kbd>${codeGlyph(code)}</kbd>`
+    if (this.game?.isTouch) return cap(TOUCH_GLYPHS[action] || String(action).toUpperCase())
+    return cap(codeGlyph(this.game?.input?.bindings?.[0]?.[action]))
   }
 
   _moveKbd() {
-    if (this.game?.isTouch) return '<kbd>LEFT STICK</kbd>'
+    if (this.game?.isTouch) return cap('LEFT STICK')
     return ['fwd', 'left', 'back', 'right'].map((a) => this._kbd(a)).join('')
   }
 }

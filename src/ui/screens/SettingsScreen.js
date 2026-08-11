@@ -33,7 +33,15 @@ const VOLUME_CHANNELS = ['master', 'music', 'sfx', 'announcer', 'crowd']
 export class SettingsScreen {
   constructor(game) {
     this.game = game
-    this.actions = Object.keys(GameConfig.controls.p1) // the 12 bindable actions (incl. 'item')
+    // The bindable actions, derived from the config (14 today, incl. 'item').
+    // CAUTION: this panel will happily render a row for ANY key added to
+    // GameConfig.controls.p1, but InputManager only polls the codes named in
+    // its own ACTIONS list — so a key added here and nowhere else becomes a
+    // rebindable row that does nothing. That is exactly why there is no
+    // 'finisher' row: KO executions are automatic since v2.1 (§23), there is
+    // no finisher input in the engine, and inventing a binding for one would
+    // put a dead control in this list.
+    this.actions = Object.keys(GameConfig.controls.p1)
   }
 
   enter() {

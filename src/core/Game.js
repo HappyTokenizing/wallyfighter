@@ -74,6 +74,7 @@ export class Game {
     this._installErrorOverlay()
     this._installDebugMeter()
     if (this.captureMode) this._installCaptureRig()
+    if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('prof')) this._installFrameProfiler()
   }
 
   // -------------------------------------------------------------------------
@@ -82,6 +83,62 @@ export class Game {
   // often reports visibilityState:hidden, which freezes rAF) plus framebuffer
   // capture straight to disk through the dev server's shot sink.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Frame profiler (?prof=1). Records rAF deltas and screen transitions, then
+  // publishes a summary into document.title as "PROF {json}".
+  //
+  // The title is the transport on purpose: the automation Browser pane freezes
+  // requestAnimationFrame (visibilityState hidden, 0 callbacks/sec), so frame
+  // timing can only be measured in a real browser — and driving one over CDP
+  // means Runtime.evaluate against a page that navigates mid-measurement, which
+  // is fragile. A page title is readable from /json/list with a plain fetch and
+  // survives navigation, so a profiling run is just: launch Chrome at ?prof=1,
+  // poll the title. Also exposed as window.__prof for interactive use.
+  // -------------------------------------------------------------------------
+  _installFrameProfiler() {
+    const P = { t0: performance.now(), f: [], marks: [], published: false }
+    window.__prof = P
+    let last = P.t0
+    const seg = (from, to) => {
+      const s = P.f.slice(from, to)
+      if (!s.length) return null
+      const sorted = [...s].sort((a, b) => a - b)
+      const q = (p) => +(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]).toFixed(1)
+      const over100 = s.filter((x) => x > 100)
+      return {
+        n: s.length, median: q(0.5), p90: q(0.9), p99: q(0.99),
+        max: +Math.max(...s).toFixed(0),
+        o33: s.filter((x) => x > 33).length, o100: over100.length,
+        msO100: +over100.reduce((t, x) => t + x, 0).toFixed(0),
+      }
+    }
+    const tick = () => {
+      const now = performance.now()
+      P.f.push(now - last)
+      last = now
+      const name = this.screens?.name
+      if (name && (!P.marks.length || P.marks[P.marks.length - 1].s !== name)) {
+        P.marks.push({ s: name, i: P.f.length, t: +(now - P.t0).toFixed(0) })
+      }
+      // Publish once the intro has handed off to the title, or after 70 s.
+      const intro = P.marks.find((m) => m.s === 'intro')
+      const title = intro && P.marks.find((m) => m.s === 'title' && m.i > intro.i)
+      if (!P.published && (title || now - P.t0 > 70000)) {
+        P.published = true
+        const load = P.marks[0] ? seg(0, P.marks[0].i) : null
+        const out = {
+          marks: P.marks.map((m) => `${m.s}@${m.t}`),
+          load, intro: intro ? seg(intro.i, title ? title.i : P.f.length) : null,
+          handoff: title ? +P.f[title.i - 1].toFixed(0) : null,
+        }
+        try { document.title = 'PROF ' + JSON.stringify(out) } catch { /* nothing to do */ }
+      }
+      requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+    console.info('[wcs] frame profiler armed (?prof=1) — window.__prof, summary lands in document.title')
+  }
+
   _installCaptureRig() {
     const errs = []
     addEventListener('error', (e) => errs.push(`ERR ${String(e.message).slice(0, 160)}`))

@@ -80,6 +80,17 @@ import {
   applyEnvironment, makeCinematicRig,
   roundedBox, capsule, profileLathe, superellipsoid, smoothNormals,
 } from '../render/index.js'
+// Straight from prewarm.js, not from render/index.js: these three are v3.8
+// additions and index.js is another agent's file. prewarm.js imports only
+// textures.js, so there is no cycle back into here.
+import {
+  createPrewarmer, canPrewarmShaders,
+  drainSurfaces, surfacesPending, SURFACE_QUEUE_QUIET,
+} from '../render/prewarm.js'
+// The screen the reel hands off to. Building it is a ~1.5 s block of work and
+// it is a lazy singleton, so it can be built ANY time before the title screen
+// asks for it — see §THE HANDOFF below.
+import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 // ---------------------------------------------------------------------------
 // Injected caption / letterbox styles (self-contained — ui.css is not ours).
@@ -2116,6 +2127,66 @@ export class IntroPrewarm {
   /** Build everything, right now, on this thread. Only for tooling/tests. */
   runAll() { while (this.step()) { /* spin */ } return this }
 
+  // -- bounded, per-shot draining (v3.8) --------------------------------------
+  //
+  // THE PROBLEM THIS SOLVES. Building all eleven shots is ~14 s of work on the
+  // measured machine. The loading screen was asked to do all of it and could
+  // not: it spent its 8 s ceiling and handed the remaining ~8.4 s to the reel,
+  // which paid for it in the only place it could — the first three shots, at
+  // 20-30 fps. A boot has two budgets, a short one before the movie and a long
+  // one during it, and the queue has to be splittable across them.
+  //
+  // So the loading screen now banks a LEAD of complete shots and the reel
+  // builds the rest in its own idle time, one shot ahead of the cut. These are
+  // the front doors for that: `runShots(n, ms)` never touches a step belonging
+  // to shot n or later, so "get me the first four shots and nothing else" is
+  // one call and the bar over it is honest.
+
+  // The next step that has not run yet, in play order. Also parks `_cursor` on
+  // it, which is what keeps `label` pointing at real remaining work.
+  _peekNext() {
+    while (this._cursor < this.total && this._ran.has(this._queue[this._cursor])) this._cursor++
+    return this._cursor < this.total ? this._queue[this._cursor] : null
+  }
+
+  /** Steps still outstanding for shots with index < n. */
+  shotsPending(n) {
+    let k = 0
+    for (const st of this._queue) if (st.rec.idx < n && !this._ran.has(st)) k++
+    return k
+  }
+
+  /** 0..1 over the steps of the first `n` shots — what a lead-bar should show. */
+  shotsProgress(n) {
+    let total = 0
+    for (const st of this._queue) if (st.rec.idx < n) total++
+    if (!total) return 1
+    return Math.min(1, (total - this.shotsPending(n)) / total)
+  }
+
+  /**
+   * Spend up to `ms` of this frame on the first `n` shots only. Returns true
+   * while those shots still have work. Unlike `run()`, it stops at the boundary
+   * instead of rolling on into shot n — which is the whole point: the caller is
+   * buying a lead, not the reel.
+   *
+   * Like `run()` it always executes AT LEAST ONE step. A single step (a
+   * character's buildModel(), an environment's PMREM) is indivisible and
+   * routinely 200-400 ms; no scheduler can make that smaller, and refusing to
+   * start one because the budget is small only means never starting it.
+   */
+  runShots(n, ms = 6) {
+    if (this.disposed) return false
+    const t0 = performance.now()
+    do {
+      const st = this._peekNext()
+      if (!st || st.rec.idx >= n) break
+      this._cursor++
+      this._runStep(st)
+    } while (performance.now() - t0 < ms)
+    return this.shotsPending(n) > 0
+  }
+
   /** Force shot `i` complete (used at a cut the prewarm did not reach in time). */
   ensure(i) {
     const plan = this._plans[i]
@@ -2160,6 +2231,24 @@ export class IntroPrewarm {
       shotsReady: this.shotsReady,
       shotCount: this.shotCount,
     }
+  }
+
+  /**
+   * Go inert and hand every live record back to the caller WITHOUT disposing
+   * anything. The screen uses this at exit: teardown of eleven scenes is
+   * hundreds of milliseconds of geometry/material walking, and it was landing
+   * on the same frame as the title screen's build — the worst frame in the
+   * whole session at 1526 ms. The caller frees them on its own schedule.
+   */
+  detach() {
+    const recs = this._plans.map((p) => p.rec).filter((r) => r && !r.disposed)
+    this.disposed = true
+    this._queue = []
+    this._plans = []
+    this._ran = new Set()
+    this._cursor = 0
+    this.total = 0
+    return recs
   }
 
   dispose({ unclaimedOnly = true } = {}) {
@@ -2256,6 +2345,180 @@ export function shouldPrewarmIntro(game) {
 }
 
 // ---------------------------------------------------------------------------
+// §THE HANDOFF — the frame between the last shot and the title screen.
+//
+// THE DEFECT, measured. After the shot-boundary freezes were removed, the worst
+// single frame left in the entire session was not in the reel at all: the
+// intro -> title transition cost 1526 ms, three times the biggest remaining
+// cut. Nothing in this file was to blame for most of it. It is TitleScreen
+// building — `getBackdrop(game)` constructs the whole Permanent Reserve set
+// (granite floor, vault door, bullion, plinth, the real WallyDef.buildModel(),
+// the struck coin, candles, dust volume, an interior-vault PMREM and a
+// cinematic rig) inside its `enter()`, and then links every one of that set's
+// programs on its first draw. The intro's own `exit()` piled eleven scene
+// teardowns onto the same frame.
+//
+// THE FIX IS THE SAME TRICK ONE STEP FURTHER. The loading screen moved the
+// reel's work into the wait before the reel; the reel is itself a 36-second
+// wait, and it is a wait during which the game already knows exactly which
+// screen comes next — every exit from here, natural or skipped, is
+// `goto('title')`. So the backdrop is built and compiled in the reel's leftover
+// frame time, and by the time the title screen asks for it, `getBackdrop()` is
+// a cache hit returning a set whose shaders are already linked.
+//
+// WHY IT IS SAFE TO BUILD IT EARLY. MenuBackdrop is a lazy module singleton
+// shared by every front-end screen; TitleScreen does not own it and does not
+// configure it. Its constructor registers two resize listeners and nothing
+// else with a side effect, and it only borrows the shared post stack from
+// inside its own render(), which nobody calls until the title is up.
+//
+// WHAT IT COSTS. The construction itself is one indivisible block — there is no
+// seam inside another agent's constructor — so it is scheduled deliberately:
+// only once every shot in the reel is built, only when the surface queue is
+// quiet, and never in the moments right after a cut. The compile pass behind it
+// IS chunkable and goes through prewarm.js at a few milliseconds a frame.
+// ---------------------------------------------------------------------------
+
+const _titleWarm = { phase: 0, pw: null, bd: null }
+
+/**
+ * One slice of "get the title screen ready". Returns true while work remains.
+ * Idempotent and cheap once finished, so it is safe to call every frame.
+ */
+export function warmTitleHandoff(game, ms = 4) {
+  if (_titleWarm.phase >= 3) return false
+  if (!game) return false
+
+  if (_titleWarm.phase === 0) {
+    try {
+      _titleWarm.bd = getBackdrop(game)
+    } catch (err) {
+      console.warn('[intro] title backdrop prewarm failed — the title will build itself', err)
+      _titleWarm.phase = 3
+      return false
+    }
+    _titleWarm.phase = 1
+    // The build enqueued this set's procedural surfaces; let the drain that
+    // paces this whole file pick them up before we compile on top of them.
+    return true
+  }
+
+  if (_titleWarm.phase === 1) {
+    const bd = _titleWarm.bd
+    const renderer = game.renderer || null
+    if (!bd || !bd.scene || !canPrewarmShaders(renderer)) { _titleWarm.phase = 3; return false }
+    try {
+      _titleWarm.pw = createPrewarmer(renderer, {
+        camera: bd.camera || null,
+        scenes: [{ scene: bd.scene, camera: bd.camera || null, label: 'Opening the vault…' }],
+        // The reel owns the surface queue while it is playing (see
+        // _buildAhead) — two drivers pumping the same queue would double the
+        // per-frame cost of the thing we are trying to keep off the frame.
+        drainTextures: false,
+        budgetMs: Math.max(2, ms),
+      })
+    } catch (err) {
+      console.warn('[intro] title shader prewarm unavailable', err)
+      _titleWarm.phase = 3
+      return false
+    }
+    _titleWarm.phase = 2
+  }
+
+  if (_titleWarm.phase === 2) {
+    try {
+      const s = _titleWarm.pw.step(Math.max(2, ms))
+      if (s.done) { _titleWarm.phase = 3; _titleWarm.pw = null; return false }
+    } catch (err) {
+      console.warn('[intro] title shader prewarm step threw — continuing', err)
+      _titleWarm.phase = 3
+      _titleWarm.pw = null
+      return false
+    }
+  }
+  return _titleWarm.phase < 3
+}
+
+/** Has the title screen's set been built and compiled already? */
+export const titleHandoffReady = () => _titleWarm.phase >= 3
+
+// ---------------------------------------------------------------------------
+// DEFERRED TEARDOWN.
+//
+// disposeShotRecord() walks a scene and frees its geometries, materials and
+// non-shared textures. Eleven of them in one call is the other half of the
+// 1526 ms handoff frame. Nothing ever draws these scenes again, so there is no
+// reason the frame that swaps screens has to be the frame that frees them:
+// the records are handed to a chain that spends ~4 ms per slice until they are
+// gone. Peak memory is unchanged for a few hundred milliseconds and then falls
+// exactly as far as it did before.
+//
+// rIC when it exists, rAF otherwise, and ALWAYS a setTimeout racing alongside —
+// the same reasoning textures.js and prewarm.js both give: a hidden tab has no
+// rAF, and a teardown that only advances in rAF would leak the whole reel.
+// ---------------------------------------------------------------------------
+function _scheduleSlice(fn) {
+  let fired = false
+  const once = () => { if (fired) return; fired = true; fn() }
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(() => once(), { timeout: 120 })
+  else if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => once())
+  if (typeof setTimeout === 'function') setTimeout(() => once(), 60)
+}
+
+function disposeShotRecordsDeferred(recs) {
+  const list = (recs || []).filter((r) => r && !r.disposed)
+  if (!list.length) return
+  const tick = () => {
+    const t0 = performance.now()
+    do {
+      const rec = list.shift()
+      if (!rec) break
+      try { disposeShotRecord(rec) } catch (e) { console.warn('[intro] deferred dispose failed', e) }
+    } while (list.length && performance.now() - t0 < 4)
+    if (list.length) _scheduleSlice(tick)
+  }
+  _scheduleSlice(tick)
+}
+
+// ---------------------------------------------------------------------------
+// PACING CONSTANTS for the reel's own background work. All of them are frame
+// budgets in milliseconds except where named otherwise, and all of them exist
+// because of one measurement: the reel renders in 8.3 ms, so every millisecond
+// spent here is a millisecond off the frame.
+// ---------------------------------------------------------------------------
+// Shots the REPLAY path banks before the first frame (the boot path gets its
+// lead from the loading screen and skips this entirely).
+const REPLAY_LEAD_SHOTS = 2
+const REPLAY_LEAD_MS = 700
+const REPLAY_DRAIN_MS = 250
+// Surface generation we are willing to drive ourselves per frame while the reel
+// plays. textures.js will drain on its own heartbeat regardless; this is what
+// keeps the queue shallow enough that its heartbeat stays on the small budget.
+const SURFACE_PUMP_MS = 5
+// How many shots ahead of the one playing the reel keeps banked. Two is one
+// more than it can possibly need, and stopping there is what keeps the build
+// spread across the whole reel instead of piled onto its opening. The loading
+// screen hands over three banked shots, so shot 0 has nothing to do at all.
+const AHEAD_LEAD_SHOTS = 2
+// Build budget while the lead is short but not critical. At ~13 ms a frame
+// (8.3 rendering + this) a 3.3 s shot yields ~1.2 s of build time, which is
+// about what one shot costs — so the lead holds without ever being felt.
+const AHEAD_IDLE_MS = 5
+// ...and when it is not: widen as the cut approaches, because a shot that is
+// not ready AT the cut is the only thing here that still costs a visible freeze.
+const AHEAD_NEAR_MS = 14
+const AHEAD_MID_MS = 9
+const AHEAD_FAR_MS = 6
+// Quiet window after a hard cut. The first frames of a shot already carry the
+// pipeline's history reset and the new scene's first draw; dropping an
+// indivisible 300 ms build step on top of that is what turns a 43 ms cut into a
+// 350 ms one. Only observed when we are ahead — if the next shot is missing,
+// building beats being pretty.
+const CUT_QUIET_S = 0.25
+// Frame budget for getting the title screen built and compiled during the reel.
+const TITLE_WARM_MS = 4
+
+// ---------------------------------------------------------------------------
 // The screen
 // ---------------------------------------------------------------------------
 export class IntroScreen {
@@ -2279,6 +2542,31 @@ export class IntroScreen {
     // player who skipped the loader), we start one here and feed it leftover
     // frame time during playback: spread instead of spiked.
     this._pre = prewarmIntro(this.game)
+
+    // DEFECT 6 — SETTINGS -> REPLAY INTRO does not pass through the loading
+    // screen, so on that path the queue above is stone cold and the reel would
+    // open exactly the way it did before any of this work: shot 0 built
+    // synchronously inside _activateShot(), then a freeze at the first cut
+    // while shot 1 is built under it. The queue is module-level and idempotent,
+    // so buying a two-shot lead here is a no-op on the boot path (the loading
+    // screen already banked it) and a bounded, once-only block on the replay
+    // path — paid during the screen change, where nothing is animating, rather
+    // than 3.3 s later in the middle of a camera move.
+    //
+    // The budget is deliberately a wall-clock cap and not a step count: a step
+    // is indivisible and a slow machine must not be held here for two seconds.
+    // Whatever the lead does not cover, _buildAhead() picks up during playback.
+    if (!this._pre.done && this._pre.shotsReady < REPLAY_LEAD_SHOTS) {
+      try {
+        this._pre.runShots(REPLAY_LEAD_SHOTS, REPLAY_LEAD_MS)
+        // ...and take the surfaces those shots just enqueued down to a depth
+        // textures.js will not widen its own per-frame budget for. Entering the
+        // reel with a deep queue is what cost the opening its frame rate.
+        if (surfacesPending() >= SURFACE_QUEUE_QUIET) drainSurfaces(REPLAY_DRAIN_MS)
+      } catch (err) {
+        console.warn('[intro] replay lead warm failed — building during playback instead', err)
+      }
+    }
 
     // The scenes were composed and compiled against the prewarm's camera, so
     // that is the camera that has to draw them. BASE_FOV is the reference focal
@@ -2403,20 +2691,41 @@ export class IntroScreen {
     this._activateShot(SHOTS[this.idx])
   }
 
-  // Free every shot the reel built. Deliberately end-of-reel, not per-cut:
-  // teardown walks and disposes geometry, and two shots can legitimately share
-  // a cached buffer, so freeing shot 0 at its cut could gut shot 5. Holding ten
-  // scenes for 36 seconds is the trade that buys a movie with no freezes.
+  // Free every shot the reel built.
+  //
+  // STILL END-OF-REEL, NOT PER-CUT, and the reason has not changed: teardown
+  // walks and disposes geometry, and two shots can legitimately share a cached
+  // buffer, so freeing shot 0 at its cut could gut shot 5. Worse than that, a
+  // fighter's materials belong to its CHARACTER FILE and may be shared with a
+  // copy in a shot that has not been built yet, so no amount of scanning the
+  // records that currently exist can prove a per-cut free is safe. That is why
+  // peak memory during the reel is what it is; the honest mitigations are the
+  // ones already here — shadow maps handed back at every cut, and (v3.8) the
+  // later shots not being built until the reel is under way, so the peak
+  // arrives near the end instead of before the first frame.
+  //
+  // WHAT DID CHANGE (v3.8): this used to run all eleven teardowns inside the
+  // frame that swaps to the title screen — the same frame that builds the title
+  // set. Nothing draws these scenes again, so the frees go to a background
+  // chain instead and the handoff frame pays for none of them.
   _releaseAll() {
-    for (const rec of this._played) disposeShotRecord(rec)
+    const recs = this._played.filter((r) => r && !r.disposed)
     this._played = []
     this._rec = null
     this.scene = null
-    if (this._pre) {
-      try { this._pre.dispose({ unclaimedOnly: false }) } catch (e) { /* fine */ }
-      if (getIntroPrewarm() === this._pre) disposeIntroPrewarm()
-    }
+    const pre = this._pre
     this._pre = null
+    if (pre) {
+      const wasSingleton = getIntroPrewarm() === pre
+      try {
+        for (const rec of pre.detach()) if (recs.indexOf(rec) < 0) recs.push(rec)
+      } catch (e) { console.warn('[intro] prewarm detach failed', e) }
+      // The queue is empty now, so this is a bookkeeping call: it clears the
+      // module singleton so a REPLAY builds a fresh reel rather than adopting a
+      // dead one.
+      if (wasSingleton) disposeIntroPrewarm()
+    }
+    disposeShotRecordsDeferred(recs)
   }
 
   // -- the cut ---------------------------------------------------------------
@@ -2678,24 +2987,84 @@ export class IntroScreen {
   // ---------------------------------------------------------------------------
   // BUILDING AHEAD, in the gaps.
   //
-  // Only does anything when the loading screen did NOT finish the prewarm — a
-  // menu replay, a boot where the player hammered a key through the loader. The
-  // budget is deliberately small: the reel's own frame costs ~8 ms, so a few
-  // milliseconds of build on top drops the frame rate a little instead of
-  // stopping the movie dead. It widens as a cut approaches, because a shot that
-  // is not ready AT the cut is the one thing that still costs a visible freeze.
+  // WHAT THIS GOT WRONG BEFORE, and it is worth being exact because the symptom
+  // did not look like a scheduling bug. After the prewarm landed, the reel's
+  // shot boundaries were clean but its OPENING was not: shot 0 ran at 19 fps
+  // (94 frames in 4.92 s), shot 1 at 20 fps, shot 2 recovered to 61 fps, and
+  // shot 3 onward held a locked 120 fps. 180 of the reel's 188 over-33 ms frames
+  // were in those first three shots. A sustained slow patch, not spikes — so it
+  // was not "a shader compiled at the cut", it was something taking a fixed
+  // slice of EVERY early frame and then stopping.
+  //
+  // It was the texture queue, and not this file's pumping of it. textures.js
+  // drains itself off a rAF heartbeat whose budget scales with queue depth:
+  //
+  //     depth = min(3, floor(pending / 4));  budget = 5 * (1 + depth)
+  //
+  // The loading screen was handing the reel a queue tens of surfaces deep, so
+  // depth pinned at 3 and every single frame of shots 0-1 spent 20 ms
+  // generating surfaces on top of 8.3 ms of rendering — 52 ms frames, 19 fps,
+  // exactly what was measured. Shot 2's 61 fps is the queue crossing back under
+  // twelve and then eight; shot 3's 120 fps is it hitting empty. The ramp is the
+  // fingerprint.
+  //
+  // SO THE RULE HERE IS: KEEP THE QUEUE SHALLOW, and never make it deeper while
+  // it is already deep. Building a shot enqueues its surfaces; if we build the
+  // next shot the instant the last one finished we walk the depth right back up
+  // and buy the 20 ms tick again. Surfaces first, builds second, and the two
+  // never overlap.
   //
   // Called from render(), AFTER the draw: the frame the player is looking at
-  // goes out first, and only the time left over gets spent on the next shot.
+  // goes out first, and only the time left over gets spent on what comes next.
   _buildAhead() {
+    if (this.done) return
+
+    // 1. SURFACES. While the queue is deep enough for textures.js to widen its
+    //    own budget, drain and do nothing else. Our pump also resets that
+    //    module's heartbeat clock, so its next self-tick sees a short gap and
+    //    stays on the small per-frame budget instead of deciding that nobody is
+    //    presenting frames and taking 60 ms.
+    if (surfacesPending() >= SURFACE_QUEUE_QUIET) {
+      drainSurfaces(SURFACE_PUMP_MS)
+      return
+    }
+
+    // 2. BUILD AHEAD, TO A LEAD AND NO FURTHER.
+    //
+    //    The old rule was "always be building". Given a queue with eight shots
+    //    left in it that means building all eight as fast as the budget allows,
+    //    which front-loads every one of them onto the opening again — a smaller
+    //    version of the bug above. The reel is 36 s long and has ten cuts; it
+    //    only ever needs ONE more shot than it is showing. So the target is a
+    //    fixed lead, and when the lead is met this function gives the frame
+    //    back. One shot built per shot played, evenly, and the last shots of the
+    //    reel come out genuinely idle — which is what pays for §THE HANDOFF.
+    //
+    //    The budget widens as a cut approaches only when the shot on the other
+    //    side of that cut is missing: that is the one case where a hitch now
+    //    prevents a freeze in a moment.
     const pre = this._pre
-    if (!pre || pre.done || this.done) return
-    const shot = SHOTS[this.idx]
-    const left = shot ? Math.max(0, shot.dur - this.t) : 0
-    const nextReady = pre.has(this.idx + 1)
-    let ms = 4
-    if (!nextReady) ms = left < 0.5 ? 14 : left < 1.2 ? 9 : 6
-    pre.run(ms)
+    if (pre && !pre.done) {
+      const need = Math.min(SHOTS.length, this.idx + 1 + AHEAD_LEAD_SHOTS)
+      if (pre.shotsPending(need) <= 0) return   // lead met — the frame is the reel's
+      const shot = SHOTS[this.idx]
+      const left = shot ? Math.max(0, shot.dur - this.t) : 0
+      if (pre.has(this.idx + 1)) {
+        if (this.t < CUT_QUIET_S) return
+        pre.runShots(need, AHEAD_IDLE_MS)
+      } else {
+        pre.runShots(need, left < 0.5 ? AHEAD_NEAR_MS : left < 1.2 ? AHEAD_MID_MS : AHEAD_FAR_MS)
+      }
+      return
+    }
+
+    // 3. THE HANDOFF. Every exit from this screen goes to the title, and the
+    //    title's set is a ~1.5 s build. See §THE HANDOFF. Only once the reel
+    //    itself is fully banked, and never inside a cut's quiet window: the
+    //    construction is one indivisible block and it should land in the middle
+    //    of a shot, not on top of one.
+    if (this.t < CUT_QUIET_S) return
+    warmTitleHandoff(this.game, TITLE_WARM_MS)
   }
 
   render(renderer, dt = 1 / 60) {

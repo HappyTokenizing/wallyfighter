@@ -23,7 +23,7 @@ import { GoreSystem } from './Gore.js'
 // v2.0 parallel-build module (§21 KO executions) — stub-guarded at every use.
 import { ExecutionPool } from './Executions.js'
 // v3.0 render layer (GRAPHICS_CONTRACT §8): the single render entry point.
-import { renderScene } from '../render/index.js'
+import { renderScene, pumpTextureQueue } from '../render/index.js'
 // v3.1: the teardown sweep uses ArenaBase's node freer rather than a second,
 // weaker hand-rolled copy. `collectSubtree` snapshots a subtree BEFORE the
 // systems that own it start detaching parts of themselves; `disposeNode` frees
@@ -131,6 +131,45 @@ const FIXED_STEP = 1 / 60
 // States a fighter may use a held item from (§14): grounded-ish neutral only —
 // never mid-attack, stunned, grabbed, ragdolled or during a finisher.
 const ITEM_OK_STATES = new Set(['idle', 'walk', 'dash', 'backdash', 'crouch', 'jump'])
+
+// ---------------------------------------------------------------------------
+// PER-FIXED-STEP SCRATCH — nothing below is state, it is all "do not allocate
+// this 60 times a second".
+//
+// A fighting game's smoothness complaint is almost never the mean frame; it is
+// the GC sawtooth on top of it. These four were the per-step allocations in the
+// core loop: a Set built from a seven-string array in _pushApart, a copy of the
+// timer list plus a closure in _worldStep, a copy of the fx list plus another
+// closure right after it, and a closure per gore update.
+// ---------------------------------------------------------------------------
+const PUSHABLE_STATES = new Set(['idle', 'walk', 'dash', 'backdash', 'crouch', 'block', 'attack'])
+
+// ---------------------------------------------------------------------------
+// SURFACE GENERATION DURING THE ROUND BANNER.
+//
+// textures.js hands a caller a placeholder texture and generates the real
+// fields on a rAF-scheduled queue (surfaceMaps -> _jobQueue -> drainQueue). Its
+// self-scheduler is deliberately polite: TICK_BUDGET_MS is 5 ms per presented
+// frame, scaled up to 4x on a deep queue. A freshly built arena leaves that
+// queue DEEP, and a single band step inside textures.js is indivisible — so
+// left alone the tail of an arena's surfaces generates during the opening
+// seconds of the fight, in steps that overshoot a 5 ms budget.
+//
+// The "ROUND 1 / READY? / FIGHT!" banner is ~3.6 s of wall time in which
+// nothing is being fought and a long frame costs the player nothing. The
+// measured total surface throughput is ~2.4 s and flat in the budget, so the
+// banner is very nearly exactly the right size of hole to put it in. 16 ms is
+// a whole 60 Hz frame per intro frame — generous on purpose.
+// ---------------------------------------------------------------------------
+const INTRO_TEXTURE_BUDGET_MS = 16
+// Reused buffers for the two compact-in-place list sweeps. Never nested, never
+// retained across a step.
+const _dueTimers = []
+const _settleV = new THREE.Vector3()
+// ParticleSystem.swing() -> SwingRibbon.push() reads these three fields
+// synchronously and keeps no reference (Particles.js:682-691), so one shared
+// options object is safe and saves an allocation per fighter per attack frame.
+const _swingOpts = { width: 0.19, gain: 0.58, color: 0xffe9c0, restart: false }
 // §17: hit detection is distance + attacker-facing cone (~70° total) + height
 const COS_HALF_CONE = Math.cos((70 * Math.PI / 180) / 2)
 // §17: arena z bounds default when the arena doesn't specify them
@@ -231,6 +270,10 @@ export class MatchScreen {
     this._contactsDone = false
     this._rigWarned = false
     this._shadowRadius = 0
+    // Round-intro surface drain (see _pumpSurfaces). Per-match, because the
+    // next arena refills the queue.
+    this._surfacesDone = false
+    this._surfacePumps = 0
 
     // --- scene & camera ---
     this.scene = new THREE.Scene()
@@ -526,7 +569,90 @@ export class MatchScreen {
     // #6: brand new scene, brand new arena, brand new camera. Whatever the
     // pipeline is holding from the last screen is a ghost of a different venue.
     this._cut()
+    // LAST THING BEFORE THE FIRST FRAME. Everything the match owns is in the
+    // scene graph by this line — arena, fighters, particle pool, props, items,
+    // gore — so this is the only moment where one walk can warm all of it. See
+    // _warmArena().
+    this._warmArena('enter')
     this.startRound(1)
+  }
+
+  // ---------------------------------------------------------------------------
+  // _warmArena() — PAY FOR THE ARENA IN THE TRANSITION, NOT IN THE FIGHT.
+  //
+  // Measured before this existed: p95 frame spikes of 109 ms in frozen-token-lab
+  // and 58 ms on ultra, against a 3.99-7.61 ms steady state. They are first-use
+  // shader compiles and texture uploads — the same defect the intro cinematic
+  // fixed at its shot boundaries, in the match path.
+  //
+  // Two reasons the work has to happen HERE rather than "on the first frame,
+  // which is nearly the same moment":
+  //
+  //   1. A RENDERED FRAME ONLY WARMS WHAT IT DRAWS. three's compile() walks
+  //      `scene.traverse`, not `traverseVisible`, so it reaches the pooled
+  //      particle quads, the parked prop instances, the gore decal pool and the
+  //      items that have not spawned yet. Those are precisely the objects whose
+  //      first appearance is a mid-fight spike, because that is the frame their
+  //      program links and their maps upload.
+  //   2. THE PROGRAM KEY DEPENDS ON THE BOUND RENDER TARGET. Pipeline.warm()
+  //      binds the composer's own target and the tone mapping the frame will
+  //      use before compiling; a bare renderer.compile() here would build the
+  //      wrong variant of every material and warm nothing. See the long note on
+  //      Pipeline.warm().
+  //
+  // Fully guarded and entirely optional: no pipeline (node harness, low tier
+  // construction failure) falls back to a plain compile, and a throw costs a
+  // console line and nothing else.
+  // ---------------------------------------------------------------------------
+  /**
+   * Drain textures.js' generation queue on the round-intro frames. Latches
+   * itself off the moment the queue is empty (or unavailable), so the fight
+   * never pays a call. One throw disables it for the match — a surface that
+   * generates late is a soft picture, not a broken one.
+   */
+  _pumpSurfaces() {
+    try {
+      const left = pumpTextureQueue(INTRO_TEXTURE_BUDGET_MS)
+      if (!left) {
+        this._surfacesDone = true
+        if (this._surfacePumps) {
+          console.debug(`[combat] surface queue drained during the round intro (${this._surfacePumps} frames)`)
+          // Those fields were placeholders when enter() warmed them; textures.js
+          // has just flipped needsUpdate on every one. Re-upload them now, in
+          // the banner, instead of on the frame each surface first appears.
+          this._warmArena('surfaces-ready')
+        }
+      } else {
+        this._surfacePumps = (this._surfacePumps || 0) + 1
+      }
+    } catch (e) {
+      this._surfacesDone = true
+      console.warn('[combat] surface pump failed — textures.js will drain on its own schedule', e)
+    }
+  }
+
+  _warmArena(label = '') {
+    const game = this.game
+    const renderer = game?.renderer
+    if (!renderer || !this.scene || !this.camera) return null
+    let out = null
+    try {
+      const pipeline = game.pipeline
+      if (pipeline && typeof pipeline.warm === 'function') {
+        out = pipeline.warm(this.scene, this.camera)
+      } else if (typeof renderer.compile === 'function') {
+        renderer.compile(this.scene, this.camera)
+      }
+    } catch (e) {
+      console.warn('[combat] arena warm failed — the first frames will compile as they go', e)
+      return null
+    }
+    if (out && out.ms > 0) {
+      console.debug(`[combat] arena warm (${label || 'match'}): ${out.ms} ms, ` +
+        `${out.materials} materials, ${out.textures} textures uploaded, ` +
+        `${out.programs} programs resident, target ${out.target}`)
+    }
+    return out
   }
 
   exit() {
@@ -643,7 +769,11 @@ export class MatchScreen {
   // runs on the RENDER cadence, not the fixed clock, so it is frame-rate
   // independent and cannot change a single gameplay outcome.
   _updatePresentation(dt) {
-    const [a, b] = this.fighters || []
+    // Indexed, not destructured: this runs on the render cadence and array
+    // destructuring goes through the iterator protocol, which allocates.
+    const fs = this.fighters
+    const a = fs ? fs[0] : undefined
+    const b = fs ? fs[1] : undefined
     const mid = this._focusMid || (this._focusMid = new THREE.Vector3())
     if (a && b) mid.copy(a.pos).add(b.pos).multiplyScalar(0.5)
     else if (a) mid.copy(a.pos)
@@ -816,6 +946,9 @@ export class MatchScreen {
     }
     if (this.paused) return
     if (!Number.isFinite(dt) || dt <= 0) dt = FIXED_STEP
+    // Spend the round banner on the surface queue rather than the first
+    // seconds of the fight. See INTRO_TEXTURE_BUDGET_MS.
+    if (this.phase === 'intro' && !this._surfacesDone) this._pumpSurfaces()
     try { this.cam.update(dt) } catch { /* stub */ }
     // Post + lighting follow the camera, so they run right after it and before
     // the fixed-step sim below (which must stay untouched by any of this).
@@ -856,13 +989,25 @@ export class MatchScreen {
   _worldStep(dt) {
     this.worldFrame++
 
-    // scheduled callbacks
+    // Scheduled callbacks. Compacted IN PLACE into the existing array — the
+    // previous shape allocated a `due` array, a closure and a whole replacement
+    // timer list on every step that had a timer pending (which is every step of
+    // every round intro and every KO). A callback may schedule new timers, so
+    // the compaction finishes before any of them run.
     if (this.timers.length) {
-      const due = []
-      this.timers = this.timers.filter((t) => { t.n--; if (t.n <= 0) { due.push(t); return false } return true })
-      for (const t of due) {
-        try { t.cb() } catch (e) { console.error('[combat] timer cb threw', e) }
+      const list = this.timers
+      let w = 0
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i]
+        t.n--
+        if (t.n <= 0) _dueTimers.push(t)
+        else list[w++] = t
       }
+      list.length = w
+      for (let i = 0; i < _dueTimers.length; i++) {
+        try { _dueTimers[i].cb() } catch (e) { console.error('[combat] timer cb threw', e) }
+      }
+      _dueTimers.length = 0
     }
 
     // §20: tutorial director runs on the fixed clock; first throw disables it
@@ -894,10 +1039,21 @@ export class MatchScreen {
       if (this.items) this._updateItems(dt)
     }
 
-    // scripted specials / finishers
+    // Scripted specials / finishers. Snapshot the length instead of copying the
+    // array: a step() that appends a new fx must not run this frame (the old
+    // `[...this.fxList]` copy had the same property), and a step() that throws
+    // must not take the round down.
     if (this.fxList.length) {
-      for (const fx of [...this.fxList]) fx.step()
-      this.fxList = this.fxList.filter((fx) => !fx.done)
+      const fx = this.fxList
+      const n = fx.length
+      for (let i = 0; i < n && i < fx.length; i++) {
+        const item = fx[i]
+        if (!item) continue
+        try { item.step() } catch (e) { console.error('[combat] fx step threw', e); item.done = true }
+      }
+      let w = 0
+      for (let i = 0; i < fx.length; i++) if (fx[i] && !fx[i].done) fx[w++] = fx[i]
+      fx.length = w
     }
 
     // ragdoll recovery
@@ -916,7 +1072,17 @@ export class MatchScreen {
     try { this.arena.update?.(dt) } catch (e) { console.error('[combat] arena.update threw', e) }
     this.props.update()
     this.particles.update(dt)
-    this._goreSafe((g) => g.update(dt)) // decal fade / dripping, every phase
+    // Decal fade / dripping, every phase. Inlined rather than routed through
+    // _goreSafe() so the hottest gore call in the build does not allocate a
+    // closure 60 times a second; the disable-on-throw contract is identical.
+    if (this.gore) {
+      try { this.gore.update(dt) } catch (e) {
+        console.error('[combat] gore system threw — gore disabled for this match', e)
+        const g = this.gore
+        this.gore = null
+        try { g.dispose?.() } catch { /* already broken */ }
+      }
+    }
     // record this fixed frame for the instant replay (fight/finisher/ko only)
     try { this.replay?.captureFrame(this.phase) } catch { /* recorder is optional */ }
 
@@ -1021,6 +1187,12 @@ export class MatchScreen {
       this.cap(final && n > 1 ? 'FINAL ROUND' : `ROUND ${n}`)
     })
     this.at(t0 + 70, () => this.cap('READY?'))
+    // The ROUND banner is ~3.6 s of dead time on round 1. Spend a slice of it
+    // re-walking the graph: the tutorial module, the first item spawn and the
+    // entrance clips all land AFTER enter()'s warm, and anything already warm
+    // costs a cache hit to revisit. Round 2+ reuses the same graph, so once is
+    // enough there.
+    if (n === 1) this.at(t0 + 30, () => this._warmArena('round-intro'))
     this.at(t0 + 115, () => this._beginFight())
   }
 
@@ -1510,12 +1682,14 @@ export class MatchScreen {
       // only because the limb is longer, so the width scales off the move kind
       // rather than the bone.
       const heavy = m.kind === 'heavy' || m.kind === 'launcher' || m.kind === 'special' || m.kind === 'super'
-      P.swing(f.slot, tip.x, tip.y, tip.z, {
-        width: heavy ? 0.30 : 0.19,
-        gain: heavy ? 0.85 : 0.58,
-        color: m.kind === 'super' ? 0xfff0c4 : 0xffe9c0,
-        restart,
-      })
+      // Rewritten in place — this fires on every step of every attack, and the
+      // pool reads the options synchronously and keeps nothing.
+      const o = _swingOpts
+      o.width = heavy ? 0.30 : 0.19
+      o.gain = heavy ? 0.85 : 0.58
+      o.color = m.kind === 'super' ? 0xfff0c4 : 0xffe9c0
+      o.restart = restart
+      P.swing(f.slot, tip.x, tip.y, tip.z, o)
     }
   }
 
@@ -1980,7 +2154,7 @@ export class MatchScreen {
     let tx = f.pos.x
     let tz = f.pos.z
     try {
-      const v = new THREE.Vector3()
+      const v = _settleV
       f.bones.hips.getWorldPosition(v)
       if (Number.isFinite(v.x)) tx = Math.max(this.bounds.minX + 0.4, Math.min(this.bounds.maxX - 0.4, v.x))
       if (Number.isFinite(v.z)) {
@@ -2347,9 +2521,11 @@ export class MatchScreen {
   // ------------------------------------------------------------------ misc
 
   _pushApart() {
-    const [a, b] = this.fighters
-    const pushable = new Set(['idle', 'walk', 'dash', 'backdash', 'crouch', 'block', 'attack'])
-    if (!pushable.has(a.state) || !pushable.has(b.state)) return
+    const a = this.fighters[0]
+    const b = this.fighters[1]
+    // PUSHABLE_STATES is module-scoped: this ran 60 times a second and built a
+    // seven-string array and a Set every single call.
+    if (!PUSHABLE_STATES.has(a.state) || !PUSHABLE_STATES.has(b.state)) return
     if (!a.grounded() || !b.grounded()) return
     const minDist = 0.85
     const dx = b.pos.x - a.pos.x
@@ -2366,10 +2542,11 @@ export class MatchScreen {
     const pad = 0.35
     const bd = this.bounds
     const minZ = (bd.minZ ?? DEFAULT_MIN_Z) + pad, maxZ = (bd.maxZ ?? DEFAULT_MAX_Z) - pad
-    for (const f of [a, b]) {
-      f.pos.x = Math.max(bd.minX + pad, Math.min(bd.maxX - pad, f.pos.x))
-      f.pos.z = Math.max(minZ, Math.min(maxZ, f.pos.z))
-    }
+    const loX = bd.minX + pad, hiX = bd.maxX - pad
+    a.pos.x = Math.max(loX, Math.min(hiX, a.pos.x))
+    a.pos.z = Math.max(minZ, Math.min(maxZ, a.pos.z))
+    b.pos.x = Math.max(loX, Math.min(hiX, b.pos.x))
+    b.pos.z = Math.max(minZ, Math.min(maxZ, b.pos.z))
   }
 
   // PS2-era super announcement: freeze the sim like hit-stop, punch the camera

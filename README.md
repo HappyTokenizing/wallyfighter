@@ -62,8 +62,9 @@ repository alone. It looks like 2002. It is engineered like it shipped yesterday
   CFO of Violence, ending in a boss transformation, a FINAL CHOICE and
   **two endings** (plus scrolling credits). **Chapter 1 doubles as a guided
   tutorial** (v2.0): objective cards walk you through movement, blocking,
-  combos, items, meter and your first finisher — skippable anytime, and the
-  key glyphs match your device (keyboard or touch). Progress is saved.
+  combos, items, meter and your first KO execution — skippable anytime, and
+  the key glyphs match your device (keyboard or touch), drawn as big arcade
+  keycaps in a wide, unambiguous face. Progress is saved.
 - **Mobile support** (v2.0, simplified in v2.1) — touch devices get an
   auto-shown virtual overlay with a stick and just **four buttons** (ATTACK,
   HEAVY, SPECIAL with a long-press SUPER, contextual GRAB/ITEM) plus a
@@ -175,6 +176,7 @@ npx vercel --prod
 | Crouch       | C          | —       | Flick the stick straight down (a crouch tap) |
 | Use item     | E          | Select/Back | GRAB/ITEM (shows the item's icon) |
 | Pause        | Esc        | Start   | ⏸ chip |
+| Finisher     | *none* — automatic since v2.1 | *none* | *none* |
 
 **Free-roam movement:** WASD (or the stick) moves your fighter anywhere on
 the arena floor, **relative to the camera** — W is deeper into the arena,
@@ -216,7 +218,7 @@ per-mode keys, touch details and the complete combo grammar live in
 
 | Mode | What it is |
 |------|-----------|
-| **Story Mode** | 10 chapters as Wally, one per arena in narrative order. **Chapter 1 opens as a guided tutorial** — sequential objectives for movement, jumping, blocking, combos, heavy/kick/grab, specials, super (meter granted), items and your first KO (setup granted — the execution plays itself), with your device's actual keys shown, a docile opponent until the final live fight, and a skip available the whole time. Completing it counts as the chapter 1 win. v2.1 difficulty climbs through opponent **bulk**: the CPU level curve stays gentle (capped at 4) while late-chapter HP multipliers grow toward ~1.9×. Chapter 10 is the UNCHAINED boss fight, then the FINAL CHOICE (Seize or Stabilize) and its ending. Progress persists. |
+| **Story Mode** | 10 chapters as Wally, one per arena in narrative order. **Chapter 1 opens as a guided tutorial** — sequential objectives for movement, jumping, blocking, combos, heavy/kick/grab, specials, super (meter granted), items and your first KO (the opponent is dropped to 10% HP, you land the last hit, and the execution cutscene plays itself — there is no finisher input to press), with your device's actual keys shown as large arcade keycaps, a docile opponent until the final live fight, and a skip available the whole time. Completing it counts as the chapter 1 win. v2.1 difficulty climbs through opponent **bulk**: the CPU level curve stays gentle (capped at 4) while late-chapter HP multipliers grow toward ~1.9×. Chapter 10 is the UNCHAINED boss fight, then the FINAL CHOICE (Seize or Stabilize) and its ending. Progress persists. |
 | **Arcade Ladder** | Any fighter, 7 randomized opponents across shuffled arenas, AI escalating rung by rung. Lose and the continue screen judges you. |
 | **Versus CPU** | Pick your fighter, then choose your CPU opponent, then set its difficulty (1–5, default 3 — from PAPER HANDS to MARKET MAKER). Costume swap on Heavy, random arena, best of 3. |
 | **Training** | Pick yourself and a dummy, then abuse the toggles: F1 infinite HP, F2 full meter, F4 hitboxes, F5 input history, F6 frame data, F7 movelist, R reset. |

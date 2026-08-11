@@ -44,6 +44,10 @@ walled on all four sides.
 | Use item      | E          |
 | Pause         | Esc        |
 
+**There is no finisher key.** KO executions have been automatic since v2.1 —
+no `F`, no Special + Heavy chord, no prompt. Land the blow that ends the round
+and the cutscene plays itself (see *Combo grammar* below).
+
 ## Fight controls — gamepad (standard mapping)
 
 | Action        | Button |
@@ -145,9 +149,13 @@ Gamepad: the left stick / D-pad moves the cursor, **X/Square** confirms,
 
 Chapter 1 of Story Mode opens as a guided tutorial: sequential objective
 cards (move, jump, block, a light combo, heavy, kick, grab, special, super
-with granted meter, item pickup + use, and a finishing KO with a granted
-setup — the execution plays itself, v2.1) with the key glyphs matching your
-device — keyboard keys or touch buttons. The jump step is skipped when the
+with granted meter, item pickup + use, and a finishing KO — Dogey is dropped
+to 10% HP and you land the last hit; the execution cutscene then plays itself,
+so the card asks for the KO and **not** for any finisher input, v2.1) with the
+key glyphs matching your device — keyboard keys or touch buttons. Those glyphs
+are drawn as arcade keycaps in a wide, unambiguous face (never the condensed
+display font), so `I`, `U`, `O` and `E` are impossible to confuse.
+The jump step is skipped when the
 Jumping setting is OFF. The opponent stays docile until the final live
 fight. Skip it anytime; finishing it counts as the chapter 1 victory and
 the campaign rolls on.

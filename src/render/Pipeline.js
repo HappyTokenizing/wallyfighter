@@ -12,8 +12,16 @@
 // Passes in [brackets] are built but gated OFF during gameplay: BokehPass costs
 // a whole extra scene traversal for a blur nobody sees at gameplay aperture
 // (setCinematic() turns it on), and AfterimagePass is a persistence smear that
-// ghosts fighters. The HDR probe is a 64x36 max-reduction — effectively free —
-// that answers "is the scene actually HDR before the shoulder?" via probeHDR().
+// ghosts fighters.
+//
+// THE TWO PROBE PASSES ARE ALSO OFF BY DEFAULT. The HDR probe (64x36 max
+// reduction) and the frame probe (128x72 histogram) are instrumentation, and
+// they used to run on every frame of every screen — two render-target binds and
+// ~200k texture fetches a frame for numbers nothing was reading. They are armed
+// on demand by probeHDR()/probeFrame()/frameReport()/stats(), which still all
+// return live values on the first call, and retired again once nobody has asked
+// for PROBE_IDLE_S. setProbes(true) pins them on for a capture session. See
+// PROBES ARE OPT-IN above _armProbes().
 //
 // DYNAMIC RANGE OWNERSHIP — read this before touching the grade:
 //   ACES asymptotes. Linear 1.0 tonemaps to 0.886 display and it takes linear
@@ -106,6 +114,10 @@ import { Pass, FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js'
 // the thing that has to *consume* it. env.js imports nothing from here, so this
 // is a one-way edge. See setMood().
 import { moodGrade } from './env.js'
+// warm() needs every texture slot a WCS material can carry, and materials.js is
+// the file that owns that list. materials.js imports only textures.js, so this
+// is a leaf-ward edge — no cycle. (index.js re-exports both.)
+import { uploadTextures } from './materials.js'
 
 // ---------------------------------------------------------------------------
 // Tier matrix (GRAPHICS_CONTRACT §7). `low` is a hard pass-through: mobile has
@@ -178,6 +190,16 @@ const MAX_POST_PIXELS = 1920 * 1080 * 2.25   // ~4.67 Mpx (= 1080p at renderScal
 // vector by more than CUT_DOT, is a cut — not motion. Temporal history dies.
 const CUT_DISTANCE = 1.25
 const CUT_DOT = 0.965
+
+// The ultra accumulator's "has the camera moved?" tolerance. Matches the four
+// decimal places the previous string-key comparison rounded to.
+const CAM_STILL_EPS = 1e-4
+
+// How long the instrumentation probes stay armed after the last read before
+// they take themselves back out of the per-frame chain. Long enough that a
+// verifier looping stats() never re-arms, short enough that one debug read does
+// not cost the rest of the session two passes a frame.
+const PROBE_IDLE_S = 5
 
 const TIER_ORDER = ['low', 'medium', 'high', 'ultra']
 
@@ -1491,6 +1513,17 @@ class AOProbe {
 }
 
 // Halton(2,3) — the standard sub-pixel jitter sequence. Deterministic, no RNG.
+// Shallow equality over a resolved feature block. Every value in TIERS is a
+// number, a boolean or undefined, so `!==` is the whole comparison; the keys
+// are unioned so a preset that ADDS a key still counts as a change.
+function sameFeatures(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  for (const k in a) if (a[k] !== b[k]) return false
+  for (const k in b) if (a[k] !== b[k]) return false
+  return true
+}
+
 function halton(index, base) {
   let f = 1
   let r = 0
@@ -1875,6 +1908,9 @@ export class RenderPipeline {
     // turns the auto path off — pass { auto: true } to keep it.
     this._mood = null
     this._moodInfo = null
+    // _detectMood()'s per-frame memo (env texture name -> mood name).
+    this._moodNameSrc = null
+    this._moodNameOut = null
     // Non-null while a hand-set exposure outranks the mood's own. See the
     // ROUND 11 note on `set exposure`.
     this._exposureHold = null
@@ -1900,8 +1936,31 @@ export class RenderPipeline {
     // renderer resets info on every internal render(), so a naive read reports
     // the last fullscreen quad). See render(). This is what makes the ~900
     // draw-call budget in GRAPHICS_CONTRACT §0 verifiable at runtime.
-    this._frameInfo = { calls: 0, triangles: 0, lines: 0, points: 0, passes: 0 }
+    this._frameInfo = {
+      calls: 0, triangles: 0, lines: 0, points: 0, passes: 0,
+      geometries: 0, textures: 0, programs: 0,
+    }
     this._ownsInfoReset = false
+
+    // --- probe arming (see PROBES ARE OPT-IN) --------------------------------
+    // The two probe passes are instrumentation. They used to render a
+    // fullscreen quad each, every frame, on every tier that has a composer —
+    // two extra render-target binds and ~200k texture fetches per frame that
+    // nothing read. They are now built disabled and armed on demand by
+    // probeHDR()/probeFrame()/probeAO()'s callers, then disarmed again once
+    // nobody has asked for PROBE_IDLE_S seconds.
+    this._probeArmedAt = -Infinity
+    this._probing = false
+    // opts.probes === true pins them on for a capture/verification session.
+    this._probesPinned = opts.probes === true
+
+    // Scratch for _applyJitter's camera-view save/restore; used to be a
+    // `{ ...camera.view }` spread on every accumulated frame.
+    this._viewSave = { enabled: false, fullWidth: 0, fullHeight: 0, offsetX: 0, offsetY: 0, width: 0, height: 0 }
+    this._viewSaved = false
+    // Camera-stillness test for the ultra accumulator. Used to build a
+    // five-`toFixed()` template string per frame; now five numbers.
+    this._camKeyN = [NaN, NaN, NaN, NaN, NaN]
 
     // --- transient state ---------------------------------------------------
     this._time = 0
@@ -1911,7 +1970,6 @@ export class RenderPipeline {
     this._focusTarget2 = null
     this._jitterIndex = 0
     this._lastToneMapping = null
-    this._camKey = ''
 
     // Temporal-history cut detection. `_resetPending` makes resetHistory()
     // idempotent: N calls between two frames cost one GL clear.
@@ -1932,7 +1990,6 @@ export class RenderPipeline {
 
     this._scratch = new THREE.Vector3()
     this._scratch2 = new THREE.Vector3()
-    this._prevView = null
 
     // RenderPass/GTAO/Bokeh all capture a scene+camera at construction, but the
     // pipeline outlives every screen. Build against placeholders and re-point
@@ -2138,7 +2195,8 @@ export class RenderPipeline {
     // Measures the linear radiance the tonemap is about to eat. Sits here so it
     // sees RenderPass + AO + bloom, i.e. exactly the grade's input.
     P.probe = this._try('HDRProbePass', () => new HDRProbePass())
-    if (P.probe) composer.addPass(P.probe)
+    // OFF UNTIL SOMEBODY ASKS. See PROBES ARE OPT-IN above _armProbes().
+    if (P.probe) { P.probe.enabled = !!this._probesPinned; composer.addPass(P.probe) }
 
     P.grade = this._try('grade ShaderPass', () => new ShaderPass(GradeShader))
     if (!P.grade) return this._degrade('grade pass')
@@ -2149,7 +2207,11 @@ export class RenderPipeline {
     // the grade so it sees the black-floor toe; before SMAA because edge
     // blending cannot create a new extreme. ~150k texture fetches, no swap.
     P.frame = this._try('FrameProbePass', () => new FrameProbePass())
-    if (P.frame) composer.addPass(P.frame)
+    // OFF UNTIL SOMEBODY ASKS. See PROBES ARE OPT-IN above _armProbes().
+    if (P.frame) { P.frame.enabled = !!this._probesPinned; composer.addPass(P.frame) }
+    // A rebuild starts from cold probes; anyone mid-measurement re-arms on
+    // their next read.
+    this._probeArmedAt = -Infinity
 
     if (f.aa) {
       P.smaa = this._try('SMAAPass', () => new SMAAPass(ew, eh))
@@ -2426,14 +2488,148 @@ export class RenderPipeline {
     return ew * eh
   }
 
+  // -------------------------------------------------------------------------
+  // warm(scene, camera, opts) -> { ms, materials, programs, textures, target }
+  //
+  // COMPILE AND UPLOAD BEFORE THE FRAME THAT NEEDS IT, NOT DURING IT.
+  //
+  // Measured on the match path: p95 frame spikes of 109 ms (frozen-token-lab)
+  // and 58 ms (ultra) against a 4-8 ms steady state, all of them first-frame
+  // shader compiles and texture uploads on arena entry. This is the same defect
+  // the intro cinematic just fixed at shot boundaries, in gameplay.
+  //
+  // THE PART THAT IS EASY TO GET WRONG, AND WHICH MAKES A NAIVE
+  // `renderer.compile(scene, camera)` COMPLETELY USELESS HERE. A material's
+  // program key includes `toneMapping` and `outputColorSpace`, and three
+  // derives BOTH from the currently bound render target, not from the renderer
+  // (three.module.js:20584 and :20617 — `currentRenderTarget === null ?
+  // renderer.toneMapping : NoToneMapping`, and the same shape for the colour
+  // space). With a composer in the chain the frame is drawn into a linear
+  // half-float target, so compiling against the canvas produces the sRGB+ACES
+  // variant of every material — a whole second program set that the real frame
+  // then throws away and recompiles. So: bind the target the frame will
+  // actually use, set the tone mapping the frame will actually use, compile,
+  // and put both back.
+  //
+  // It also walks with `scene.traverse`, not `traverseVisible` (three does this
+  // for materials, and materialTextures() matches it deliberately), which is
+  // the other half of the win: the pooled particle quad, the hidden gore decal
+  // and the item that has not spawned yet are exactly the things a rendered
+  // frame never warms and a mid-fight spike is made of.
+  //
+  //   opts.textures   false to skip the GPU uploads (default on)
+  //   opts.budgetMs   time-box for the texture uploads only; compile is atomic
+  //   opts.async      true -> also returns `promise`, resolving when the driver
+  //                   reports the programs LINKED (compileAsync). The
+  //                   synchronous half has already happened either way.
+  // -------------------------------------------------------------------------
+  warm(scene, camera, opts = {}) {
+    const out = { ms: 0, materials: 0, programs: 0, textures: 0, target: 'none', promise: null }
+    const r = this.renderer
+    if (!scene || !camera || !r || typeof r.compile !== 'function') return out
+    const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+
+    const composed = !!(this.enabled && this._composer)
+    const rt = composed ? (this._composer.renderTarget1 || null) : null
+    const prevRT = r.getRenderTarget ? r.getRenderTarget() : null
+    const prevTone = r.toneMapping
+    const wantTone = composed ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping
+
+    try {
+      r.toneMapping = wantTone
+      if (r.setRenderTarget) r.setRenderTarget(rt)
+      out.target = rt ? 'composer' : 'canvas'
+
+      let mats = null
+      if (opts.async === true && typeof r.compileAsync === 'function') {
+        // compileAsync() runs the same synchronous compile() first and then
+        // polls for link completion, which is the genuinely off-thread half
+        // when KHR_parallel_shader_compile is present.
+        out.promise = r.compileAsync(scene, camera)
+        mats = null
+      } else {
+        mats = r.compile(scene, camera)
+      }
+      out.materials = mats && mats.size ? mats.size : 0
+
+      if (opts.textures !== false) {
+        const up = uploadTextures(r, scene, { budgetMs: opts.budgetMs })
+        out.textures = up.uploaded > 0 ? up.uploaded : 0
+      }
+    } catch (e) {
+      console.warn('[pipeline] warm() failed — the frame will compile as it goes', e)
+    } finally {
+      try { if (r.setRenderTarget) r.setRenderTarget(prevRT) } catch (e) { void e }
+      r.toneMapping = prevTone
+      // _setToneMapping() memoises the last value it wrote; the restore above
+      // went behind its back, so re-sync or the next frame skips its own write.
+      this._lastToneMapping = prevTone
+    }
+
+    const info = r.info
+    out.programs = info && info.programs ? info.programs.length : 0
+    const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+    out.ms = +(t1 - t0).toFixed(2)
+    return out
+  }
+
+  /**
+   * Warm whatever screen is currently being drawn. Used after a rebuild — see
+   * setQuality() — where every material's program key just changed underneath
+   * a scene the pipeline already has a handle on.
+   */
+  warmCurrent(opts = {}) {
+    if (!this._lastScene || !this._lastCam) return null
+    return this.warm(this._lastScene, this._lastCam, opts)
+  }
+
+  // -------------------------------------------------------------------------
+  // setQuality() — TWO THINGS THAT WERE COSTING A ONE-SECOND HITCH.
+  //
+  // 1. IT REBUILT UNCONDITIONALLY. Settings writes fire setQuality() for knobs
+  //    that resolve to an identical feature set; each one tore down and rebuilt
+  //    the whole composer (fresh HDR target, fresh bloom mip chain, fresh GTAO
+  //    G-buffer) and threw away every post program. Same features in, same
+  //    chain out: nothing to do.
+  //
+  // 2. A REAL TIER CHANGE MOVES EVERY MATERIAL TO A DIFFERENT PROGRAM KEY, and
+  //    paid for it by trickling recompiles across the next ~60 frames (measured
+  //    16.01 ms/frame for a second before settling to 2.05). Between `low` and
+  //    anything else the frame stops being drawn into a linear half-float
+  //    target and starts going straight to an sRGB canvas with ACES on, which
+  //    changes `toneMapping` AND `outputColorSpace` in the program key for
+  //    every material in the scene at once. warmCurrent() pays that in one
+  //    place, up front, at a moment the player is in a settings menu.
+  // -------------------------------------------------------------------------
   setQuality(quality) {
-    this._quality = quality || null
     const tier = tierNameOf(quality, this.opts.tier || 'high')
+    const nextFeatures = this._resolveFeatures(tier, quality)
+    // "Nothing structural changed" has to include the chain actually matching
+    // the features — a pipeline that _degrade()d is not in the state its
+    // feature block claims.
+    const unchanged = tier === this.tier &&
+      (!!this._composer === !!nextFeatures.composer) &&
+      sameFeatures(this._features, nextFeatures)
+    this._quality = quality || null
     this.tier = tier
-    this._features = this._resolveFeatures(tier, quality)
+    this._features = nextFeatures
     // Grain is tier-scaled unless the caller pinned it at construction.
     if (this.opts.grain === undefined) this._grain = this._features.grain ?? this._grain
-    this._build()
+    if (unchanged) {
+      // Live knobs that do not need a new chain still have to land.
+      this._applyAO()
+      this._applyUniforms()
+    } else {
+      this._build()
+    }
+    // Warm either way, and deliberately so: Game.setQuality() calls
+    // applyShadowSettings() BEFORE it reaches us, and renderer.shadowMap.type
+    // is part of every material's program key too — so a quality change can
+    // invalidate the whole variant set without changing a single post feature.
+    // Compiling the new set here costs one call at a moment the player is in a
+    // menu, instead of ~60 frames at 16 ms in the next fight. Guarded inside
+    // warm(); a pipeline that has never drawn a screen has nothing to warm.
+    try { this.warmCurrent() } catch (e) { void e }
   }
 
   // -------------------------------------------------------------------------
@@ -2905,8 +3101,15 @@ export class RenderPipeline {
     }
     const env = scene.environment
     const n = env && typeof env.name === 'string' ? env.name : ''
-    if (n.startsWith('env:')) return n.slice(4)
-    return null
+    if (!n.startsWith('env:')) return null
+    // Memoised on the env NAME, not the texture: this runs once per frame on
+    // every screen, and `n.slice(4)` was allocating a string every one of them
+    // for a value that changes only when the arena does.
+    if (n !== this._moodNameSrc) {
+      this._moodNameSrc = n
+      this._moodNameOut = n.slice(4)
+    }
+    return this._moodNameOut
   }
 
   // Once per frame, and a no-op unless the answer changed. A scene with no
@@ -2978,7 +3181,13 @@ export class RenderPipeline {
     this._resetPending = true
     this._passes.accum?.reset()
     this._jitterIndex = 0
-    this._camKey = ''
+    // Poison the accumulator's stillness key so the next frame cannot be
+    // mistaken for "the camera has not moved" (NaN fails every compare). This
+    // is the numeric form of the old `_camKey = ''`.
+    // (guarded: resetHistory() is reachable from setters the constructor runs
+    // before the transient-state block below is initialised)
+    const k = this._camKeyN
+    if (k) k[0] = k[1] = k[2] = k[3] = k[4] = NaN
     // NB: `_hasPrevCam` is deliberately NOT cleared here — _detectCut() owns it,
     // and clearing it would make every reset flag the next frame as a cut too.
   }
@@ -3095,6 +3304,15 @@ export class RenderPipeline {
     try {
       this._composer.render(step)
     } catch (e) {
+      if (this._probing) {
+        // This is the extra frame _armProbes() draws so a debug readback is
+        // live. A DIAGNOSTIC MUST NEVER BE ABLE TO DEMOLISH THE POST CHAIN:
+        // give up on the probe, leave the composer exactly as it was, and let
+        // the next real frame decide whether it is genuinely broken.
+        console.warn('[pipeline] composer.render threw during a probe catch-up — probe abandoned', e)
+        this._disarmProbes()
+        return
+      }
       // A pass blew up at draw time (context loss, bad uniform). Do not let the
       // player stare at a black screen — drop the composer permanently.
       console.warn('[pipeline] composer.render threw — reverting to direct render', e)
@@ -3116,6 +3334,16 @@ export class RenderPipeline {
   // normal prepass + Bokeh's depth prepass + shadows + every post quad. Exposed
   // via stats().frame. dispose() hands autoReset back.
   // -------------------------------------------------------------------------
+  // Allocation-free replacement for `passes.filter(p => p.enabled).length`,
+  // which ran once per frame inside _endFrameInfo().
+  _enabledPassCount() {
+    const c = this._composer
+    if (!c || !c.passes) return 0
+    let n = 0
+    for (let i = 0; i < c.passes.length; i++) if (c.passes[i].enabled) n++
+    return n
+  }
+
   _beginFrameInfo() {
     const info = this.renderer.info
     if (!info) return
@@ -3136,16 +3364,18 @@ export class RenderPipeline {
     this._ownsInfoReset = false
     try {
       const r = info.render
-      this._frameInfo = {
-        calls: r.calls,
-        triangles: r.triangles,
-        lines: r.lines,
-        points: r.points,
-        passes: this._composer ? this._composer.passes.filter((p) => p.enabled).length : 0,
-        geometries: info.memory.geometries,
-        textures: info.memory.textures,
-        programs: info.programs ? info.programs.length : 0,
-      }
+      // Written IN PLACE. This runs on every frame of every screen; the object
+      // literal it used to build was one garbage object per frame for a value
+      // only stats() ever reads (and stats() copies it).
+      const fi = this._frameInfo
+      fi.calls = r.calls
+      fi.triangles = r.triangles
+      fi.lines = r.lines
+      fi.points = r.points
+      fi.passes = this._enabledPassCount()
+      fi.geometries = info.memory.geometries
+      fi.textures = info.memory.textures
+      fi.programs = info.programs ? info.programs.length : 0
     } catch (e) { void e }
   }
 
@@ -3213,6 +3443,13 @@ export class RenderPipeline {
 
     this._detectCut(camera, scene)
 
+    // Retire the instrumentation passes once nobody has read them for a while.
+    // Pinned probes (setProbes(true), a capture rig) never expire.
+    if (!this._probesPinned && !this._probing &&
+        this._probeArmedAt > -Infinity && this._time - this._probeArmedAt > PROBE_IDLE_S) {
+      this._disarmProbes()
+    }
+
     // Ease the DoF focus toward the tracked target(s). With two targets the
     // in-focus band is fitted to span BOTH of them plus a margin, so however
     // the fighters are spaced neither of them is ever the soft one.
@@ -3237,12 +3474,22 @@ export class RenderPipeline {
     // resets the history.
     const accum = this._passes.accum
     if (accum) {
+      // Was a five-`toFixed()` template string per frame — six string
+      // allocations every frame on ultra, for a comparison five numeric
+      // compares do exactly as well. 1e-4 is the tolerance the 4-decimal
+      // string rounding gave.
       const e = camera.matrixWorld.elements
-      const key = `${e[12].toFixed(4)},${e[13].toFixed(4)},${e[14].toFixed(4)},${e[0].toFixed(4)},${e[6].toFixed(4)}`
-      const still = this.idle && key === this._camKey && this._impact === 0
+      const k = this._camKeyN
+      const same =
+        Math.abs(e[12] - k[0]) < CAM_STILL_EPS &&
+        Math.abs(e[13] - k[1]) < CAM_STILL_EPS &&
+        Math.abs(e[14] - k[2]) < CAM_STILL_EPS &&
+        Math.abs(e[0] - k[3]) < CAM_STILL_EPS &&
+        Math.abs(e[6] - k[4]) < CAM_STILL_EPS
+      const still = this.idle && same && this._impact === 0
       if (!still) { accum.reset(); this._jitterIndex = 0 }
       accum.enabled = still
-      this._camKey = key
+      k[0] = e[12]; k[1] = e[13]; k[2] = e[14]; k[3] = e[0]; k[4] = e[6]
     }
   }
 
@@ -3289,17 +3536,27 @@ export class RenderPipeline {
     this._jitterIndex = (this._jitterIndex + 1) % 16
     const jx = (halton(this._jitterIndex + 1, 2) - 0.5)
     const jy = (halton(this._jitterIndex + 1, 3) - 0.5)
+    // Save the caller's view offset into a persistent scratch rather than
+    // spreading a fresh object every accumulated frame.
     const v = camera.view
-    this._prevView = v && v.enabled ? { ...v } : null
+    if (v && v.enabled) {
+      const s = this._viewSave
+      s.fullWidth = v.fullWidth; s.fullHeight = v.fullHeight
+      s.offsetX = v.offsetX; s.offsetY = v.offsetY
+      s.width = v.width; s.height = v.height
+      this._viewSaved = true
+    } else {
+      this._viewSaved = false
+    }
     camera.setViewOffset(this._width, this._height, jx, jy, this._width, this._height)
     return true
   }
 
   _clearJitter(camera) {
-    if (this._prevView) {
-      const p = this._prevView
+    if (this._viewSaved) {
+      const p = this._viewSave
       camera.setViewOffset(p.fullWidth, p.fullHeight, p.offsetX, p.offsetY, p.width, p.height)
-      this._prevView = null
+      this._viewSaved = false
     } else {
       camera.clearViewOffset()
     }
@@ -3426,9 +3683,83 @@ export class RenderPipeline {
   // the tonemap. `isHDR: false` or `tilesOverBloom: 0` means the scene has no
   // headroom and no amount of grade tuning will produce a highlight — that is a
   // lighting/emissive problem, not a post problem. Stalls the GPU; debug only.
+  // -------------------------------------------------------------------------
+  // PROBES ARE OPT-IN.
+  //
+  // HDRProbePass and FrameProbePass are instrumentation, and they used to be
+  // unconditional members of the per-frame chain on every tier that has a
+  // composer: two extra render-target binds and ~200k texture fetches every
+  // frame, in a build where nothing read them unless a verifier asked. Two of
+  // the "7-9 passes" were measuring a frame nobody was looking at.
+  //
+  // They are now built disabled. A probe READ arms them, renders one catch-up
+  // frame so the returned value is live (not a stale buffer from whenever they
+  // were last on), and leaves them armed for PROBE_IDLE_S so a verifier looping
+  // stats() pays the catch-up exactly once. _advance() disarms them again.
+  //
+  // Callers need no changes: probeHDR(), probeFrame(), frameReport(), probeAO()
+  // and stats() all still return live numbers on the first call. The only
+  // observable difference is that a frame nobody probed no longer runs them.
+  // -------------------------------------------------------------------------
+  /**
+   * Arm the probe passes and catch them up so the next read is live.
+   * Returns false when there is nothing to arm (no composer / post disabled).
+   */
+  _armProbes() {
+    if (!this._composer || !this.enabled) return false
+    const p = this._passes.probe
+    const f = this._passes.frame
+    if (!p && !f) return false
+    const wasCold = !(p && p.enabled) && !(f && f.enabled)
+    if (p) p.enabled = true
+    if (f) f.enabled = true
+    this._probeArmedAt = this._time
+    // Cold probes hold whatever was in their targets when they were last on —
+    // possibly a different screen. Draw one frame with them live so the
+    // readback below measures the image that is actually on screen.
+    if (wasCold && !this._probing && this._lastScene && this._lastCam) {
+      this._probing = true
+      try {
+        this._renderFrame(this._lastScene, this._lastCam, 0)
+      } catch (e) {
+        console.warn('[pipeline] probe catch-up render failed', e)
+      } finally {
+        this._probing = false
+      }
+    }
+    return true
+  }
+
+  /** Take the probe passes back out of the per-frame chain. */
+  _disarmProbes() {
+    const p = this._passes.probe
+    const f = this._passes.frame
+    if (p) p.enabled = false
+    if (f) f.enabled = false
+    this._probeArmedAt = -Infinity
+  }
+
+  /** True while the instrumentation passes are in the chain. */
+  get probesArmed() {
+    return !!((this._passes.probe && this._passes.probe.enabled) ||
+      (this._passes.frame && this._passes.frame.enabled))
+  }
+
+  /**
+   * setProbes(true) pins the probe passes on (a capture rig that wants every
+   * frame measured), setProbes(false) releases them back to on-demand arming.
+   */
+  setProbes(on) {
+    this._probesPinned = !!on
+    if (on) this._armProbes()
+    else if (!this._probesPinned) this._probeArmedAt = this._time
+    return this
+  }
+
   probeHDR() {
     const p = this._passes.probe
     if (!p || !this._composer || !this.enabled) return null
+    if (!this._armProbes()) return null
     return p.read(this.renderer, this._bloom.threshold)
   }
 
@@ -3467,6 +3798,7 @@ export class RenderPipeline {
   probeFrame() {
     const p = this._passes.frame
     if (!p || !this._composer || !this.enabled) return null
+    if (!this._armProbes()) return null
     return p.read(this.renderer)
   }
 
@@ -3620,7 +3952,7 @@ export class RenderPipeline {
       tier: this.tier,
       enabled: this.enabled,
       composer: !!this._composer,
-      passes: this._composer ? this._composer.passes.filter((p) => p.enabled).length : 0,
+      passes: this._enabledPassCount(),
       names: Object.keys(this._passes).filter((k) => !!this._passes[k]),
       // name + enabled for every pass actually in the composer, in order. If AO
       // is missing or disabled at capture time, it shows up here.

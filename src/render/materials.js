@@ -3245,6 +3245,117 @@ export function materialCacheStats() {
   }
 }
 
+// ===========================================================================
+// §12  WARMING — GET THE UPLOADS OUT OF THE FIRST FRAME THEY ARE SEEN ON
+//
+// THE DEFECT THIS EXISTS FOR. A texture is not resident on the GPU when it is
+// generated; it is uploaded the first time a draw call samples it, on the main
+// thread, inside whatever frame that happens to be. Same for a material's
+// shader program. During a match that frame is not a loading screen — it is the
+// frame a prop first becomes visible, the frame the first blood decal lands,
+// the frame an item spawns. Measured: p95 spikes of 109 ms in frozen-token-lab
+// and 58 ms on ultra, on a build whose steady-state frame is 4-8 ms.
+//
+// The fix is to do both during the transition instead, and the two halves live
+// in different files: shader programs need the renderer's compile() with the
+// right target bound (Pipeline.warm() owns that, because only it knows which
+// render target and tone mapping the frame will actually use), and the textures
+// need enumerating out of the material graph — which is this file's job,
+// because this file is the one that knows every slot a WCS material can carry.
+//
+// materialTextures() deliberately walks `traverse`, NOT `traverseVisible`: the
+// whole point is the pooled particle quad, the hidden gore decal and the
+// not-yet-spawned item that a rendered frame would never touch.
+// ===========================================================================
+
+// Every texture-bearing slot on Standard/Physical/Basic/Sprite materials, in
+// one list. SRGB_SLOTS + LINEAR_SLOTS cover the PBR set; these are the ones
+// outside the colour-space contract.
+const EXTRA_MAP_SLOTS = [
+  'envMap', 'matcap', 'gradientMap', 'specularIntensityMap', 'anisotropyMap',
+  'iridescenceThicknessMap', 'alphaMap',
+]
+const ALL_MAP_SLOTS = Array.from(new Set([...SRGB_SLOTS, ...LINEAR_SLOTS, ...EXTRA_MAP_SLOTS]))
+
+/** Every texture slot a material in this build can carry. */
+export function materialMapSlots() { return ALL_MAP_SLOTS.slice() }
+
+/**
+ * materialTextures(root, out = new Set()) -> Set<THREE.Texture>
+ *
+ * Every distinct texture reachable from `root`'s material graph, including the
+ * materials of INVISIBLE objects. `root` may be an Object3D, a material, an
+ * array of either, or a Scene (whose `background`/`environment` textures are
+ * collected too).
+ */
+export function materialTextures(root, out = new Set()) {
+  if (!root) return out
+  if (Array.isArray(root)) {
+    for (const r of root) materialTextures(r, out)
+    return out
+  }
+  const addMaterial = (m) => {
+    if (!m) return
+    if (Array.isArray(m)) { for (const x of m) addMaterial(x); return }
+    for (let i = 0; i < ALL_MAP_SLOTS.length; i++) {
+      const t = m[ALL_MAP_SLOTS[i]]
+      if (t && t.isTexture) out.add(t)
+    }
+    // ShaderMaterial/RawShaderMaterial keep their maps in uniforms.
+    const u = m.uniforms
+    if (u) {
+      for (const k of Object.keys(u)) {
+        const v = u[k] && u[k].value
+        if (v && v.isTexture) out.add(v)
+      }
+    }
+  }
+  if (root.isMaterial) { addMaterial(root); return out }
+  if (root.isTexture) { out.add(root); return out }
+  if (typeof root.traverse === 'function') {
+    root.traverse((o) => {
+      addMaterial(o.material)
+      // Sprites, Points and Line materials all land on .material too; the only
+      // other holder is a Scene's own background/environment.
+      if (o.isScene) {
+        if (o.background && o.background.isTexture) out.add(o.background)
+        if (o.environment && o.environment.isTexture) out.add(o.environment)
+      }
+    })
+  }
+  return out
+}
+
+/**
+ * uploadTextures(renderer, root, opts) -> { uploaded, skipped, ms }
+ *
+ * Forces every texture reachable from `root` onto the GPU now, via
+ * renderer.initTexture(). Idempotent (three no-ops on an already-uploaded
+ * texture) and time-boxed: pass `budgetMs` to bail out part-way and finish on
+ * the next call — the Set iteration order is stable, and a texture already
+ * uploaded costs nothing to revisit.
+ *
+ * Returns `uploaded: -1` when the renderer cannot do it (node harness, a
+ * renderer stub), which callers treat as "nothing to do", never as an error.
+ */
+export function uploadTextures(renderer, root, opts = {}) {
+  const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+  if (!renderer || typeof renderer.initTexture !== 'function') return { uploaded: -1, skipped: 0, ms: 0 }
+  const budget = Number.isFinite(opts.budgetMs) ? opts.budgetMs : Infinity
+  const set = opts.textures instanceof Set ? opts.textures : materialTextures(root)
+  const now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now())
+  let uploaded = 0
+  let skipped = 0
+  for (const t of set) {
+    if (uploaded > 0 && budget !== Infinity && now() - t0 > budget) { skipped++; continue }
+    // A render-target texture is owned by the GPU already; initTexture on one
+    // allocates a second, empty copy. Same for anything mid-generation.
+    if (t.isRenderTargetTexture || t.__wcsNoUpload) { skipped++; continue }
+    try { renderer.initTexture(t); uploaded++ } catch (e) { skipped++; void e }
+  }
+  return { uploaded, skipped, ms: +(now() - t0).toFixed(2) }
+}
+
 /**
  * disposeMaterialCache() — drops every globally cached material.
  *

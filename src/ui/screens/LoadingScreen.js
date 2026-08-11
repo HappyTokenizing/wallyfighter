@@ -12,28 +12,66 @@
 // shows why — programs 79 -> 91, geometries 217 -> 269 — twelve shader compiles
 // and three arenas' worth of geometry built while the camera was moving.
 //
-// WHAT IT IS NOW. The same 1.2 s of screen time, spent on the real thing:
+// WHAT IT IS NOW. Real work, time-sliced, with the bar reporting it:
 //
-//   PHASE 1  prewarmIntro(game) from IntroCinematic.js — a step queue over every
-//            shot in the reel, in play order, building scenes/rigs/props and
-//            enqueueing their procedural surfaces.
-//   PHASE 2  createPrewarmer(renderer, …) from render/prewarm.js — drains the
-//            texture queue phase 1 filled and makes the driver link the shader
-//            programs for the scenes phase 1 built.
+//   PHASE 1  BUILD. On the first boot that is `prewarmIntro(game)` from
+//            IntroCinematic.js, bounded to the first LEAD_SHOTS of the reel.
+//            On every later boot it is `getBackdrop(game)` — the menu/title set,
+//            which is where that boot is actually going.
+//   PHASE 2  COMPILE, THEN DRAIN. createPrewarmer(renderer, …) links the shader
+//            programs for whatever phase 1 built and then drains the procedural
+//            surface queue phase 1 filled.
 //
-// Both are time-sliced: each frame gets BUDGET_MS of work and no more, so the
-// bar keeps animating while this happens. The arcade feel is untouched — chunky
-// random leaps, joke ticker, skip on any input — but the number under the bar
-// is now real work completed, and the screen leaves when the work is done
-// rather than when a stopwatch says so.
+// ---------------------------------------------------------------------------
+// v3.8 — WHY THIS SCREEN STOPPED TRYING TO DO EVERYTHING
+//
+// The first cut of this warmed the WHOLE reel: all eleven shots, then their
+// surfaces, then their shaders. Measured on the production build, that is ~14 s
+// of work. This screen had 8 s. So it spent every one of them, hit its ceiling,
+// and handed the cinematic the other ~8.4 s — which the cinematic paid for in
+// the only place it could, its own opening: shot 0 at 19 fps, shot 1 at 20,
+// shot 2 at 61, shot 3 onward a locked 120. 180 of the reel's 188 over-33 ms
+// frames were in those first three shots.
+//
+// TWO THINGS WERE WRONG AND BOTH ARE FIXED HERE.
+//
+//   1. THE WORK WAS NOT SPLITTABLE. A boot has two budgets — a few seconds
+//      before the movie and thirty-six seconds during it — and the queue was
+//      being asked to fit entirely in the first. It now banks a LEAD of
+//      complete, compiled shots (`IntroPrewarm.runShots`) and the reel builds
+//      the rest one shot ahead of its own cuts. Loading is shorter than the
+//      8 s ceiling it used to hit, and the opening is not the dumping ground.
+//
+//   2. THE SCREEN LEFT WITH THE SURFACE QUEUE STILL DEEP, which is what
+//      actually cost the opening its frame rate: textures.js drains itself on a
+//      rAF heartbeat whose budget scales with queue depth (12+ pending = 20 ms
+//      of generation on EVERY presented frame). Leaving is now gated on the
+//      drain finishing, and prewarm.js's phases were reordered so the compile
+//      pass runs BEFORE the drain rather than behind two seconds of it — the
+//      old order meant the shader phase never once executed, and 95 programs
+//      were still being linked during the reel.
+//
+// THE BAR IS NOW COMPOSITOR-DRIVEN. Phase 1's steps are indivisible — one
+// character's buildModel() is 200-400 ms and no scheduler can subdivide it — so
+// this screen measured ten hitches of 100-327 ms across its own 113 frames, and
+// a bar animated with `width` freezes dead in every one of them, because layout
+// is main-thread. The fill is now driven by `transform: translateX()` with a
+// stepped CSS transition, which Chrome interpolates on the compositor: the bar
+// keeps moving through a 300 ms main-thread block. A slow sheen sweep does the
+// same job for the case where there is genuinely nothing new to report.
 //
 // WHAT IS DELIBERATELY UNCHANGED: _finish()'s first-boot logic (first boot sets
-// 'introSeen' and goes to 'intro', every boot after goes to 'title'), the DOM,
-// the CSS classes, the ticker lines and the skip affordance.
+// 'introSeen' and goes to 'intro', every boot after goes to 'title'), the DOM
+// structure, the CSS classes, the ticker lines, the chunky-leap pacing and the
+// skip affordance.
 import { el, touchUI } from '../uiKit.js'
 import { GameConfig } from '../../config/GameConfig.js'
-import { createPrewarmer, canPrewarmShaders } from '../../render/prewarm.js'
+import {
+  createPrewarmer, canPrewarmShaders,
+  drainSurfaces, surfacesPending, SURFACE_QUEUE_QUIET,
+} from '../../render/prewarm.js'
 import { prewarmIntro } from '../../modes/IntroCinematic.js'
+import { getBackdrop } from '../MenuBackdrop.js'
 
 // Minimum time the screen stays up, so a warm reload (module memos already
 // populated, nothing left to build) does not flash a bar for two frames. It is
@@ -43,27 +81,40 @@ const MIN_MS = 1200
 // rather than staring at a stuck bar forever; whatever did not get warmed
 // compiles lazily at the cut exactly as it did before, and IntroPrewarm.ensure()
 // fills in any shot the queue never reached. A late shader beats a dead loader.
-const MAX_MS = 8000
+const MAX_MS = 9000
 // Work handed to the prewarmers per frame. One indivisible unit — a single
-// MeshPhysicalMaterial variant link — can overrun this and no scheduler can
-// subdivide it, but this stops several from bunching into one frame.
+// MeshPhysicalMaterial variant link, one character's buildModel() — can overrun
+// this and no scheduler can subdivide it, but this stops several from bunching
+// into one frame.
 //
-// Why 20 and not the prewarmers' default 10: this is a DOM screen, and the
-// budget is a duty cycle. The rest of the frame costs ~8 ms here, so a 10 ms
-// budget spends barely half the wall clock on work — 3 s of real work would
-// take 6 s of loading screen, and MAX_MS would cut off half of it. At 20 ms the
-// screen runs ~35 fps and roughly 70% of every second goes into the work, so
-// substantially more of the reel is warmed before the ceiling. Nothing on
-// screen suffers: the bar has `transition: width .12s steps(4)`, the ticker
-// changes every 340 ms, and the logo throb is a compositor transform.
-const BUDGET_MS = 20
-// How the two phases split the bar. Phase 1 builds the geometry AND generates
-// the procedural surfaces (concrete 346 ms, marble 232, skin-elephant 226 per
-// kind), so it is the larger half; phase 2 is the twelve program links plus
-// whatever is left in the texture queue. An authored estimate, not a timer —
-// each phase contributes its own real completed fraction, this only decides
-// how much of the bar each one owns.
-const BUILD_SHARE = 0.7
+// Why 40 and not the prewarmers' default 10: this is a DOM screen with nothing
+// on the main thread to animate, and the budget is a duty cycle. At 10 ms,
+// barely half the wall clock goes into the work; at the previous 20 ms it was
+// ~70%, and the measured consequence was that 8 s of screen time bought 5.6 s
+// of work while the remaining 8.4 s leaked into the cinematic. At 40 ms it is
+// ~87% and the screen finishes its (now narrowed) list well inside MAX_MS.
+// Nothing on screen suffers, because nothing on screen depends on the main
+// thread any more: the fill is a compositor transform, the sheen is a
+// compositor keyframe animation, and the logo throb always was one. Only the
+// percentage text and the ticker stall in a long frame, and neither is what the
+// eye tracks.
+const BUDGET_MS = 40
+// How many shots of the reel are banked before it starts. NOT all eleven: see
+// the v3.8 note at the top. Three covers ~9.6 s of playback, and the reel needs
+// roughly 1.3 s of work to bank each further shot, so shot 3 is comfortably
+// ready long before its cut and every shot after it has three seconds of slack.
+const LEAD_SHOTS = 3
+// How the two phases split the bar. Phase 1 builds geometry and enqueues the
+// procedural surfaces; phase 2 links the programs and then generates those
+// surfaces (concrete 346 ms, marble 232, skin-elephant 226 per kind), which is
+// the bigger half of the wall clock now that it is allowed to finish. An
+// authored estimate, not a timer — each phase contributes its own real
+// completed fraction, this only decides how much of the bar each one owns.
+const BUILD_SHARE = 0.45
+// Bar animation. `steps(5)` keeps the arcade chunkiness; running it on
+// `transform` instead of `width` is what keeps it moving through a 300 ms
+// main-thread block.
+const BAR_TRANSITION = 'transform 0.3s steps(5)'
 
 const TICKER_LINES = [
   'Inflating token supply…',
@@ -76,6 +127,45 @@ const TICKER_LINES = [
   'Waking up the interns…',
   'Rendering diamond hands…',
 ]
+
+// ---------------------------------------------------------------------------
+// A SECOND MOVING THING, and it is not decoration.
+//
+// The fill can only move when there is progress to report, and phase 1's units
+// are indivisible: a character's buildModel() is one 300 ms step that reports
+// nothing until it lands. A screen whose only animation is tied to progress
+// therefore LOOKS hung during exactly the moments it is working hardest. This
+// is a slow sheen travelling across the track on a pure compositor keyframe
+// animation (transform + opacity only, no layout, no paint), so it keeps moving
+// through any main-thread block of any length. ui.css is not ours, so it is
+// injected here, self-contained, the way IntroCinematic.js injects its
+// letterbox styles.
+// ---------------------------------------------------------------------------
+let _styleInstalled = false
+function ensureLoadingStyle() {
+  if (_styleInstalled || typeof document === 'undefined') return
+  _styleInstalled = true
+  const style = document.createElement('style')
+  style.id = 'wcs-loading-style'
+  style.textContent = `
+.load-bar { position: relative; }
+.load-bar-sheen {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 22%;
+  pointer-events: none; z-index: 2; will-change: transform, opacity;
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0) 0%, rgba(255,255,255,0.16) 50%, rgba(255,255,255,0) 100%);
+  animation: wcs-load-sheen 1.9s linear infinite;
+}
+@keyframes wcs-load-sheen {
+  0%   { transform: translateX(-120%); opacity: 0; }
+  12%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { transform: translateX(560%); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .load-bar-sheen { animation: none; opacity: 0; } }
+`
+  document.head.appendChild(style)
+}
 
 export class LoadingScreen {
   constructor(game) { this.game = game }
@@ -91,30 +181,38 @@ export class LoadingScreen {
     this.introPre = null
     this.shaderPre = null
     this.shaderProgress = 0
+    this.buildProgress = 0
     this.canCompile = false
+    this.backdrop = null
+    this.backdropBuilt = false
+    this.shownPct = -1
     this.tickerIndex = Math.floor(Math.random() * TICKER_LINES.length)
     this.nextTickerAt = 0
 
-    // Only warm the intro when the intro is where we are actually going. The
-    // condition is character-for-character the one _finish() uses, and nothing
-    // between here and there can flip it. On every later boot this screen goes
-    // to the title, and building all eleven cinematic shots (76 queue steps) for
-    // a reel nobody is about to watch would turn a 1.2 s boot into an
-    // eight-second one, and hold the whole reel in VRAM, for nothing.
+    // WHERE THIS BOOT IS GOING, decided once. The condition is
+    // character-for-character the one _finish() uses, and nothing between here
+    // and there can flip it.
+    //
+    // v3.8: the `else` branch is no longer "nothing to do". On every boot after
+    // the first this screen hands off to the TITLE, and TitleScreen.enter()
+    // calls getBackdrop() — a ~1.5 s build of the whole Permanent Reserve set
+    // plus every program it needs, measured as the single worst frame in the
+    // session at 1526 ms. That is exactly the kind of work this screen exists
+    // to absorb, and it is the same trick applied to the other exit: the boot
+    // that skips the reel warms the screen it is actually about to show.
+    //
+    // On the intro path the backdrop is deliberately NOT built here — the reel
+    // has thirty-six seconds of idle time to do it in (see §THE HANDOFF in
+    // IntroCinematic.js), and holding the menu set resident through the whole
+    // cinematic on top of eleven shot scenes is memory nobody needs to spend.
     this.wantIntro = !this.game.save.get('introSeen', false) && this.game.screens.screens.has('intro')
-    if (!this.wantIntro) {
-      // Nothing to wait on, so "all the work" is done before we start. real = 1
-      // hands the bar to the MIN_MS pacing term in _ceiling(), which fills it
-      // chunkily over 1.2 s instead of leaving it at 0% and then snapping.
-      this.warmDone = true
-      this.real = 1
-    }
 
+    ensureLoadingStyle()
     this.root = el('div', 'wcs-screen wcs-loading')
     this.root.innerHTML = `
       <div class="load-logo">${GameConfig.title}</div>
       <div class="load-sub">${GameConfig.subtitle}</div>
-      <div class="load-bar"><div class="load-bar-fill"></div></div>
+      <div class="load-bar"><div class="load-bar-fill"></div><div class="load-bar-sheen"></div></div>
       <div class="load-pct">0%</div>
       <div class="load-ticker"></div>
       <div class="load-hint">${touchUI(this.game) ? 'TAP TO SKIP (NOBODY EVER WAITS)' : 'PRESS ANY KEY TO SKIP (NOBODY EVER WAITS)'}</div>
@@ -123,6 +221,28 @@ export class LoadingScreen {
     this.fillEl = this.root.querySelector('.load-bar-fill')
     this.pctEl = this.root.querySelector('.load-pct')
     this.tickerEl = this.root.querySelector('.load-ticker')
+
+    // THE FILL, MOVED OFF THE MAIN THREAD. ui.css sizes this element with
+    // `width` and transitions that width; width is layout, layout is main
+    // thread, and this screen's whole job is to occupy the main thread with
+    // 100-330 ms indivisible build steps. So the element is pinned to the full
+    // width of its (overflow:hidden) track and slid into view with translateX
+    // instead: `-100%` is empty, `0%` is full, every value between is exactly
+    // the same fill it was before, and Chrome runs the interpolation on the
+    // compositor — so the bar keeps stepping forward through a frame where
+    // nothing else can. The diagonal hatching travels with the fill rather than
+    // stretching, which is if anything more arcade than it was.
+    if (this.fillEl) {
+      this.fillEl.style.width = '100%'
+      this.fillEl.style.willChange = 'transform'
+      this.fillEl.style.transform = 'translateX(-100%)'
+      // Applied a frame later so the initial -100% is not itself animated from
+      // the CSS default of 0 — otherwise every boot opens with the bar
+      // draining from full.
+      requestAnimationFrame(() => {
+        if (this.fillEl) this.fillEl.style.transition = BAR_TRANSITION
+      })
+    }
 
     this._onKey = () => this._finish()
     this._onClick = () => this._finish()
@@ -138,6 +258,10 @@ export class LoadingScreen {
     // not reach. Only the shader pass, which owns nothing, is abandoned.
     try { this.shaderPre?.cancel() } catch (err) { /* nothing to salvage */ }
     this.shaderPre = null
+    // The menu set is a module singleton owned by MenuBackdrop.js; we only ever
+    // held a reference so phase 2 could compile it. Dropping it here is
+    // bookkeeping, not a free.
+    this.backdrop = null
     this.root?.remove()
     this.root = null
   }
@@ -162,42 +286,99 @@ export class LoadingScreen {
   // to us, and a shader prewarmer without a renderer cannot link anything.
   _startWarm(renderer) {
     this.warmStarted = true
-    // Cached once, so the two phases and the progress split can never disagree
-    // about whether phase 2 is going to happen.
+    // Cached once, for the ceiling diagnostic. Phase 2 is constructed either
+    // way now — a renderer that cannot compile still leaves a surface queue
+    // that has to be drained before we hand over.
     this.canCompile = canPrewarmShaders(renderer)
+    if (!this.wantIntro) return
     try {
       this.introPre = prewarmIntro(this.game)
     } catch (err) {
       console.warn('[loading] intro prewarm unavailable — the cinematic will build at its cuts', err)
       this.introPre = null
-      this.warmDone = true
     }
+  }
+
+  // PHASE 1 for the intro path: bank LEAD_SHOTS complete shots and stop. Not
+  // the whole reel — see the v3.8 note at the top of the file.
+  _stepBuildIntro() {
+    if (!this.introPre) return false
+    if (this.introPre.disposed) { this.introPre = null; return false }
+    if (this.introPre.shotsPending(LEAD_SHOTS) <= 0) return false
+    try {
+      this.introPre.runShots(LEAD_SHOTS, BUDGET_MS)
+    } catch (err) {
+      console.warn('[loading] intro prewarm step threw — skipping the rest of the build', err)
+      this.introPre = null
+      return false
+    }
+    return this.introPre.shotsPending(LEAD_SHOTS) > 0
+  }
+
+  // PHASE 1 for the title path: build the set the title screen is about to ask
+  // for. One indivisible call into another module's constructor — there is no
+  // seam inside it — but a 1.5 s block behind an animated bar is a loading
+  // screen doing its job, and the same 1.5 s in TitleScreen.enter() is the
+  // worst frame in the session.
+  //
+  // It runs on the FIRST render frame, deliberately, before this screen has
+  // been painted. There is no fine-grained progress to report from inside
+  // another module's constructor, so a bar that waited for it would sit at 0%
+  // for the better part of a second — and the honest alternative to a stuck bar
+  // is not a faked one, it is putting the block where a boot is already blank.
+  // The frame after this one paints the screen with the bar already at its
+  // phase-1 share, and everything from there on is reported for real.
+  _stepBuildTitle() {
+    if (this.backdropBuilt) return false
+    this.backdropBuilt = true
+    try {
+      this.backdrop = getBackdrop(this.game)
+    } catch (err) {
+      console.warn('[loading] title backdrop prewarm failed — the title will build itself', err)
+      this.backdrop = null
+    }
+    return true
+  }
+
+  // The scenes phase 2 should compile, whichever path we are on.
+  _warmScenes() {
+    if (this.wantIntro) return this.introPre ? this.introPre.scenes : []
+    const bd = this.backdrop
+    if (!bd || !bd.scene) return []
+    return [{ scene: bd.scene, camera: bd.camera || null, label: 'Opening the vault…' }]
+  }
+
+  _warmCamera() {
+    if (this.wantIntro) return this.introPre ? this.introPre.camera : null
+    return this.backdrop ? (this.backdrop.camera || null) : null
   }
 
   // One slice of real work. Never allowed to throw into the frame loop: a
   // prewarmer that dies is a missed optimisation, not a broken boot.
   _stepWarm(renderer) {
-    // PHASE 1 — build the shots. IntroPrewarm.run(ms) spends up to `ms` on its
-    // own queue and reports whether work remains.
-    if (this.introPre && !this.introPre.done) {
-      try {
-        this.introPre.run(BUDGET_MS)
-      } catch (err) {
-        console.warn('[loading] intro prewarm step threw — skipping the rest of the build', err)
-        this.introPre = null
-      }
+    // PHASE 1 — build. One `return` per frame: a phase-1 step is the largest
+    // indivisible unit on this screen and there is no sense stacking a compile
+    // pass behind one in the same frame.
+    if (this.wantIntro ? this._stepBuildIntro() : this._stepBuildTitle()) {
       this._publish()
       return
     }
 
-    // PHASE 2 — drain the surfaces phase 1 queued and link the programs for the
-    // scenes it built. Constructed only now: the scenes did not exist before.
+    // PHASE 2 — link the programs for what phase 1 built, then drain the
+    // procedural surfaces it enqueued. That order is prewarm.js's, and it was
+    // the other way round until v3.8; the note in its §4 explains why a warm-up
+    // that runs out of time must drop the drain and never the compile.
+    //
+    // Constructed only now: the scenes did not exist before. It is created even
+    // when the renderer cannot compile, because the DRAIN still has to happen —
+    // leaving this screen with a deep surface queue is what cost the cinematic's
+    // opening its frame rate, and that is true whether or not shaders warmed.
     if (!this.shaderPre) {
-      if (!this.canCompile || !this.introPre) { this.warmDone = true; this._publish(); return }
+      const scenes = this._warmScenes()
       try {
         this.shaderPre = createPrewarmer(renderer, {
-          camera: this.introPre.camera,
-          scenes: this.introPre.scenes,
+          camera: this._warmCamera(),
+          scenes,
           budgetMs: BUDGET_MS,
         })
       } catch (err) {
@@ -210,7 +391,17 @@ export class LoadingScreen {
     try {
       const s = this.shaderPre.step(BUDGET_MS)
       this.shaderProgress = s.progress
-      if (s.done) this.warmDone = true
+      // Belt and braces on the one condition that actually mattered: never hand
+      // the next screen a queue deep enough for textures.js to widen its own
+      // per-frame budget (12+ pending = 20 ms of generation on every presented
+      // frame, which is precisely what made shots 0-1 of the reel run at 19 fps).
+      // The prewarmer's drain unit normally takes it to zero; if it gave up —
+      // a pump that threw, a cancelled sub-unit — finish the job by hand rather
+      // than declaring victory or sitting here until the ceiling.
+      if (s.done) {
+        if (surfacesPending() < SURFACE_QUEUE_QUIET) this.warmDone = true
+        else drainSurfaces(BUDGET_MS)
+      }
     } catch (err) {
       console.warn('[loading] shader prewarm step threw — entering anyway', err)
       this.warmDone = true
@@ -221,9 +412,13 @@ export class LoadingScreen {
   // Fold both phases into one monotonic 0..1. Monotonic matters: a bar that
   // goes backwards reads as a bug even when the number is more truthful.
   _publish() {
-    const build = this.introPre ? (this.introPre.progress || 0) : 1
-    const share = this.canCompile ? BUILD_SHARE : 1
-    const next = this.warmDone ? 1 : Math.min(1, build * share + this.shaderProgress * (1 - share))
+    let build = 1
+    if (this.wantIntro) build = this.introPre ? this.introPre.shotsProgress(LEAD_SHOTS) : 1
+    else build = this.backdropBuilt ? 1 : 0
+    if (build > this.buildProgress) this.buildProgress = build
+    const next = this.warmDone
+      ? 1
+      : Math.min(1, this.buildProgress * BUILD_SHARE + this.shaderProgress * (1 - BUILD_SHARE))
     if (next > this.real) this.real = next
   }
 
@@ -267,8 +462,15 @@ export class LoadingScreen {
       }
     }
     const pct = Math.floor(Math.min(1, Math.max(0, this.progress)) * 100)
-    this.fillEl.style.width = pct + '%'
-    this.pctEl.textContent = pct + '%'
+    if (pct !== this.shownPct) {
+      this.shownPct = pct
+      // translateX, not width: see the note where the element is set up. The
+      // element is exactly as wide as its clipping track, so -(100-pct)% puts
+      // its right edge at pct% and the compositor keeps stepping toward that
+      // target even while the main thread is inside a 300 ms build.
+      this.fillEl.style.transform = `translateX(${pct - 100}%)`
+      this.pctEl.textContent = pct + '%'
+    }
 
     // The ticker runs on wall-clock time. Fixed-step dt drifts a long way
     // behind whenever a single unsplittable shader link eats a frame, and a
@@ -280,12 +482,16 @@ export class LoadingScreen {
     }
 
     if (!this.warmDone && elapsed >= MAX_MS) {
-      const shots = this.introPre ? `${this.introPre.shotsReady}/${this.introPre.shotCount} shots` : 'no intro queue'
-      console.warn(`[loading] prewarm ceiling hit at ${MAX_MS} ms (${Math.round(this.real * 100)}%, ${shots}) — entering anyway`)
+      const shots = this.introPre
+        ? `${this.introPre.shotsReady}/${LEAD_SHOTS} lead shots`
+        : (this.wantIntro ? 'no intro queue' : 'title set')
+      console.warn(`[loading] prewarm ceiling hit at ${MAX_MS} ms (${Math.round(this.real * 100)}%, ${shots}, `
+        + `${surfacesPending()} surfaces pending, compile ${this.canCompile ? 'on' : 'off'}) — entering anyway`)
       this.warmDone = true
     }
     if (this.warmDone && elapsed >= MIN_MS) {
-      this.fillEl.style.width = '100%'
+      this.shownPct = 100
+      this.fillEl.style.transform = 'translateX(0%)'
       this.pctEl.textContent = '100%'
       this._finish()
     }
