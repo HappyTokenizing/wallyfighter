@@ -85,8 +85,18 @@ const STYLE = `
      (gold gradient, black border, hard drop shadow) — legibility only. */
   .wcs-tut-card kbd { display: inline-block; box-sizing: border-box;
                       min-width: 2.1em; margin: 0 4px; padding: 0.1em 0.42em;
-                      font-family: var(--wcs-keycap, Menlo, Consolas, 'DejaVu Sans Mono',
-                                   'Liberation Mono', Verdana, 'Courier New', monospace);
+                      /* Verdana leads, not a monospace. Menlo fixed the old
+                         Impact problem (its I has full crossbars) but its
+                         capital O is a narrow tall oval that reads as a zero on
+                         a small gold cap under the scanline overlay — a critic
+                         reading the shipped screenshot called it "0". Verdana
+                         keeps the crossbarred I AND gives a wide circular O
+                         that is unmistakably a letter, plus the widest U/E in
+                         any ubiquitous face. Proportional is fine here: the cap
+                         box is fixed by min-width + text-align, so glyph width
+                         does not affect key alignment. */
+                      font-family: var(--wcs-keycap, Verdana, Tahoma, 'DejaVu Sans',
+                                   'Trebuchet MS', 'Segoe UI', sans-serif);
                       font-weight: 700; font-size: 1.22em; line-height: 1.15;
                       letter-spacing: 0; text-align: center; text-transform: uppercase;
                       color: #1a1405; text-shadow: none;

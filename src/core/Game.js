@@ -120,10 +120,22 @@ export class Game {
       if (name && (!P.marks.length || P.marks[P.marks.length - 1].s !== name)) {
         P.marks.push({ s: name, i: P.f.length, t: +(now - P.t0).toFixed(0) })
       }
+      // ARENA ENTRY: the 120 frames after a match starts. Entering a fight was
+      // measured at 4.6-6.1 s of wall clock for those 120 frames, including one
+      // frozen frame of 4079 ms — the worst single stall in the game — so it
+      // gets its own published summary rather than being averaged into a screen.
+      const match = P.marks.find((m) => m.s === 'match')
+      if (match && !P.arenaDone && P.f.length >= match.i + 120) {
+        P.arenaDone = true
+        const s = seg(match.i, match.i + 120)
+        const wall = P.f.slice(match.i, match.i + 120).reduce((t, x) => t + x, 0)
+        try { document.title = 'ARENA ' + JSON.stringify({ ...s, wallMs: +wall.toFixed(0) }) } catch { /* nothing to do */ }
+      }
+
       // Publish once the intro has handed off to the title, or after 70 s.
       const intro = P.marks.find((m) => m.s === 'intro')
       const title = intro && P.marks.find((m) => m.s === 'title' && m.i > intro.i)
-      if (!P.published && (title || now - P.t0 > 70000)) {
+      if (!P.published && !match && (title || now - P.t0 > 70000)) {
         P.published = true
         const load = P.marks[0] ? seg(0, P.marks[0].i) : null
         const out = {
