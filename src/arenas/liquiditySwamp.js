@@ -147,6 +147,7 @@ import * as THREE from 'three'
 import {
   ArenaBase, makeRng, flatMat, canvasTexture, makeLightRig, makeLightShaft,
   makeCrateMesh, resolveTeamColors,
+  auditCrowdInstances, crowdDetailForDistance, crowdDetailTier,
 } from './ArenaBase.js'
 import {
   roundedBox, frustum, splineTube, plate, capsuloid, skirt,
@@ -1904,10 +1905,26 @@ function makeFrogIdol() {
 //
 // Cost: 4 instanced draws (3 frog silhouettes + 1 pad) for the whole stand.
 // ---------------------------------------------------------------------------
-function frogVariantGeometry(kind) {
+// v3.8 (defect 3, item 4): the LOD knob, in the frogs' own currency. ArenaBase
+// grades the human actor by triangle count; a frog is eight small spheres, so
+// the same three tiers are spent on SEGMENTS — and below `medium` the eyes and
+// forelegs go, because at 14 m they are two pixels each and the silhouette is
+// carried entirely by the torso/head/haunch group. Tier 2 ('high') is
+// byte-for-byte the geometry this arena shipped, so a stand that says nothing
+// gets exactly what it had.
+//   2 high    the shipped frog: 6x4 torso, eyes, forelegs      ~250 tri
+//   1 medium  5x3 torso, eyes kept, forelegs dropped           ~150 tri
+//   0 low     4x3 torso, no eyes, no forelegs                   ~90 tri
+// The bounding box, the seat height and the pad radius are tier-INDEPENDENT:
+// grounding must not move when the tier does.
+function frogVariantGeometry(kind, detail) {
+  const lod = crowdDetailTier(detail)
+  const S = [0.68, 0.84, 1][lod]                       // segment multiplier
+  const fine = lod >= 1                                // eyes
+  const limbs = lod >= 2                               // forelegs
   const parts = []
   const sph = (r, w, h, sx, sy, sz, tx, ty, tz) => {
-    const g = new THREE.SphereGeometry(r, w, h)
+    const g = new THREE.SphereGeometry(r, Math.max(4, Math.round(w * S)), Math.max(3, Math.round(h * S)))
     g.scale(sx, sy, sz)
     g.translate(tx, ty, tz)
     parts.push(g)
@@ -1915,25 +1932,33 @@ function frogVariantGeometry(kind) {
   if (kind === 'upright') {
     sph(0.27, 6, 4, 1.0, 1.15, 0.92, 0, 0.34, 0)          // torso, stood up
     sph(0.2, 5, 4, 1.1, 0.82, 0.92, 0, 0.65, 0.06)        // head
-    sph(0.075, 4, 3, 1, 1, 1, -0.11, 0.76, 0.12)          // eyes
-    sph(0.075, 4, 3, 1, 1, 1, 0.11, 0.76, 0.12)
+    if (fine) {
+      sph(0.075, 4, 3, 1, 1, 1, -0.11, 0.76, 0.12)        // eyes
+      sph(0.075, 4, 3, 1, 1, 1, 0.11, 0.76, 0.12)
+    }
     sph(0.1, 4, 3, 1, 0.8, 1.5, -0.19, 0.1, 0.06)         // haunches
     sph(0.1, 4, 3, 1, 0.8, 1.5, 0.19, 0.1, 0.06)
-    sph(0.055, 4, 2, 1, 1.6, 1, -0.19, 0.34, 0.17)        // forelegs
-    sph(0.055, 4, 2, 1, 1.6, 1, 0.19, 0.34, 0.17)
+    if (limbs) {
+      sph(0.055, 4, 2, 1, 1.6, 1, -0.19, 0.34, 0.17)      // forelegs
+      sph(0.055, 4, 2, 1, 1.6, 1, 0.19, 0.34, 0.17)
+    }
   } else if (kind === 'bloater') {
     sph(0.36, 6, 4, 1.25, 0.7, 1.12, 0, 0.23, 0)          // wide flat body
     sph(0.24, 5, 4, 1.2, 0.62, 0.86, 0, 0.42, 0.14)       // broad head
     sph(0.2, 5, 3, 1.15, 0.72, 0.9, 0, 0.24, 0.3)         // inflated throat sac
-    sph(0.095, 4, 3, 1, 1, 1, -0.14, 0.54, 0.2)
-    sph(0.095, 4, 3, 1, 1, 1, 0.14, 0.54, 0.2)
+    if (fine) {
+      sph(0.095, 4, 3, 1, 1, 1, -0.14, 0.54, 0.2)
+      sph(0.095, 4, 3, 1, 1, 1, 0.14, 0.54, 0.2)
+    }
     sph(0.14, 4, 3, 1, 0.62, 1.35, -0.35, 0.11, -0.02)
     sph(0.14, 4, 3, 1, 0.62, 1.35, 0.35, 0.11, -0.02)
   } else {
     sph(0.3, 6, 4, 1.18, 0.78, 1.05, 0, 0.24, 0)          // squat
     sph(0.21, 5, 4, 1.12, 0.75, 0.9, 0, 0.44, 0.12)
-    sph(0.082, 4, 3, 1, 1, 1, -0.12, 0.56, 0.18)
-    sph(0.082, 4, 3, 1, 1, 1, 0.12, 0.56, 0.18)
+    if (fine) {
+      sph(0.082, 4, 3, 1, 1, 1, -0.12, 0.56, 0.18)
+      sph(0.082, 4, 3, 1, 1, 1, 0.12, 0.56, 0.18)
+    }
     sph(0.12, 4, 3, 1, 0.7, 1.35, -0.31, 0.1, -0.02)
     sph(0.12, 4, 3, 1, 0.7, 1.35, 0.31, 0.1, -0.02)
   }
@@ -1972,10 +1997,34 @@ function crowdPadGeometry(seg = 10, notch = 0.5) {
   return g
 }
 
+// v3.8 — WHY THIS STAND IS NOT ArenaBase.buildCrowd, and what it adopted
+// instead (defect 3, item 1).
+//
+// buildCrowd seats HUMANS on BLEACHER STEPS. This congregation is frogs on
+// floating lily pads: there is no riser, no row, no seat pitch and no bank,
+// the "tread" is a 0.9 m disc that BOBS on the water under each individual,
+// and the species is the arena's identity (it is wired into the croak audio,
+// the dive reaction and the idol it worships). Porting it onto buildCrowd
+// would mean either putting bleachers in a swamp or teaching buildCrowd about
+// per-instance floating supports — which is a fork of buildCrowd wearing
+// buildCrowd's name.
+//
+// So it adopts the SPINE instead, which is the seam ArenaBase v3.7 split out
+// for exactly this: auditCrowdInstances() is the same walk buildCrowd's own
+// audit() runs, over the same support-set shape, returning the same object.
+// The support set here is simply built from the pads rather than from riser
+// boxes — one entry per pad, at the pad's own crown height — so "is this
+// spectator standing on anything?" has one answer in the codebase and this
+// stand gives it in the same words as every other.
 function buildFrogCrowd(opts = {}) {
   const count = Math.max(1, Math.floor(opts.count ?? 30))
   const rng = opts.rng || makeRng(0xf706)
   const teamColors = resolveTeamColors(opts)
+  // The LOD knob, finally passed by the arena (item 4). Tier 2 is the shipped
+  // geometry; the pad loses radial segments with it, since a 6-gon disc and a
+  // 10-gon disc are the same 40 px of green at this range.
+  const detail = opts.detail ?? 'high'
+  const lod = crowdDetailTier(detail)
 
   const group = new THREE.Group()
   group.name = 'frogCrowd'
@@ -2008,7 +2057,7 @@ function buildFrogCrowd(opts = {}) {
     envMapIntensity: 0.5,
   })
   const meshes = KINDS.map((k, i) => {
-    const m = new THREE.InstancedMesh(frogVariantGeometry(k), frogMat, Math.max(1, per[i]))
+    const m = new THREE.InstancedMesh(frogVariantGeometry(k, detail), frogMat, Math.max(1, per[i]))
     m.name = `frogCrowd-${k}`
     m.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     m.castShadow = false
@@ -2020,7 +2069,7 @@ function buildFrogCrowd(opts = {}) {
   })
 
   const padMat = leaf(0xffffff, null, { vertexColors: true, side: THREE.DoubleSide })
-  const pads = new THREE.InstancedMesh(crowdPadGeometry(10, 0.5), padMat, count)
+  const pads = new THREE.InstancedMesh(crowdPadGeometry([6, 8, 10][lod], 0.5), padMat, count)
   pads.name = 'frogPads'
   pads.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
   pads.castShadow = false
@@ -2146,9 +2195,68 @@ function buildFrogCrowd(opts = {}) {
   for (let k = used; k < count; k++) pads.setMatrixAt(k, _m)
   for (let v = 0; v < 3; v++) for (let k = used4[v]; k < meshes[v].count; k++) meshes[v].setMatrixAt(k, _m)
 
+  // -- v3.8 THE SPINE: supports, reverse index, audit ------------------------
+  // Each frog's support is ITS OWN PAD, so the support set is generated from
+  // the placement arrays rather than from the group's meshes (an InstancedMesh
+  // has no per-instance boxes for crowdSupportsFromGroup to read). The pad
+  // crown sits 0.055 above the pad origin and the frog is composed onto that
+  // crown every frame, which is why this stand has never had a floater — but
+  // "by construction" is what the last three rounds said about the risers too,
+  // so it is now PROVEN rather than asserted, in the shared audit's own shape.
+  const padSupports = () => {
+    const out = [{ name: 'water', top: WATER_Y, x0: -1e4, x1: 1e4, z0: -1e4, z1: 1e4 }]
+    for (let k = 0; k < used; k++) {
+      const r = padR[k] * 0.9
+      out.push({
+        name: `pad${k}`, top: WATER_Y + 0.055,
+        x0: bx[k] - r, x1: bx[k] + r, z0: bz[k] - r, z1: bz[k] + r,
+      })
+    }
+    return out
+  }
+  // (mesh name, instance slot) -> frog index, so the audit can skip the frogs
+  // that are deliberately underwater at this instant.
+  const revIdx = meshes.map((m) => new Int32Array(m.count).fill(-1))
+  for (let k = 0; k < used; k++) revIdx[vari[k]][slot[k]] = k
+  const meshIdx = new Map(meshes.map((m, i) => [m.name, i]))
+
   return {
     group,
+    // Back-compat + the spine's published shape: `mesh` is the first body mesh
+    // and `meshes` is every body, the way buildCrowd publishes them.
+    mesh: meshes[0],
+    meshes,
+    pads,
+    detail,
     count: used,
+
+    /**
+     * The shared crowd audit, over lily pads instead of bleacher steps.
+     * -> { ok, count, checked, worstGap, bad, unwritten, species, pads }
+     * `bad: []` means every frog is on its own pad and no instance in any of
+     * this stand's four meshes was left at the identity matrix.
+     */
+    audit(o = {}) {
+      return auditCrowdInstances({
+        bodies: meshes,
+        meshes: [pads],
+        count: used,
+        supports: padSupports(),
+        tolerance: o.tolerance ?? 0.05,
+        // The pad bobs +/-0.045 and the frog rides it; a hop adds a little
+        // more. Anything past this is a frog that is not on a pad at all.
+        lift: 0.14,
+        sink: 0.12,
+        zPad: 0.02,
+        skip: (k, name) => {
+          const v = meshIdx.get(name)
+          if (v == null) return false
+          const i = revIdx[v][k]
+          return i < 0 ? false : diving.has(i)   // mid-dive is not mid-air
+        },
+        extra: { species: 'frog', pads: used, detail },
+      })
+    },
 
     update(dt) {
       time += dt
@@ -2646,6 +2754,8 @@ class LiquiditySwampArena extends ArenaBase {
     this._geysers = []
     this._floaties = []      // { obj, baseY, ph, w, rot }
     this._croakTimer = 4 + this._rng() * 4
+    this._frogs = null
+    this._crowds = []        // the game-wide crowd handle (see _buildCrowd)
     this._contactProps = 0   // nodes tagged userData.contactShadow (defect 1)
     this._slippageAnnounced = false
 
@@ -3160,9 +3270,20 @@ class LiquiditySwampArena extends ArenaBase {
 
   _buildCrowd() {
     const count = Math.max(12, Math.floor(this.quality.crowd ?? 60))
-    this._frogs = buildFrogCrowd({ count, rng: this._rng })
+    // v3.8 (defect 3, item 4). The congregation is ONE instanced stand spread
+    // over three zones, so it gets ONE tier, and the tier has to be honest
+    // about its NEAREST seat rather than its average one: the zone table seats
+    // nobody closer than 11.2 m from the dock centre (z <= -9.2 at the back,
+    // |x| >= 11.2 at the flanks), which is the 10-18 m band -> 'medium'.
+    // Same silhouette, ~40 % fewer triangles across 60 frogs and 60 pads.
+    const detail = crowdDetailForDistance(11.2)
+    this._frogs = buildFrogCrowd({ count, rng: this._rng, detail })
     this.group.add(this._frogs.group)
     this.addUpdater((dt) => this._frogs.update(dt))
+    // The handle every crowd sweep looks for. This arena published its stand
+    // as `_frogs` only, which is why four rounds of audits reported it as
+    // having no crowd at all.
+    this._crowds = [this._frogs]
 
     // ambient croaking, on a lazy random timer
     this.addUpdater((dt) => {

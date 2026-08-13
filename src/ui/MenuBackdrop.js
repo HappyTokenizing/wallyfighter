@@ -221,6 +221,13 @@ let _instance = null
 
 export function getBackdrop(game) {
   if (!_instance) _instance = new MenuBackdrop(game)
+  // A verifier cannot measure the hero shot's grounding from a screenshot — a
+  // 6 mm disc plane and a 44 cm one both look like "a disc under him" at menu
+  // framing, which is how defect 6 survived four rounds. `groundReport()` is
+  // the number itself; publish the instance so it is reachable without a
+  // module handle. Read-only, additive, and it holds nothing alive that
+  // `_instance` was not already holding.
+  try { globalThis.__menuBackdrop = _instance } catch { /* frozen global */ }
   return _instance
 }
 
@@ -279,6 +286,63 @@ function moteTexture() {
   const t = new THREE.CanvasTexture(c)
   t.colorSpace = THREE.SRGBColorSpace
   return t
+}
+
+// ---------------------------------------------------------------------------
+// THE SOLE-BONE LADDER — the menu's half of the round-13 grounding fix.
+//
+// lighting.js's discoverFeet() takes `{ boneName: Object3D }` and ranks the
+// keys; handed NO bone map it falls back to a purely GEOMETRIC probe (the two
+// lowest meshes in the subject's local space, clustered laterally), and on
+// WALLY that picks `merged-0` and `tailSeg3` and probes a sole ~43 cm above his
+// actual feet. Every downstream number is then correct about the wrong height:
+// the disc plane re-bases upward, the crevice term paints on his shins, and the
+// pool floats — the 43.8-45.9 cm the critic measured in the match path and the
+// same defect on the hero shot here.
+//
+// MatchScreen fixed the match path by handing over a FILTERED map (the best-
+// ranked node per side) rather than the whole bone map. This is the same ladder
+// and the same filter, mirrored — the menu builds its own Wally through
+// WallyDef.buildModel() and therefore inherits nothing from MatchScreen.
+//
+// MEASURED (headless, three r166, WallyDef.buildModel(0) at plinth top 1.166):
+//   bone keys      hips,tail,tail2,tail3,legL,legR,torso,armL,armR,forearmL,
+//                  forearmR,head,earL,earR,trunk,trunk2,trunk3
+//   -> no shin/foot/ankle rung in this roster, so legL/legR (rank 1) resolve,
+//      and localContactPoint()'s bottom-SOLE_BAND measurement on those two
+//      subtrees returns soleY 1.1660 / 1.1660 — i.e. EXACTLY the plinth cap.
+// ---------------------------------------------------------------------------
+const FOOT_BONE_RANK = [
+  [/^(foot|toe|sole|paw|hoof|shoe|boot)/i, 3],
+  [/^(ankle)/i, 3],
+  [/^(shin|calf)/i, 2],
+  [/^(leg|thigh)/i, 1],
+]
+
+/**
+ * The sole-bearing bone per side, in the shape discoverFeet() wants. Returns
+ * null when the rig exposes no such bone at all, which is the caller's cue to
+ * say so out loud and let the geometric probe have it deliberately rather than
+ * by accident. Original key names are kept so the rig's own diagnostics
+ * (`feetVia`, `rank`, `nodeName`) stay truthful about which rung resolved.
+ */
+function soleBoneMap(bones) {
+  if (!bones) return null
+  const out = {}
+  let n = 0
+  for (const side of ['L', 'R']) {
+    let bestKey = null
+    let bestRank = 0
+    for (const k of Object.keys(bones)) {
+      if (!k.endsWith(side) || !bones[k]) continue
+      for (let i = 0; i < FOOT_BONE_RANK.length; i++) {
+        const rank = FOOT_BONE_RANK[i][1]
+        if (rank > bestRank && FOOT_BONE_RANK[i][0].test(k)) { bestKey = k; bestRank = rank }
+      }
+    }
+    if (bestKey) { out[bestKey] = bones[bestKey]; n++ }
+  }
+  return n ? out : null
 }
 
 // ---------------------------------------------------------------------------
@@ -1387,14 +1451,91 @@ class MenuBackdrop {
       earRRZ: B.earR ? B.earR.rotation.z : 0,
     }
 
+    // -----------------------------------------------------------------------
     // Register him as the rig's subject: fresnel separation rim on his own
-    // materials, castShadow on every mesh, and the contact pool. His feet are
-    // 1.17 m up on the plinth, so the pool is suppressed and the plinth's own
-    // prop disc does the grounding instead.
+    // materials, castShadow on every mesh, and the contact set.
+    //
+    // ROUND 14, DEFECT 6 — THE HERO SHOT WAS THE LEAST-GROUNDED FRAME IN THE
+    // GAME, and this block is why. It used to stop after the rim and the
+    // castShadow traverse, on the reasoning that "his feet are 1.17 m up on the
+    // plinth, so the pool is suppressed and the plinth's own prop disc does the
+    // grounding instead". That reasoning describes a DIFFERENT object: the
+    // plinth's prop disc grounds THE PLINTH against the floor, 1.17 m below and
+    // 2.34 m wide. Nothing at all was resolving the junction between Wally's
+    // soles and the cap he is standing on — no pool, no crevice term, no
+    // occlusion of any kind — on the one frame the title screen, the main menu
+    // and every menu behind the buttons all render. A subject with no contact
+    // set does not read as "cleanly lit"; it reads as pasted on.
+    //
+    // The fix is the MatchScreen fix, applied to a raised deck:
+    //   1. a real bone map (see soleBoneMap) so the sole probe is the legs, not
+    //      `merged-0` + `tailSeg3` — this is the whole difference between a
+    //      disc at the cap and a disc ~44 cm above it;
+    //   2. `groundY: plinthTop`, because the surface he stands on is the plinth
+    //      cap, not the rig's nominal groundY of 0. This is the option
+    //      lighting.js documents for exactly this case
+    //      ("plinth.userData.contactShadow = { groundY: 0.35 }  // it stands on
+    //      a step"). It also becomes `groundBase`, the hard clamp a runtime
+    //      re-base may never go below, so the 2.2 cm his idle weight-shift dips
+    //      the soles cannot drag the plane down into the marble.
+    //
+    // WHY THIS IS NOT THE "RAISED PLATFORM" SLOW PATH. Handed groundY 0 the
+    // disc would need HOLD_FRAMES (40) of a rock-steady sole probe more than
+    // FLOOR_BAND (20 cm) up before lighting.js would believe a 1.17 m deck is a
+    // floor — 0.67 s of a visibly floating hero, every time the menu is built.
+    // Authored ground makes it right on frame one.
+    //
+    // MEASURED FLOAT (analytic, from lighting.js's own placement arithmetic and
+    // the headless sole probe above):
+    //   sole probe      1.1660 m   (legL/legR, both sides)
+    //   plinth cap top  1.1660 m   (roundedBox 2.34 x 0.028 centred at 1.152)
+    //   floorY          1.1660 m   -> probe = max(soleMin, groundBase), and the
+    //                                 low-water window's minimum over the idle
+    //                                 is the rest pose itself
+    //   pool plane      floorY + 0.006 = 1.1720 m  ->  6.0 mm
+    //   crevice plane   floorY + 0.008 = 1.1740 m  ->  8.0 mm
+    // i.e. 0.6 cm / 0.8 cm against a 2 cm target, and 0 cm of it is the old
+    // 44 cm. `deckY` cannot lift it further: surfaceTopAt() only raycasts
+    // floorMeshList(), whose members must have their box top within GR_EPS of
+    // the rig's groundY (0), so the cap is not a candidate and deckY === floorY.
+    //
+    // SIZING — 0.60 m, not the 0.78 m default ((contactRadius 0.82) x 0.95).
+    // The cap is 2.34 m square and the disc is elliptical 1:1, so 0.78 would put
+    // the pool's dying tail within 30 cm of the cap's edge, where the marble
+    // rolls over its rim and the multiply lands on a lit chamfer instead of on
+    // flat stone. 0.60 keeps the whole ramp on the flat and still reads as wide
+    // as his stance (soles at z +/-0.145, footprint ~0.4 m).
+    //
+    // DENSITY is left to the rig's own `contactOpacity: 0.5` — already the
+    // lowest in the build (arenas run 0.68) and deliberately so: this frame's
+    // one measured win is that "a specular lobe actually describes a form" here,
+    // at median ~70 with 0.000 % clipped and pureBlack 0, and a pool is a
+    // MULTIPLIER on the floor's radiance. 0.5 costs the cap under him half its
+    // light and nothing outside the ramp; it cannot touch the walls, the door,
+    // the coin or Wally's own shading, none of which are receivers of it.
+    //
+    // ORDER: the castShadow traverse stays and runs FIRST. addContactShadow()'s
+    // own seatCasters() deliberately leaves transparent and non-normal-blended
+    // meshes alone (his lenses, any additive card), so calling it after a
+    // blanket force is a strict no-op for shadows and the hero's silhouette in
+    // the shadow map is bit-for-bit what round 11 tuned. rimShader.apply() is
+    // documented idempotent, so the double call cannot double the rim either.
+    // -----------------------------------------------------------------------
     if (this.rig) {
       try {
         if (this.rig.rimShader) this.rig.rimShader.apply(model)
         model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) o.castShadow = true })
+        if (typeof this.rig.addContactShadow === 'function') {
+          const bones = soleBoneMap(this.wallyBones)
+          if (!bones) {
+            // A statement about which path is running, not a warning about a
+            // broken rig — the thing that was silently true here until now.
+            console.warn('[menuBackdrop] contact shadows: no foot/shin/leg bone on the menu subject — falling back to the geometric sole probe')
+          }
+          const opts = { radius: 0.60, groundY: this.plinthTop ?? 1.166 }
+          if (bones) opts.bones = bones
+          this._wallyContact = this.rig.addContactShadow(model, opts) || null
+        }
       } catch (e) { console.warn('[menuBackdrop] rig subject registration failed', e) }
     }
 
@@ -1919,6 +2060,75 @@ class MenuBackdrop {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // groundReport() — DEFECT 6, AS NUMBERS.
+  //
+  // "Is the hero grounded?" is not answerable from a screenshot at menu framing
+  // and that is why it survived four rounds. This returns, in metres:
+  //
+  //   plinthTop        the surface he is authored to stand on
+  //   soleY            lighting.js's own resolved sole (per foot)
+  //   poolY / footY    where the decals actually got placed this frame
+  //   poolFloat        poolY - plinthTop      <- THE NUMBER. target < 0.02
+  //   footFloat        footY - plinthTop      <- same, for the crevice term
+  //   soleFloat        soleY - plinthTop      <- 0 means the model itself is
+  //                                             seated; non-zero here is a
+  //                                             character bug, not a lighting one
+  //   via / rank       which bone rung discovered the sole, so a silent fall
+  //                    back to the geometric probe is visible rather than
+  //                    inferred ('bones' + rank 1 = legL/legR, as designed)
+  //
+  // Everything comes from rig.debugContacts(false), which re-runs the real
+  // placement pass first — so these are the same numbers the frame drew, not a
+  // parallel calculation that could agree with the code and disagree with the
+  // pixels.
+  // -------------------------------------------------------------------------
+  groundReport(log = false) {
+    const top = this.plinthTop ?? 1.166
+    const out = { plinthTop: top, registered: !!this._wallyContact, subject: null }
+    let info = null
+    try { info = this.rig?.debugContacts?.(false) || null } catch (e) { out.error = String(e) }
+    if (!info) { out.error = out.error || 'no rig / debugContacts unavailable'; return out }
+    out.poolEnabled = info.poolEnabled
+    out.feetEnabled = info.feetEnabled
+    const s = (info.fighters || []).find((f) => f.kind === 'subject' && f.name === 'menuWally')
+    if (!s) { out.error = 'menuWally is not registered as a rig subject'; return out }
+    const r6 = (v) => (Number.isFinite(v) ? Math.round(v * 1e4) / 1e4 : null)
+    out.subject = {
+      groundY: r6(s.groundY),
+      groundBase: r6(s.groundBase),
+      groundRebases: s.groundRebases,
+      groundVetoes: s.groundVetoes,
+      resolvedFloorY: r6(s.resolvedFloorY),
+      soleHeightAboveFloor: r6(s.soleHeightAboveFloor),
+      pool: {
+        visible: s.pool.visible,
+        y: r6(s.pool.y),
+        poolFloat: r6(s.pool.y - top),
+        alpha: r6(s.pool.alpha),
+        worldRadius: r6(s.pool.worldRadius),
+      },
+      feet: (s.feet || []).map((f) => ({
+        node: f.node, via: f.via, rank: f.rank,
+        visible: f.visible,
+        soleY: r6(f.soleY),
+        soleFloat: r6(f.soleY - top),
+        y: r6(f.y),
+        footFloat: r6(f.y - top),
+        alpha: r6(f.alpha),
+        worldRadius: r6(f.worldRadius),
+      })),
+    }
+    // The single pass/fail, so a verifier never has to decide which of nine
+    // numbers is the one under test.
+    const floats = [out.subject.pool.poolFloat, ...out.subject.feet.map((f) => f.footFloat)]
+      .filter((v) => Number.isFinite(v))
+    out.maxFloat = floats.length ? Math.max(...floats.map(Math.abs)) : null
+    out.pass = out.maxFloat != null && out.maxFloat < 0.02
+    if (log) console.log('[menuBackdrop] groundReport', JSON.stringify(out, null, 2))
+    return out
+  }
+
   /** Not used today — the singleton lives for the session — but symmetrical. */
   dispose() {
     removeEventListener('resize', this._onResize)
@@ -1929,6 +2139,10 @@ class MenuBackdrop {
     try { this.rig?.dispose() } catch { /* already gone */ }
     this.shaftMat?.dispose()
     if (this.motes) { this.motes.geometry.dispose(); this.motes.material.map?.dispose(); this.motes.material.dispose() }
+    // rig.dispose() already released the contact decals; drop our handle so a
+    // disposed backdrop cannot report a stale grounding number.
+    this._wallyContact = null
+    try { if (globalThis.__menuBackdrop === this) globalThis.__menuBackdrop = null } catch { /* frozen global */ }
     _instance = null
   }
 }

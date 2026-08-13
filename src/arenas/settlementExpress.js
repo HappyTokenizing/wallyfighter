@@ -133,6 +133,9 @@ const SPARK_COL = 0xfff0c0  // hero accent — rail sparks
 // The tunnel's own fog: a warm sodium-lit murk. Deliberately NOT black — a
 // black fog is what turned a fifth of the round-2 hero frame into dead pixels.
 const TUNNEL_FOG = new THREE.Color(0x3a2a22)
+// Hoisted so _updateTunnel's per-frame deck-pool cross-fade allocates nothing.
+const POOL_DAY = new THREE.Color(0xffc188)
+const POOL_TUNNEL = new THREE.Color(SODIUM)
 
 // ---------------------------------------------------------------------------
 // LOCAL RENDER TOOLKIT
@@ -411,10 +414,21 @@ function makeBallastSurface(rng) {
 // budget. Panel seams, the raised centre walkway and every rivet are height,
 // not paint: the low key sweeping across the deck is what sells them.
 function makeRoofSurface(rng) {
+  // ROUND 13 — ALBEDO LIFT. The deck is the largest area in the frame AND the
+  // whole of the bottom third, and it is measured at 40.05 % below L=8 with
+  // this group owning 87.1 % of that mass. Inside the tunnel the rig collapses
+  // to sun x0.10 / hemi x0.42 / fill x0.55, so essentially all of the deck's
+  // light is the INDIRECT term — and an indirect term is multiplied by the
+  // albedo AND by the AO map before anything else touches it. 0x6a6058 (linear
+  // .144) was authored against the DAYLIGHT rig; under the collapsed one it is
+  // a stop and a half short. +14 sRGB counts on the base and the walkway keeps
+  // every bit of the grime story (the rust, tread and oil passes below are
+  // unchanged and still ride on top) and moves the deck off the floor of the
+  // histogram in the frame where it actually lands there.
   const paint = (c, N) => {
-    c.fillStyle = '#6a6058'
+    c.fillStyle = '#786c60'
     c.fillRect(0, 0, N, N)
-    c.fillStyle = '#7e7264'
+    c.fillStyle = '#8d8172'
     c.fillRect(0, N * 0.34, N, N * 0.32)
     for (let i = 0; i < 34; i++) { // rain streaks + soot, low contrast
       c.fillStyle = rng() < 0.5 ? 'rgba(96,74,50,0.14)' : 'rgba(46,40,34,0.12)'
@@ -480,10 +494,18 @@ function makeRoofSurface(rng) {
   // at ~0.78 and stay matte. That contrast is the specular lobe the round-2
   // critic could not find anywhere in the frame — and it describes the deck's
   // form, because the highlight rides the raised centre walkway.
+  // ROUND 13 — aoStrength 1.05 -> 0.70. AO multiplies the INDIRECT term only,
+  // and inside the tunnel the indirect term is very nearly the deck's entire
+  // light budget (see the collapse in _updateTunnel). An AO field authored past
+  // 1.0 was therefore not "contact darkening on a lit deck", it was a 100 %
+  // occluder on the only source the deck had, applied across the panel-seam
+  // grid that tiles the WHOLE surface 6x2 times. The relief still reads — the
+  // normal map is untouched at 1.85 and the roughness break is untouched — but
+  // the seams stop being holes.
   return surfaceSet(256, paint, carve, {
     repeat: [6, 2], normalStrength: 1.85,
     rough: 0.52, roughContrast: 0.5, roughInvert: true,
-    aoRadius: 4, aoStrength: 1.05,
+    aoRadius: 4, aoStrength: 0.70,
   })
 }
 
@@ -1928,6 +1950,26 @@ class SettlementExpressArena extends ArenaBase {
       metalness: 0.10,
     })
     applyNS(roofTop, 1.3)
+    // ROUND 13 — THE MULTIPLE-SCATTERING FLOOR ON THE DECK.
+    //
+    // Same stand-in the tunnel crown beams already use (beamMat, _buildTunnel),
+    // and for the same reason: a real deck inside a real tunnel is lit by light
+    // that has bounced off the vault, the walls and the cess two or three times,
+    // and a rasteriser with one PMREM probe baked from the DAYLIGHT sky has no
+    // term for that at all. The emissive map is the deck's OWN albedo map, so
+    // the floor carries the deck's colour, its seams and its walkway break
+    // instead of flattening them the way a flat emissive colour would.
+    //
+    // It cannot bloom and it cannot clip: 0.144 linear albedo x 0.11 = 0.016
+    // linear against a bloom threshold of 1.10 (Pipeline.js:1781), i.e. two
+    // orders of magnitude clear. Driven by the tunnel ramp in _updateTunnel —
+    // 0.028 in daylight (a whisper, so the golden-hour read is untouched), 0.11
+    // at full tunnel, which is where the measured black mass is.
+    roofTop.emissiveMap = roofSurf.map
+    roofTop.emissive.setHex(0xffffff)
+    roofTop.emissiveIntensity = 0.028
+    // AO on the deck is a crevice cue, not a light budget — see makeRoofSurface.
+    roofTop.aoMapIntensity = 0.75
     this._roofMat = roofTop
     // The five NON-top faces of the same box: the 35 cm fascia band that runs
     // under the deck edge, and it sits in the same bottom tile row as the deck.
@@ -1936,8 +1978,20 @@ class SettlementExpressArena extends ArenaBase {
     // from the raking key, so it had nothing but the environment. It is not the
     // frame's black anchor (that is `dark` at 0x1e232a, twenty lines up, and it
     // stays exactly as authored) — it is a painted car side, so 0.18.
-    const roofSide = flatMat(0x473d35, {
-      surface: 'metal-rough', shared: true, metalness: 0.18,
+    //
+    // ROUND 13. The metalness fix landed and the fascia is still on the floor,
+    // because metalness was only half of it: 0x473d35 is linear 0.065, it is a
+    // VERTICAL face so the hemisphere gives it the sky/ground average rather
+    // than the sky, and it faces away from the one raking key — so inside the
+    // tunnel it has the flat ambient and almost nothing else. This material is
+    // also every background car roof in the train (bagRoof, cabRoof, cabRoof2,
+    // cupolaRoof, partyRoof), all of which sit in the same measured band.
+    // 0x473d35 -> 0x685a4c (linear .065 -> .146), metalness 0.18 -> 0.06, and
+    // the same scattering floor the deck gets. It is STILL not the frame's
+    // black anchor — that is `dark` at 0x1e232a, twenty lines up, untouched.
+    const roofSide = flatMat(0x685a4c, {
+      surface: 'metal-rough', shared: true, metalness: 0.06,
+      emissive: 0x15110d, emissiveIntensity: 0.6,
     })
     const roof = new THREE.Mesh(new GEO.BoxGeometry(21.6, 0.35, 6.8), [roofSide, roofSide, roofTop, roofSide, roofSide, roofSide])
     roof.name = 'roof'
@@ -3274,10 +3328,24 @@ class SettlementExpressArena extends ArenaBase {
     if (this._roofMat) {
       this._roofMat.roughness = 1 - 0.58 * f
       this._roofMat.envMapIntensity = 1.15 + 0.85 * f
+      // ROUND 13 — the deck's multiple-scattering floor ramps WITH the collapse,
+      // because that is when the direct terms it stands in for go away. See the
+      // emissiveMap wiring in _buildOurCar. 0.144 linear albedo x 0.11 = 0.016
+      // linear at the top of the ramp; the bloom threshold is 1.10.
+      this._roofMat.emissiveIntensity = 0.028 + 0.082 * f
     }
     if (this._wetWalkMat) this._wetWalkMat.opacity = 0.97 * f
-    // the daylight pool cross-fades out; the lamps take over the job
-    if (this._deckPoolMat) this._deckPoolMat.opacity = 0.12 * (1 - f)
+    // The daylight pool hands over to the lamps — but it used to hand over to
+    // NOTHING for the 43 % of the round the train is inside the tunnel: the
+    // one additive lift sitting on the fighting plane went to zero at exactly
+    // the moment the rig collapsed, which is a large part of why the bottom
+    // third measures 40 % below L=8. It now keeps a floor and its colour walks
+    // from golden-hour to sodium, so the handover is a hue change rather than a
+    // deletion. Still additive, still soft-edged, still 3 cm above the deck.
+    if (this._deckPoolMat) {
+      this._deckPoolMat.opacity = 0.12 * (1 - f) + 0.095 * f
+      this._deckPoolMat.color.copy(POOL_DAY).lerp(POOL_TUNNEL, f * 0.75)
+    }
     const fog = this.scene?.fog
     if (fog && this._fogBase) {
       // fog goes to a warm sodium-lit murk, not to black: a black fog is what

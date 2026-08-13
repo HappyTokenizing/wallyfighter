@@ -1003,17 +1003,128 @@ const RIM_UNIFORMS = {
 // coherent across the whole warp, so it is free when it is off. The fighters
 // are ~2 % of the shaded pixels in a match frame.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// ROUND 14 — WHY THE ROUND-13 VERSION OF THIS MEASURED AS "COMPLETELY
+// UNTOUCHED", WITH THE TWO NUMBERS THAT PROVE IT.
+//
+// The mechanism above shipped and was correct. It could not fire, for two
+// independent arithmetic reasons, and both are about WHERE the zone was parked
+// (the midpoint of the two rig ROOTS, i.e. the hips) and WHAT distance drove it
+// (the horizontal gap between those roots):
+//
+//   1. THE RAMP'S FULL-STRENGTH POINT WAS BELOW THE ENGINE'S HARD FLOOR.
+//      `MatchScreen._pushApart` holds two grounded fighters at
+//      `minDist = 0.85` m root-to-root and physically cannot let them closer.
+//      CO_NEAR was 0.60 and CO_FAR 1.20, so the deepest clinch in the game
+//      evaluated at t = 1 - (0.85 - 0.60)/(1.20 - 0.60) = 0.583 of an authored
+//      strength of 0.40 — a PEAK attenuation of 23 %, and that only at the exact
+//      centre of the sphere with a perfectly facing normal. The acceptance is
+//      "darkest contact pixel at most 60 % of the adjacent body luma"; 23 % at
+//      the very best pixel is 0.77, and every other pixel is worse.
+//
+//   2. ON A LANDED HEAVY IT WAS SWITCHED OFF ENTIRELY. A hit registers out to
+//      `reach = hitbox.forward + hitbox.w * 0.5 + victim.radius()`, which is
+//      ~1.9 m root-to-root for a typical heavy. CO_FAR was 1.20 m. So on the
+//      exact frames the critic is photographing — fist buried in a face — the
+//      hips are past the cutoff and the term is exactly 0. Worse, even inside
+//      the cutoff the zone sat at the HIP midpoint, which on a landed punch is
+//      a metre of empty air away from the actual contact.
+//
+// Both failures share one cause: ROOT-TO-ROOT DISTANCE IS NOT CONTACT. Two
+// bodies touch at a fist, a shoulder, a shin, a shell — never at the midpoint
+// of their pelvises. So the zone is now placed from a LIMB PROXY SET: a handful
+// of the subject's own meshes, chosen once at registration by farthest-point
+// sampling in its rest pose (which by construction picks the extremities —
+// fists, head, feet, tail tip — because those are what is far from everything
+// else), each with the radius of its own bounding sphere. Per frame we take the
+// closest CROSS pair between the two sets and measure the SURFACE gap,
+// |pi - pj| - ri - rj. That number is ~0 when two bodies touch and negative
+// when they interpenetrate, regardless of where the hips are, which is the
+// quantity the term always wanted.
+//
+// TWO ZONES, NOT ONE. A clinch touches in two places (gloves high, hips or
+// shins low) and a single sphere makes that read as one dot. The second zone is
+// the best remaining pair at least CO_SEP from the first, so it can never be
+// the same contact counted twice. Two spheres is ~14 extra ALU behind the same
+// uniform branch.
+//
+// Cost is unchanged in kind: 2 x 10 matrix-transformed points and 100 squared
+// distances on the CPU (microseconds), one extra vec4 uniform, and a fragment
+// block that is still behind a branch that is false on every frame where the
+// fighters are apart.
+// ---------------------------------------------------------------------------
+// ROUND 15 — THE ROUND-14 NOTE ABOVE DESCRIBES CODE THAT WAS NEVER WRITTEN.
+//
+// Read it as a design document, not as a changelog. What actually shipped in
+// round 14 was: this comment, `uProxZone2`, `uProxParams.w` and the
+// `wcsProxTerm` helper. What did NOT ship was any of the behaviour:
+//
+//   - `updateContactOcclusion()` still measured the HORIZONTAL DISTANCE BETWEEN
+//     THE TWO RIG ROOTS and ramped it over 0.60-1.20 m — the exact arithmetic
+//     the note itself proves cannot fire.
+//   - There was no limb proxy set anywhere in the file.
+//   - `PROX_BODY` called neither `wcsProxTerm` nor `uProxZone2`, so the helper
+//     was dead code the GLSL compiler stripped and the second zone never
+//     existed. (That is also why the never-bound `uProxZone2` uniform never
+//     produced a link error: nothing referenced it after dead-code removal.)
+//   - `uProxParams.y` was documented as 0.08 and then overwritten with 0.20 by
+//     the update function on every frame.
+//
+// AND THE MODULE DID NOT PARSE. The `wcsProxTerm` doc comment inside PROX_PARS
+// contained a BACKTICK-quoted identifier, which terminates the JS template
+// literal it lives in. `node --check src/render/lighting.js` failed at HEAD, so
+// no build since round 14 could have included any of this file. If you are
+// about to write a doc comment inside a /* glsl */ template literal: no
+// backticks.
+//
+// The behaviour is implemented now — see LIMB PROXIES and THE CONTACT ZONE. If
+// a future round measures this term as absent again, check `node --check`
+// first, then `rig.contactOcclusion()` for `pairs` and `limbs`, and only then
+// the tuning.
+// ---------------------------------------------------------------------------
 const PROX_UNIFORMS = {
-  // xyz = WORLD centre of the contact zone, w = radius (m).
+  // xyz = WORLD centre of contact zone A, w = radius (m).
   uProxZone: { value: new THREE.Vector4(0, -9999, 0, 0.5) },
-  // x = strength (0 disables the entire block), y = inner-plateau fraction of
-  // the radius, z = how much of the normal-facing mask to apply, w = reserved.
-  uProxParams: { value: new THREE.Vector4(0, 0.2, 0.7, 0) },
+  // The second seam of the same contact. w = 0 (or uProxParams.w = 0) disables
+  // it, which is the normal state for a single-point strike.
+  uProxZone2: { value: new THREE.Vector4(0, -9999, 0, 0) },
+  // x = strength of zone A (0 disables the entire block), y = inner-plateau
+  // fraction of the radius, z = how much of the normal-facing mask to apply,
+  // w = strength of zone B.
+  uProxParams: { value: new THREE.Vector4(0, 0.08, 0.78, 0) },
 }
 
 const PROX_PARS = /* glsl */`
 uniform vec4 uProxZone;    // xyz = world centre, w = radius
-uniform vec4 uProxParams;  // x = strength, y = inner plateau, z = facing mix
+uniform vec4 uProxZone2;   // second seam; w = 0 when there is only one
+uniform vec4 uProxParams;  // x = strength A, y = inner plateau, z = facing mix, w = strength B
+
+// One contact sphere, evaluated in VIEW space. Returns the fraction of this
+// fragment's outgoing light the crevice takes away, before the two zones are
+// combined. viewMatrix comes from three's own fragment prefix, which is
+// (NOTE: no backticks in this comment. It lives inside a JS template literal,
+// and a backtick here terminates PROX_PARS mid-string — which is exactly what
+// shipped in round 14 and made the whole module fail to parse.)
+// prepended ahead of this text — see the note over PROX_BODY for why the zone
+// is handed over in world space rather than pre-transformed on the CPU.
+float wcsProxTerm( vec4 zone, float s, vec3 fragView, vec3 nrm, float plateau, float facing ) {
+	if ( s <= 0.0001 || zone.w <= 0.0001 ) return 0.0;
+	vec3 pxC = ( viewMatrix * vec4( zone.xyz, 1.0 ) ).xyz;
+	vec3 pxD = pxC - fragView;
+	float pxLen = length( pxD );
+	float pxW = 1.0 - smoothstep( zone.w * plateau, zone.w, pxLen );
+	if ( pxW <= 0.0001 ) return 0.0;
+	float pxF = clamp( dot( nrm, pxD / max( pxLen, 1e-4 ) ), 0.0, 1.0 );
+	pxF = mix( 1.0, pxF, facing );
+	// Squared falloff: contact occlusion is short-range or it is a fog ball.
+	// ROUND 14 also drops the plateau from 0.20 to 0.08 of the radius. The
+	// acceptance is a RATIO between the darkest contact pixel and the body
+	// luma next to it, so what is being graded is the GRADIENT, not the depth:
+	// at plateau 0.20 and radius 0.30 a pixel 10 cm out of the seam still
+	// carried 86 % of peak, and 0.22/0.33 = 0.66 fails a test that 0.22/0.57
+	// passes with room. Same peak, steeper shoulder.
+	return s * pxW * pxW * pxF;
+}
 `
 
 // The zone is handed over in WORLD space and folded into view space here rather
@@ -1028,23 +1139,145 @@ uniform vec4 uProxParams;  // x = strength, y = inner plateau, z = facing mix
 // exact tell that separates "shaded contact" from "sticker".
 const PROX_BODY = /* glsl */`
 {
-  float pxS = uProxParams.x;
-  if ( pxS > 0.0001 && uProxZone.w > 0.0001 ) {
+  // ROUND 15: BOTH zones are evaluated here. Round 14 authored wcsProxTerm and
+  // uProxZone2 and then left the body calling neither — the helper was dead
+  // code the compiler stripped, which is also why the never-bound uProxZone2
+  // uniform never produced a link error and nobody noticed the second seam had
+  // never shipped. One uniform branch still covers the whole block.
+  if ( uProxParams.x > 0.0001 || uProxParams.w > 0.0001 ) {
     vec3 pxFrag = -vViewPosition;
-    vec3 pxC = ( viewMatrix * vec4( uProxZone.xyz, 1.0 ) ).xyz;
-    vec3 pxD = pxC - pxFrag;
-    float pxLen = length( pxD );
-    float pxW = 1.0 - smoothstep( uProxZone.w * uProxParams.y, uProxZone.w, pxLen );
-    if ( pxW > 0.0001 ) {
-      vec3 pxN = normalize( normal );
-      float pxF = clamp( dot( pxN, pxD / max( pxLen, 1e-4 ) ), 0.0, 1.0 );
-      pxF = mix( 1.0, pxF, uProxParams.z );
-      // Squared falloff: contact occlusion is short-range or it is a fog ball.
-      outgoingLight *= 1.0 - clamp( pxS * pxW * pxW * pxF, 0.0, 0.9 );
-    }
+    vec3 pxN = normalize( normal );
+    float pxA = wcsProxTerm( uProxZone,  uProxParams.x, pxFrag, pxN, uProxParams.y, uProxParams.z );
+    float pxB = wcsProxTerm( uProxZone2, uProxParams.w, pxFrag, pxN, uProxParams.y, uProxParams.z );
+    // Union, not sum: two seams of the same clinch overlapping in the middle
+    // must not double-darken into a hole.
+    float pxOcc = 1.0 - ( 1.0 - pxA ) * ( 1.0 - pxB );
+    if ( pxOcc > 0.0001 ) outgoingLight *= 1.0 - clamp( pxOcc, 0.0, 0.9 );
   }
 }
 `
+
+// ---------------------------------------------------------------------------
+// SILHOUETTE POOL — ROUND 15, defect 2: "the shadows that did land carry no
+// shape... contrast-stretch the floor plate and you get a soft featureless
+// oval."
+//
+// WHY THE OVAL WINS THE HISTOGRAM, WHICH IS THE ACTUAL DEFECT. The real key
+// shadow IS reaching the floor: applyShadowSettings() runs from Game.js,
+// PCFSoftShadowMap is on, GROUND RECEIVERS forces receiveShadow on the fight
+// floor, seatCasters() forces castShadow on the fighters, and fitTo() keeps the
+// frustum at r = 4.5-7.5 m, i.e. 4.4-7.3 mm per texel at 2048 — a fighter's
+// shin is 25+ texels wide, so the silhouette is in the map at full fidelity.
+// What it is NOT is the DOMINANT floor cue. A directional shadow only removes
+// the KEY's share of the floor's irradiance (hemi + ambient + fill + env carry
+// the rest), while the contact pool multiplies the floor by up to 0.84 over a
+// 1.6 m circle. Contrast-stretch that plate and you normalise to the pool's
+// range: the pool is an isotropic radial ramp, so the stretch shows an oval and
+// the genuine silhouette survives as a ripple inside it. Deepening the real
+// shadow would only deepen a term that is already the weaker one, and raising
+// exposure is explicitly off the table.
+//
+// So the fix is to stop the strongest floor cue from being shapeless. The pool
+// is an AMBIENT OCCLUSION footprint, and the ambient occlusion a body casts on
+// the plane under it genuinely has the body's PLAN silhouette: strongest
+// directly beneath the mass, broader and weaker for mass that is further up.
+// The pool was a radial gradient only because nothing ever told it the shape of
+// the thing standing on it. The limb proxies now do.
+//
+// Each proxy becomes a soft disc in the quad's own local space:
+//   centre  = the proxy's plan position, leaned along the key by 0.18 x height
+//             so the pool agrees in direction with the real cast shadow instead
+//             of fighting it
+//   radius  = proxy radius + 0.55 x height above the deck  (penumbra spread)
+//   weight  = exp(-0.75 x height)                          (distance falloff)
+// The union of those discs MODULATES the existing radial ramp between
+// SIL_FLOOR and 1. Peak density under the body is unchanged — the ramp's centre
+// still hits the authored `opacity`, so the round-9 area figures and the foot
+// crevice term are untouched — but the floor OUTSIDE the body's own outline
+// drops to SIL_FLOOR of what it was, which is what turns the histogram's
+// dominant structure from an oval into a body.
+//
+// Cost: one varying, ten vec4 uniforms, and ten distance tests over a quad that
+// covers ~1.6 m of floor. No new draw call, no new material, no new texture.
+// The prop batch and the foot discs are deliberately NOT patched: a prop has no
+// limbs and a sole IS its own silhouette already.
+// ---------------------------------------------------------------------------
+const SIL_MAX = 10
+const SIL_FLOOR = 0.42
+
+const SIL_VERT_PARS = /* glsl */`
+varying vec2 vWcsSil;
+`
+// contactGeo is CircleGeometry(1) rotated flat, so `position.xz` IS the unit
+// disc coordinate — no uv plumbing, and correct regardless of which uv varying
+// this three version happens to name for the map.
+const SIL_VERT_BODY = /* glsl */`
+	vWcsSil = position.xz;
+`
+const SIL_FRAG_PARS = /* glsl */`
+varying vec2 vWcsSil;
+uniform vec4 uSil[ ${SIL_MAX} ];   // xy = local centre, z = local radius, w = weight
+uniform vec2 uSilParams;           // x = floor level (1 = disabled), y = coverage gain
+`
+// No `continue`: an unused slot carries w = 0 and z = 1, so its contribution is
+// exactly zero and the loop stays uniform across the warp.
+const SIL_FRAG_BODY = /* glsl */`
+{
+  if ( uSilParams.x < 0.999 ) {
+    float wcsCov = 0.0;
+    for ( int i = 0; i < ${SIL_MAX}; i ++ ) {
+      vec4 sb = uSil[ i ];
+      float sd = length( vWcsSil - sb.xy );
+      wcsCov = max( wcsCov, sb.w * ( 1.0 - smoothstep( sb.z * 0.30, sb.z, sd ) ) );
+    }
+    wcsCov = clamp( wcsCov * uSilParams.y, 0.0, 1.0 );
+    diffuseColor.a *= mix( uSilParams.x, 1.0, wcsCov );
+  }
+}
+`
+let silAnchorFailed = false
+
+/**
+ * Patch a subject's pool-decal material so its density is shaped by a set of
+ * projected body spheres. Returns the uniform block the rig writes each frame,
+ * or null if this three build has no anchor to splice onto (in which case the
+ * decal keeps its round-14 behaviour exactly).
+ */
+function patchSilhouette(mat) {
+  const value = []
+  for (let i = 0; i < SIL_MAX; i++) value.push(new THREE.Vector4(0, 0, 1, 0))
+  const u = {
+    uSil: { value },
+    // Starts DISABLED. A subject with no proxies yet must render the plain oval
+    // rather than a body-shaped hole in the wrong place.
+    uSilParams: { value: new THREE.Vector2(1, 1) },
+  }
+  const prev = typeof mat.onBeforeCompile === 'function' ? mat.onBeforeCompile : null
+  mat.onBeforeCompile = function (shader, renderer) {
+    if (prev) { try { prev.call(this, shader, renderer) } catch (e) { console.warn('[lighting] chained onBeforeCompile threw', e) } }
+    const fAnchor = shader.fragmentShader.includes('#include <opaque_fragment>')
+      ? '#include <opaque_fragment>'
+      : (shader.fragmentShader.includes('#include <output_fragment>') ? '#include <output_fragment>' : null)
+    const vAnchor = shader.vertexShader.includes('#include <begin_vertex>') ? '#include <begin_vertex>' : null
+    if (!fAnchor || !vAnchor) {
+      if (!silAnchorFailed) {
+        silAnchorFailed = true
+        console.warn('[lighting] silhouette pool: no splice anchor in this shader; the pool stays radial')
+      }
+      return
+    }
+    shader.uniforms.uSil = u.uSil
+    shader.uniforms.uSilParams = u.uSilParams
+    shader.vertexShader = SIL_VERT_PARS +
+      shader.vertexShader.replace(vAnchor, vAnchor + '\n' + SIL_VERT_BODY)
+    shader.fragmentShader = SIL_FRAG_PARS +
+      shader.fragmentShader.replace(fAnchor, SIL_FRAG_BODY + '\n' + fAnchor)
+  }
+  const prevKey = typeof mat.customProgramCacheKey === 'function' ? mat.customProgramCacheKey.bind(mat) : null
+  mat.customProgramCacheKey = () => (prevKey ? prevKey() : '') + '|wcsSil1'
+  mat.needsUpdate = true
+  return u
+}
 
 // Shared for exactly the same reason as RIM_UNIFORMS: the patch is permanent
 // per material, so whichever rig is rendering owns the values and pushes them
@@ -1172,6 +1405,7 @@ export function makeFresnelRim(o = {}) {
       shader.uniforms.uRimParams = uniforms.uRimParams
       shader.uniforms.uRimDirView = uniforms.uRimDirView
       shader.uniforms.uProxZone = PROX_UNIFORMS.uProxZone
+      shader.uniforms.uProxZone2 = PROX_UNIFORMS.uProxZone2
       shader.uniforms.uProxParams = PROX_UNIFORMS.uProxParams
       if (withSpec) {
         shader.uniforms.uSpecColor = spec.uSpecColor
@@ -2122,15 +2356,19 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     try { d.mat?.dispose?.() } catch { /* already gone */ }
   }
 
-  function makeDecal(tex, order) {
+  function makeDecal(tex, order, silhouette) {
     const mat = makeDecalMaterial(tex)
+    // Only the SUBJECT POOL gets the silhouette splice. Foot discs are already
+    // the shape of the thing casting them, and prop discs come from the shared
+    // instanced material (see THE PROP DISC BATCH) which must stay one program.
+    const sil = silhouette ? patchSilhouette(mat) : null
     const mesh = new THREE.Mesh(contactGeo, mat)
     mesh.name = 'contactShadow'
     mesh.renderOrder = order
     mesh.frustumCulled = false
     mesh.visible = false
     group.add(mesh)
-    return { mesh, mat }
+    return { mesh, mat, sil }
   }
 
   // -------------------------------------------------------------------------
@@ -2727,7 +2965,7 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     // BATCH); a subject's come from its own quad, because a subject's disc
     // moves, fades and rescales every frame and is one per fighter, not one
     // per set-dressing item.
-    const pool = o.prop ? makePropProxy() : makeDecal(contactTex, 2)
+    const pool = o.prop ? makePropProxy() : makeDecal(contactTex, 2, o.silhouette !== false)
     if (o.prop) {
       const slot = propSlotAlloc()
       if (slot < 0) {
@@ -2818,6 +3056,12 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
       rz: rzCalc,
       rotY: o.rotation ?? (target.rotation ? target.rotation.y : 0),
       mesh: pool.mesh, mat: pool.mat,            // legacy field names preserved
+      // Silhouette uniform block for this subject's pool (null for props, for
+      // foot discs, and on a three build with no splice anchor).
+      sil: pool.sil || null,
+      // Limb proxy set — see LIMB PROXIES. Seated on the first update and
+      // re-seated on the static-recheck cadence.
+      limbs: null,
       // The pool is now an ambient-occlusion cue, not a shadow: wide, and weak
       // enough that it can never out-darken the geometry standing on it or
       // hide the real cast shadow it sits under.
@@ -3732,6 +3976,18 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
           c.feetRetries++
           seatFeet(c)
         }
+        // Same registration race, same repair: a costume swap or a Gore detach
+        // changes the mesh set, and a proxy pointing at a destroyed node is a
+        // contact zone parked where the fighter used to be.
+        if (!c.limbs || !c.limbs.length || c.limbs.some((p) => !p.node.parent)) seatLimbProxies(c)
+      }
+      // Proxy world centres, once per subject per frame. Both consumers (the
+      // contact zones and the silhouette pool) read them, so this must run
+      // before either — and before the `c.static` early-out below, which
+      // subjects never take.
+      if (!c.prop && !c.static) {
+        if (!c.limbs) seatLimbProxies(c)
+        refreshLimbProxies(c)
       }
       // Static prop discs are placed once and then cost one visibility check
       // every STATIC_RECHECK_FRAMES frames — no matrix write, no box union.
@@ -4001,11 +4257,12 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         c.mesh.scale.set(s * c.rx, 1, s * c.rz)
         // Placement is computed in world space (that is where `wp` and groundY
         // live) and only then dropped into the rig's parent space.
-        wp.set(
-          c.ax + keyGround.x * h * 0.28,
-          deckY + 0.006,
-          c.az + keyGround.y * h * 0.28,
-        )
+        const poolWX = c.ax + keyGround.x * h * 0.28
+        const poolWZ = c.az + keyGround.y * h * 0.28
+        // Before toRigSpace(): it ADDS rigOffset into its argument in place, so
+        // anything that needs the world centre has to read it first.
+        uploadSilhouette(c, poolWX, poolWZ, deckY, t, s * c.rx, s * c.rz)
+        wp.set(poolWX, deckY + 0.006, poolWZ)
         c.mesh.position.copy(toRigSpace(wp))
       }
 
@@ -4050,45 +4307,281 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
   }
 
   // ---------------------------------------------------------------------------
+  // LIMB PROXIES — ROUND 15. One geometric summary of a body, two consumers.
+  //
+  // Round 14's header describes a limb-proxy set driving the contact zones. It
+  // was never written: `updateContactOcclusion()` below still measured the
+  // HORIZONTAL DISTANCE BETWEEN THE TWO RIG ROOTS and ramped it over 0.60-1.20
+  // m, which is exactly the arithmetic that round-14 note proves cannot fire
+  // (the engine's own `_pushApart` floors root separation at 0.85 m, and a
+  // landed heavy lands at ~1.9 m). So the term measured "completely untouched"
+  // for a third round because the CPU half of the fix was documented and not
+  // implemented. This is the implementation.
+  //
+  // A proxy is one of the subject's own meshes plus the radius of that mesh's
+  // bounding sphere. The characters in this roster are rigid hierarchies (no
+  // SkinnedMesh anywhere in src/characters), so a proxy's world centre tracks
+  // the animation for free — one matrix-transformed point per proxy per frame,
+  // no skinning read-back, no physics query.
+  //
+  // SELECTION: seed with the LARGEST part (the torso or shell) and then take
+  // farthest-point samples. Farthest-point sampling from a torso seed picks the
+  // extremities by construction — fists, feet, head, tail tip — which is both
+  // what makes CONTACT (defect 1) and what gives a floor shadow its SHAPE
+  // (defect 2). One set, one build, two defects.
+  //
+  // Cost: ~10 proxies per fighter, rebuilt only on the slow static-recheck
+  // cadence; per frame it is 20 mat4 * vec3 and 100 squared distances.
+  // ---------------------------------------------------------------------------
+  const LIMB_MAX = 10
+  const LIMB_MIN_R = 0.035
+  // Cap for the CONTACT test only. A torso's bounding sphere overestimates the
+  // body badly (it is a sphere around a box); letting a 0.45 m proxy claim
+  // contact would fire the term on two fighters merely standing at guard.
+  const LIMB_CONTACT_MAX_R = 0.24
+  const _lpV = new THREE.Vector3()
+  const _lpS = new THREE.Vector3()
+
+  function buildLimbProxies(target) {
+    const cand = []
+    try {
+      target.traverse((n) => {
+        if (!n.isMesh || n.isInstancedMesh || n.isPoints || n.isLine) return
+        if (n.visible === false) return
+        if (n.userData?.contactShadow || n.userData?.noShadow || n.userData?.noLimbProxy) return
+        const g = n.geometry
+        if (!g) return
+        if (!g.boundingSphere) { try { g.computeBoundingSphere() } catch { return } }
+        const bs = g.boundingSphere
+        if (!bs || !Number.isFinite(bs.radius) || bs.radius <= 0) return
+        _lpS.setFromMatrixScale(n.matrixWorld)
+        const r = bs.radius * Math.max(_lpS.x, _lpS.y, _lpS.z)
+        if (!(r >= LIMB_MIN_R)) return
+        _lpV.copy(bs.center).applyMatrix4(n.matrixWorld)
+        cand.push({
+          node: n,
+          local: bs.center.clone(),
+          r: Math.min(0.45, r),
+          rc: Math.min(LIMB_CONTACT_MAX_R, r),
+          wx: _lpV.x, wy: _lpV.y, wz: _lpV.z,
+          live: true,
+        })
+      })
+    } catch (e) { console.warn('[lighting] limb proxy build failed', e); return [] }
+    if (!cand.length) return []
+    let seed = 0
+    for (let i = 1; i < cand.length; i++) if (cand[i].r > cand[seed].r) seed = i
+    const out = [cand[seed]]
+    const want = Math.min(LIMB_MAX, cand.length)
+    if (want <= 1) return out
+    const d2 = new Float64Array(cand.length)
+    const sd = cand[seed]
+    for (let i = 0; i < cand.length; i++) {
+      const a = cand[i]
+      d2[i] = (a.wx - sd.wx) ** 2 + (a.wy - sd.wy) ** 2 + (a.wz - sd.wz) ** 2
+    }
+    d2[seed] = -1
+    while (out.length < want) {
+      let best = -1
+      for (let i = 0; i < cand.length; i++) {
+        if (d2[i] < 0) continue
+        if (best < 0 || d2[i] > d2[best]) best = i
+      }
+      // Everything left is a duplicate of something already chosen: stop rather
+      // than pad the set with congruent spheres.
+      if (best < 0 || d2[best] < 1e-6) break
+      const b = cand[best]
+      out.push(b)
+      d2[best] = -1
+      for (let i = 0; i < cand.length; i++) {
+        if (d2[i] < 0) continue
+        const a = cand[i]
+        const dd = (a.wx - b.wx) ** 2 + (a.wy - b.wy) ** 2 + (a.wz - b.wz) ** 2
+        if (dd < d2[i]) d2[i] = dd
+      }
+    }
+    return out
+  }
+
+  /** Re-read every live proxy's world centre. Returns how many are live. */
+  function refreshLimbProxies(c) {
+    const L = c.limbs
+    if (!L || !L.length) return 0
+    let n = 0
+    for (const p of L) {
+      if (!p.node.parent || p.node.visible === false) { p.live = false; continue }
+      _lpV.copy(p.local).applyMatrix4(p.node.matrixWorld)
+      p.wx = _lpV.x; p.wy = _lpV.y; p.wz = _lpV.z
+      p.live = true
+      n++
+    }
+    // Stamped so updateContactOcclusion() can refuse to build a contact zone
+    // out of a set that was not refreshed this frame — a subject that failed
+    // the liveness test earlier in the loop has proxies parked where it used to
+    // be, and a zone there darkens two fighters over empty floor.
+    c.limbFresh = contactFrame
+    c.limbLive = n
+    return n
+  }
+
+  /**
+   * Push this subject's proxy set into its pool decal's silhouette uniforms.
+   * `wx`/`wz` are the pool's WORLD centre (before toRigSpace, which mutates its
+   * argument), `sx`/`sz` the quad's world scale, `tAir` the airborne fraction.
+   */
+  function uploadSilhouette(c, wx, wz, deckY, tAir, sx, sz) {
+    const u = c.sil
+    if (!u) return
+    const arr = u.uSil.value
+    const L = c.limbs
+    const phi = c.mesh.rotation.y
+    const cs = Math.cos(phi), sn = Math.sin(phi)
+    const isx = 1 / Math.max(1e-4, sx)
+    const isz = 1 / Math.max(1e-4, sz)
+    let n = 0
+    if (L) {
+      for (const p of L) {
+        if (n >= SIL_MAX) break
+        if (!p.live) continue
+        const hAbove = Math.max(0, p.wy - deckY)
+        const w = Math.exp(-hAbove * 0.75)
+        // Mass this far up contributes almost nothing and only smears the
+        // outline it is supposed to sharpen.
+        if (w < 0.06) continue
+        // World offset from the pool centre, leaned along the key so the pool
+        // and the real cast shadow point the same way.
+        const dwx = (p.wx - wx) + keyGround.x * hAbove * 0.18
+        const dwz = (p.wz - wz) + keyGround.y * hAbove * 0.18
+        // Into the quad's local unit-disc space: undo the golden-angle yaw the
+        // decal carries, then the scale.
+        arr[n++].set(
+          (dwx * cs - dwz * sn) * isx,
+          (dwx * sn + dwz * cs) * isz,
+          Math.max(0.04, (p.r + hAbove * 0.55) * isx),
+          w,
+        )
+      }
+    }
+    for (let i = n; i < SIL_MAX; i++) arr[i].set(0, 0, 1, 0)
+    // Two blobs is not a body. Below three proxies, stamp nothing — a plain
+    // oval is a weaker cue than a wrong one. The shaping also unwinds as the
+    // fighter leaves the ground, where the pool is a diffuse airborne smear and
+    // a crisp outline would be a lie.
+    u.uSilParams.value.set(
+      n >= 3
+        ? THREE.MathUtils.lerp(SIL_FLOOR, 1, THREE.MathUtils.clamp(tAir * 1.6, 0, 1))
+        : 1,
+      1,
+    )
+  }
+
+  /**
+   * Build (or rebuild) the proxy set for a subject. Called on the same slow
+   * cadence as the caster/foot re-seat, so a costume swap or a Gore detach that
+   * changes the mesh set is picked up within a quarter second.
+   */
+  function seatLimbProxies(c) {
+    if (c.prop || c.static) return 0
+    c.limbs = buildLimbProxies(c.target)
+    c.limbDead = 0
+    return c.limbs.length
+  }
+
+  // ---------------------------------------------------------------------------
   // THE CONTACT ZONE — the CPU half of PROX_BODY. See the note above
   // PROX_UNIFORMS for why this is a zone between the bodies rather than a
   // per-body occluder.
   //
-  // The two rig roots sit at the hips on every fighter in the roster (the same
-  // fact the round-5 anchor fix turned on), so the midpoint of the two roots
-  // lifted by CO_LIFT lands at chest height between them — where a strike, a
-  // throw, a clash and a corner pin all actually happen. The zone is driven by
-  // the HORIZONTAL gap only: two fighters at the same spot with one airborne
-  // above the other are still in contact, and using the 3D distance would
-  // switch the term off exactly during a jump-in.
+  // The zone is placed from the LIMB PROXY SET above, not from the rig roots.
+  // Two bodies touch at a fist, a shoulder, a shin or a shell — never at the
+  // midpoint of their pelvises — so the quantity that drives the term is the
+  // SURFACE gap between the closest cross pair of proxies. It is ~0 when two
+  // bodies touch and negative when they interpenetrate, whatever the hips are
+  // doing, which is what makes the term fire on the exact frames the critic
+  // photographs (fist buried in a face, hips ~1.9 m apart) and stay off when
+  // two fighters merely stand at guard.
+  //
+  // TWO ZONES. A clinch touches in two places (gloves high, shins low) and one
+  // sphere makes that read as a single dot. The second zone is the best
+  // remaining pair whose seam is at least CO_SEP from the first, so it can
+  // never be the same contact counted twice, and the shader unions them.
   //
   // Strength rides the rig dimmer, so a KO fade takes the crevice with it, and
-  // it is exactly 0 whenever the gap is past CO_FAR — a uniform-branch off
-  // switch on ~99 % of frames.
+  // both strengths are exactly 0 whenever the nearest surfaces are past CO_FAR
+  // — a uniform-branch off switch on ~99 % of frames.
   // ---------------------------------------------------------------------------
+  //
+  // ROUND 15 REWRITE. Everything above the line stays true about the SHADER;
+  // the distance that drives it is now the SURFACE GAP between the closest
+  // cross pair of limb proxies, |pi - pj| - ri - rj, which is ~0 when two
+  // bodies touch and negative when they interpenetrate. The units changed with
+  // it, so the near/far numbers are no longer comparable to the round-13 ones:
+  //   CO_NEAR -0.04 m  the bodies are 4 cm INTO each other -> full strength
+  //   CO_FAR   0.16 m  16 cm of clear air between the nearest surfaces -> off
+  // Both are absolute distances between skins, so they are independent of how
+  // far apart the hips are and independent of `_pushApart`'s 0.85 m floor.
   const CO_ENABLED = opts.contactOcclusion !== false
-  const CO_NEAR = opts.contactOccludeNear ?? 0.60      // m — full strength at/below
-  const CO_FAR = opts.contactOccludeFar ?? 1.20        // m — nothing at/above
-  const CO_RADIUS = opts.contactOccludeRadius ?? 0.52  // m
-  const CO_STRENGTH = opts.contactOccludeStrength ?? 0.40
-  const CO_LIFT = opts.contactOccludeLift ?? 0.18      // m above the rig roots
-  const CO_FACING = opts.contactOccludeFacing ?? 0.7
-  const _coA = new THREE.Vector3()
-  const _coB = new THREE.Vector3()
+  const CO_NEAR = opts.contactOccludeNear ?? -0.04     // m surface gap — full at/below
+  const CO_FAR = opts.contactOccludeFar ?? 0.16        // m surface gap — nothing at/above
+  // Derived per contact from the two proxies that made it, clamped into this
+  // band: a glove-to-jaw contact is a small crevice, a body check is a wide one.
+  const CO_RADIUS_MIN = opts.contactOccludeRadiusMin ?? 0.15  // m
+  const CO_RADIUS_MAX = opts.contactOccludeRadius ?? 0.40     // m
+  // 0.40 -> 0.55. The acceptance is "the darkest contact pixel at most 60 % of
+  // the adjacent body luma", i.e. attenuation >= 0.40 at the seam. 0.40 was the
+  // authored PEAK, reachable only at the exact zone centre with a perfectly
+  // facing normal, so it could not clear the bar even if the ramp had fired.
+  // 0.55 leaves headroom for the facing term and still sits under the shader's
+  // 0.9 clamp, so a seam can never go to black.
+  const CO_STRENGTH = opts.contactOccludeStrength ?? 0.55
+  const CO_FACING = opts.contactOccludeFacing ?? 0.78
+  const CO_PLATEAU = opts.contactOccludePlateau ?? 0.08
+  // How far apart two seams must be before they count as separate contacts.
+  const CO_SEP = opts.contactOccludeSeparation ?? 0.40 // m
+  // Diagnostics only.
+  let coPairs = 0
   // PROX_UNIFORMS is module-global (same reason RIM_UNIFORMS is), so a rig that
   // is built AFTER a match — the menu backdrop, a results screen — would inherit
   // whatever strength the last match frame left behind and darken a scene that
   // has no fighters in it. Every rig zeroes it on construction; whichever rig is
   // rendering owns it from its own updateContacts().
   PROX_UNIFORMS.uProxParams.value.x = 0
+  PROX_UNIFORMS.uProxParams.value.w = 0
   let coStrength = 0
   let coGap = Infinity
+
+  // Scratch for the pair search. Module-free, allocation-free.
+  const _coPair = [
+    { gap: Infinity, x: 0, y: 0, z: 0, r: 0 },
+    { gap: Infinity, x: 0, y: 0, z: 0, r: 0 },
+  ]
+
+  /**
+   * The seam of one proxy pair: the point ON THE LINE between the two centres
+   * that sits on the two surfaces' shared midplane, and a radius derived from
+   * how big the two touching parts are.
+   */
+  function coSeam(pa, pb, out) {
+    const dx = pb.wx - pa.wx, dy = pb.wy - pa.wy, dz = pb.wz - pa.wz
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-4
+    // Walk from A's centre to the midpoint of the two SURFACES. When the bodies
+    // interpenetrate this is still inside both, which is correct — the crevice
+    // is a shared volume, not a plane.
+    const f = THREE.MathUtils.clamp((pa.rc + (len - pa.rc - pb.rc) * 0.5) / len, 0, 1)
+    out.x = pa.wx + dx * f
+    out.y = pa.wy + dy * f
+    out.z = pa.wz + dz * f
+    out.r = THREE.MathUtils.clamp((pa.rc + pb.rc) * 0.72, CO_RADIUS_MIN, CO_RADIUS_MAX)
+  }
 
   function updateContactOcclusion() {
     const P = PROX_UNIFORMS
     coStrength = 0
     coGap = Infinity
-    if (!CO_ENABLED) { P.uProxParams.value.x = 0; return }
+    coPairs = 0
+    P.uProxParams.value.x = 0
+    P.uProxParams.value.w = 0
+    if (!CO_ENABLED) return
     // The first two LIVE, non-prop subjects. In a match that is p1 and p2; on a
     // screen with one subject or none there is nothing to occlude against and
     // the term stays off rather than falling back to something invented.
@@ -4096,29 +4589,76 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     for (const c of contacts) {
       if (c.prop || c.static) continue
       if (!c.target || !c.target.parent) continue
+      // Refreshed THIS frame by the main loop, i.e. it passed subjectLive().
+      if (c.limbFresh !== contactFrame) continue
       if (a === null) { a = c; continue }
       b = c
       break
     }
-    if (a === null || b === null) { P.uProxParams.value.x = 0; return }
-    a.target.getWorldPosition(_coA)
-    b.target.getWorldPosition(_coB)
-    const dx = _coA.x - _coB.x
-    const dz = _coA.z - _coB.z
-    const gap = Math.sqrt(dx * dx + dz * dz)
-    coGap = gap
-    const t = 1 - THREE.MathUtils.clamp((gap - CO_NEAR) / Math.max(1e-4, CO_FAR - CO_NEAR), 0, 1)
-    if (!(t > 0.002)) { P.uProxParams.value.x = 0; return }
-    coStrength = CO_STRENGTH * t * dim
-    P.uProxZone.value.set(
-      (_coA.x + _coB.x) * 0.5,
-      (_coA.y + _coB.y) * 0.5 + CO_LIFT,
-      (_coA.z + _coB.z) * 0.5,
-      CO_RADIUS,
-    )
+    if (a === null || b === null) return
+    const LA = a.limbs, LB = b.limbs
+    if (!LA || !LB || !LA.length || !LB.length) return
+
+    // --- closest cross pair, then the best pair CO_SEP away from it ---------
+    // 10 x 10 squared distances. The second seam is taken in the same sweep by
+    // keeping the best candidate whose seam is far enough from the first, which
+    // is why the first pass records seams rather than only gaps.
+    const s0 = _coPair[0], s1 = _coPair[1]
+    s0.gap = Infinity; s1.gap = Infinity
+    let bestA = null, bestB = null
+    for (const pa of LA) {
+      if (!pa.live) continue
+      for (const pb of LB) {
+        if (!pb.live) continue
+        const dx = pb.wx - pa.wx, dy = pb.wy - pa.wy, dz = pb.wz - pa.wz
+        const gap = Math.sqrt(dx * dx + dy * dy + dz * dz) - pa.rc - pb.rc
+        if (gap < s0.gap) { s0.gap = gap; bestA = pa; bestB = pb }
+      }
+    }
+    if (!bestA || s0.gap >= CO_FAR) return
+    coSeam(bestA, bestB, s0)
+    coGap = s0.gap
+
+    const sep2 = CO_SEP * CO_SEP
+    let secA = null, secB = null
+    for (const pa of LA) {
+      if (!pa.live) continue
+      for (const pb of LB) {
+        if (!pb.live) continue
+        const dx = pb.wx - pa.wx, dy = pb.wy - pa.wy, dz = pb.wz - pa.wz
+        const gap = Math.sqrt(dx * dx + dy * dy + dz * dz) - pa.rc - pb.rc
+        if (gap >= CO_FAR || gap >= s1.gap) continue
+        // Cheap seam estimate for the separation test — the midpoint of the two
+        // centres is within a few centimetres of the real seam and this runs
+        // 100 times.
+        const mx = (pa.wx + pb.wx) * 0.5 - s0.x
+        const my = (pa.wy + pb.wy) * 0.5 - s0.y
+        const mz = (pa.wz + pb.wz) * 0.5 - s0.z
+        if (mx * mx + my * my + mz * mz < sep2) continue
+        s1.gap = gap; secA = pa; secB = pb
+      }
+    }
+
+    const ramp = (g) => 1 - THREE.MathUtils.clamp(
+      (g - CO_NEAR) / Math.max(1e-4, CO_FAR - CO_NEAR), 0, 1)
+    const t0 = ramp(s0.gap)
+    if (!(t0 > 0.002)) return
+    coStrength = CO_STRENGTH * t0 * dim
+    coPairs = 1
+    P.uProxZone.value.set(s0.x, s0.y, s0.z, s0.r)
     P.uProxParams.value.x = coStrength
-    P.uProxParams.value.y = 0.2
+    P.uProxParams.value.y = CO_PLATEAU
     P.uProxParams.value.z = CO_FACING
+
+    if (secA) {
+      coSeam(secA, secB, s1)
+      const t1 = ramp(s1.gap)
+      if (t1 > 0.002) {
+        coPairs = 2
+        P.uProxZone2.value.set(s1.x, s1.y, s1.z, s1.r)
+        P.uProxParams.value.w = CO_STRENGTH * t1 * dim
+      }
+    }
   }
 
   /**
@@ -4367,13 +4907,43 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
       return {
         enabled: CO_ENABLED,
         on: P.uProxParams.value.x > 0.0001,
+        // SURFACE gap between the closest cross pair of limb proxies, in
+        // metres. Negative means the two bodies interpenetrate. This is NOT the
+        // round-13 root-to-root number and is not comparable to it.
         gap: coGap,
+        pairs: coPairs,
         strength: P.uProxParams.value.x,
+        strength2: P.uProxParams.value.w,
         radius: P.uProxZone.value.w,
         facing: P.uProxParams.value.z,
+        plateau: P.uProxParams.value.y,
         near: CO_NEAR,
         far: CO_FAR,
         zone: P.uProxZone.value.clone(),
+        zone2: P.uProxZone2.value.clone(),
+        // Proof the CPU half exists at all — the round-14 failure was that it
+        // did not. `limbs` per subject should be 6-10 on a fighter.
+        limbs: contacts.filter((c) => !c.prop && !c.static).map((c) => (c.limbs ? c.limbs.length : 0)),
+      }
+    },
+
+    /**
+     * Silhouette-pool state, per subject. `spheres` is how many limb blobs are
+     * shaping that fighter's floor pool this frame and `floor` is what the
+     * pool's density is multiplied by OUTSIDE the body outline — 1 means the
+     * shaping is off and the pool is the old radial oval.
+     */
+    silhouettePool() {
+      return {
+        max: SIL_MAX,
+        anchorFailed: silAnchorFailed,
+        subjects: contacts.filter((c) => !c.prop && !c.static).map((c) => ({
+          patched: !!c.sil,
+          spheres: c.sil ? c.sil.uSil.value.reduce((n, v) => n + (v.w > 0 ? 1 : 0), 0) : 0,
+          floor: c.sil ? +c.sil.uSilParams.value.x.toFixed(3) : 1,
+          visible: !!c.mesh.visible,
+          alpha: +(c.alpha || 0).toFixed(3),
+        })),
       }
     },
 

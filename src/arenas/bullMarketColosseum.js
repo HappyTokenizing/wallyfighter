@@ -38,7 +38,7 @@
 import * as THREE from 'three'
 import {
   ArenaBase, makeRng, flatMat, canvasTexture, makeLightRig,
-  makeSign, buildCrowd,
+  makeSign, buildCrowd, crowdDetailFor,
 } from './ArenaBase.js'
 import {
   roundedBox, chamferBox, roundedCylinder, roundedCone, frustum, profileLathe,
@@ -1502,6 +1502,7 @@ class BullMarketColosseumArena extends ArenaBase {
     this._launched = []          // { f, ttl } — recently ragdolled fighters
     this._fighters = new Set()   // refs captured from onRagdollLaunch
     this._segments = []          // crowd segments, ordered left -> right (for the wave)
+    this._crowds = []            // the same stands under the game-wide handle name
     this._flames = []            // { flame } all live fires
     this._brazierFlames = new Map() // physics handle -> flame (fire poof on break)
     this._banners = []           // { mesh, phase }
@@ -2501,12 +2502,23 @@ class BullMarketColosseumArena extends ArenaBase {
 
       // give the middle segments the leftover heads
       const bonus = (i === 2) ? total - per * nSeg : 0
+      // v3.8 LOD (defect 3, item 4). buildCrowd has shipped a 3-tier actor
+      // since v3.6 and not one arena ever passed the knob, so every stand in
+      // the game carried the full 481-triangle spectator — including these,
+      // which sit 13-14 m out behind a barrier and never fill more than a
+      // couple of hundred pixels. crowdDetailFor() measures the distance from
+      // the stand to the point the camera watches (the fight, at the origin)
+      // and picks the tier: these land on 'medium' (-23 % triangles) with the
+      // two flank segments dropping to 'low' (-60 %). Draw calls are
+      // tier-independent, so this is pure vertex-shader savings.
+      const detail = crowdDetailFor([px, 1.2, pz], [0, 0, 0])
       const crowd = buildCrowd({
         count: per + Math.max(0, bonus),
         area: { w: 5.8, d: 2.5 },
         palette: TOGA_PALETTE,
         riserColor: 0x5c4830,
         poses: 4,
+        detail,
         rng,
       })
       crowd.group.position.set(px, 1.2, pz)
@@ -2639,6 +2651,14 @@ class BullMarketColosseumArena extends ArenaBase {
     // order left -> right so the wave travels around the bowl
     segs.sort((s1, s2) => s1.x - s2.x)
     this._segments = segs
+    // v3.8 (defect 3). THE HANDLE THE AUDIT LOOKS FOR. This arena has always
+    // built its audience with ArenaBase.buildCrowd — it just published the
+    // stands under `_segments`, keyed by the wave order, and every crowd sweep
+    // the critics ran looked for `_crowds` and reported "no crowd handles at
+    // all" for the biggest audience in the game. Same objects, same order, one
+    // extra name: `_crowds[i].audit()` now answers for every stand here the way
+    // it does everywhere else.
+    this._crowds = segs.map((s) => s.crowd)
   }
 
   _buildStatues() {

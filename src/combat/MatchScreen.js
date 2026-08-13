@@ -162,6 +162,40 @@ const PUSHABLE_STATES = new Set(['idle', 'walk', 'dash', 'backdash', 'crouch', '
 // a whole 60 Hz frame per intro frame — generous on purpose.
 // ---------------------------------------------------------------------------
 const INTRO_TEXTURE_BUDGET_MS = 16
+// ---------------------------------------------------------------------------
+// DEFECT 8 — ARENA ENTRY, THE OTHER 4.9 SECONDS.
+//
+// enter() used to build the whole match in one synchronous call: arena,
+// fighters, ragdoll bodies, items, gore, the replay recorder, the particle and
+// prop pools, and then a full-scene shader compile + texture upload. Measured
+// 540-863 ms of blocked main thread before the first frame, followed by 28
+// frames over 100 ms (4.1 s) inside the first 120 — the compiles and uploads
+// that the one atomic warm could not finish, arriving one material at a time.
+//
+// The round-1 banner is ~3.6 s (215 fixed frames) in which nothing is being
+// fought. That is the hole. enter() now does only what the FIRST FRAME needs
+// and queues the rest as named steps; update() drains them inside a budget
+// while the banner is up, and _beginFight() flushes whatever is left so the
+// fight can never start against a half-built match.
+//
+// BUILD_BUDGET_MS is per frame and deliberately small: a step is only ever
+// started when the budget has time left, but a step that overruns is never
+// interrupted (they are constructor calls, not coroutines), so the worst frame
+// is one budget plus the longest single step. Every step is therefore sized to
+// be a subsystem, not a subsystem-and-a-half — and the shader warm, which is
+// the one genuinely unbounded piece, is chunked by object count instead (see
+// _queueWarmChunks).
+//
+// WARM_CHUNK_OBJECTS: how many scene nodes one compile step covers. 24 was
+// measured to sit near a 60 Hz frame's spare time on the heaviest arena while
+// keeping the step count (and therefore the number of redundant light-setup
+// walks three does per compile call) reasonable.
+// ---------------------------------------------------------------------------
+const BUILD_BUDGET_MS = 6
+const WARM_CHUNK_OBJECTS = 24
+const _now = (typeof performance !== 'undefined' && performance.now)
+  ? () => performance.now()
+  : () => Date.now()
 // Reused buffers for the two compact-in-place list sweeps. Never nested, never
 // retained across a step.
 const _dueTimers = []
@@ -274,6 +308,25 @@ export class MatchScreen {
     // next arena refills the queue.
     this._surfacesDone = false
     this._surfacePumps = 0
+    // Deferred build queue (defect 8). Per-match, and reset BEFORE anything is
+    // queued: a match that was left mid-build (a player quitting out during the
+    // banner) must not hand its leftovers to the next one.
+    this._buildSteps = []
+    this._buildDone = false
+    this._buildLog = []
+    this._buildFrames = 0
+    const _t0Enter = _now()
+    const _phase = []
+    let _tPrev = _t0Enter
+    // Phase stamps for the sync half. Costs two performance.now() calls per
+    // phase and gives the profiler an honest answer to "what is enter() still
+    // blocking on", which is the question every previous round had to guess at.
+    const mark = (name) => {
+      const t = _now()
+      const ms = t - _tPrev
+      _tPrev = t
+      if (ms >= 1) _phase.push(name + ' ' + ms.toFixed(0))
+    }
 
     // --- scene & camera ---
     this.scene = new THREE.Scene()
@@ -357,6 +410,7 @@ export class MatchScreen {
     this.fighterColors = specs.map((spec) =>
       Characters[spec.charId]?.primaryColor ?? PRIMARY_COLOR_FALLBACK[spec.charId] ?? 0xd8d8d8)
 
+    mark('setup')
     const arenaDef = Arenas[params.arenaId] || Object.values(Arenas)[0]
     this.arenaId = arenaDef?.id || params.arenaId || 'meme-market'
     let arena = null
@@ -370,6 +424,7 @@ export class MatchScreen {
         arenaId: this.arenaId, renderer: game.renderer,
       })
     } catch (e) { console.error('[combat] arena build threw', e) }
+    mark('arena')
     this.arena = arena || { group: null, bounds: { minX: -9, maxX: 9, wallBounce: 0.55 }, floorY: 0, spawnPoints: [-3, 3], update() {}, dispose() {} }
     // P0 (v3.1) — the arena group must be the SINGLE root everything hangs from,
     // or teardown cannot be exhaustive and dressing carries into the next venue
@@ -401,13 +456,24 @@ export class MatchScreen {
     // waiting for the first _updatePresentation.
     try { this.arena.rig?.setCamera?.(this.camera) } catch { /* optional */ }
 
-    // --- pools ---
-    this.particles = new ParticleSystem(this.scene, game.quality)
-    // Presentation only. The pool uses the lens for two things: pushing the
-    // contact cluster in front of the victim instead of into his chest, and
-    // keeping the swing ribbons broadside. Neither touches the sim.
-    try { this.particles.setCamera(this.camera) } catch { /* pool is defensive */ }
-    this.props = new PropManager(this.scene, this.physics)
+    mark('bounds')
+    // --- pools (DEFERRED, defect 8) ---
+    //
+    // Neither pool can be touched before the FIGHT: the ribbon feed, every
+    // burst() and every prop spawn happen in phase 'fight' or later, and the
+    // two update() calls in _worldStep are optional-chained for the handful of
+    // intro frames that run before the queue drains. Both allocate their whole
+    // pool up front (that is the point of a pool), so they are real money.
+    this.particles = null
+    this.props = null
+    this._queueBuild('particles', () => {
+      this.particles = new ParticleSystem(this.scene, game.quality)
+      // Presentation only. The pool uses the lens for two things: pushing the
+      // contact cluster in front of the victim instead of into his chest, and
+      // keeping the swing ribbons broadside. Neither touches the sim.
+      try { this.particles.setCamera(this.camera) } catch { /* pool is defensive */ }
+    })
+    this._queueBuild('props', () => { this.props = new PropManager(this.scene, this.physics) })
 
     // --- fighters ---
     this.fighters = specs.map((spec, slot) => {
@@ -424,8 +490,13 @@ export class MatchScreen {
     this.trackedSlot = humanSlot >= 0 ? humanSlot : 0
     this.fighters[0].foe = this.fighters[1]
     this.fighters[1].foe = this.fighters[0]
+    mark('fighters')
+    // Ragdoll bodies: one cannon-es body + constraint set per bone, per
+    // fighter. Nothing can go limp before the first hit connects, and
+    // RagdollManager.recover() on an unbuilt fighter is already a guarded
+    // no-op (startRound calls it inside a try), so these are two clean steps.
     for (const f of this.fighters) {
-      try { this.ragdolls.build(f) } catch (e) { console.warn('[combat] ragdoll build failed', e) }
+      this._queueBuild('ragdoll:' + f.slot, () => this.ragdolls.build(f))
     }
     // hand the roster to the arena so hazards can target fighters directly
     // (additive hook — arenas read it defensively)
@@ -449,20 +520,26 @@ export class MatchScreen {
       }
     }
 
-    // --- v1.1 item system (§14) — parallel build, fully guarded ---
+    mark('lights')
+    // --- v1.1 item system (§14) — parallel build, fully guarded, DEFERRED ---
+    // Items only exist in phase 'fight' (_updateItems is gated on it) and the
+    // system's own round:start listener is registered by its constructor, which
+    // the flush in _beginFight() guarantees has run before that event fires.
     this.items = null
     this._groundItems = [] // mirror of ground items (via events) for the AI heuristic
-    try {
-      this.items = new ItemSystem({
-        game,
-        scene: this.scene,
-        physics: this.physics,
-        arena: this.arena,
-        arenaId: this.arenaId,
-        fighters: this.fighters,
-        events: game.events,
-      })
-    } catch (e) { console.warn('[combat] ItemSystem init failed — match runs without items', e); this.items = null }
+    this._queueBuild('items', () => {
+      try {
+        this.items = new ItemSystem({
+          game,
+          scene: this.scene,
+          physics: this.physics,
+          arena: this.arena,
+          arenaId: this.arenaId,
+          fighters: this.fighters,
+          events: game.events,
+        })
+      } catch (e) { console.warn('[combat] ItemSystem init failed — match runs without items', e); this.items = null }
+    })
     this._offItemSpawn = game.events.on('item:spawned', (e) => {
       if (e && e.pos) this._groundItems.push({ kind: e.kind, x: e.pos.x ?? 0 })
     })
@@ -472,9 +549,13 @@ export class MatchScreen {
     // events) — drop the mirror too or the AI steers toward phantoms in R2+.
     this._offItemRound = game.events.on('round:start', () => { this._groundItems.length = 0 })
 
-    // --- v1.1 gore system (§15) — parallel build, fully guarded ---
+    // --- v1.1 gore system (§15) — parallel build, fully guarded, DEFERRED ---
+    // Every call site is already `if (this.gore)` / _goreSafe(), because the
+    // system is allowed to fail to construct.
     this.gore = null
-    try { this.gore = new GoreSystem(this) } catch (e) { console.warn('[combat] GoreSystem init failed — match runs gore-free', e); this.gore = null }
+    this._queueBuild('gore', () => {
+      try { this.gore = new GoreSystem(this) } catch (e) { console.warn('[combat] GoreSystem init failed — match runs gore-free', e); this.gore = null }
+    })
 
     // --- camera controller ---
     this.cam = new CameraController(this.camera, game)
@@ -485,19 +566,30 @@ export class MatchScreen {
       // §18: fixed tracking third-person — the camera follows the player's
       // fighter around the whole stadium (duck-typed; camera module parallel)
       this.cam.setTracked?.(this.fighters[this.trackedSlot])
+    } catch (e) { console.warn('[combat] camera setup failed', e) }
+    // setOccluders walks the whole arena group looking for fade candidates —
+    // the one camera call whose cost scales with the venue. The lens is pulled
+    // back on the banner and nothing is being occluded from anything yet.
+    this._queueBuild('occluders', () => {
       // P0 (v1.1.1): arena dressing between the lens and a fighter fades to
       // ~25% opacity — corner fights stay readable behind stalls and crates
-      this.cam.setOccluders?.(this.arena.group)
-    } catch (e) { console.warn('[combat] camera setup failed', e) }
+      try { this.cam.setOccluders?.(this.arena.group) } catch (e) { console.warn('[combat] setOccluders threw', e) }
+    })
+    mark('camera')
 
-    // --- instant replay recorder (src/replay) ---
+    // --- instant replay recorder (src/replay) — DEFERRED ---
+    // The recorder only captures phases fight/finisher/ko (captureFrame gates
+    // on it) and startRound()'s resetBuffer() is already optional-chained, so
+    // the banner frames are frames it would throw away anyway.
     // (the previous match's preserved clip was already swept at the top of
     // enter(), before the arena built — see the P0 ORDERING note there)
     this.replay = null
-    try {
-      this.replay = new ReplayManager(game)
-      this.replay.start(this)
-    } catch (e) { console.warn('[combat] replay init failed', e); this.replay = null }
+    this._queueBuild('replay', () => {
+      try {
+        this.replay = new ReplayManager(game)
+        this.replay.start(this)
+      } catch (e) { console.warn('[combat] replay init failed', e); this.replay = null }
+    })
     this.replayActive = false
     this._replayUI = null
     this._replayFinish = null
@@ -569,12 +661,27 @@ export class MatchScreen {
     // #6: brand new scene, brand new arena, brand new camera. Whatever the
     // pipeline is holding from the last screen is a ghost of a different venue.
     this._cut()
-    // LAST THING BEFORE THE FIRST FRAME. Everything the match owns is in the
-    // scene graph by this line — arena, fighters, particle pool, props, items,
-    // gore — so this is the only moment where one walk can warm all of it. See
-    // _warmArena().
-    this._warmArena('enter')
+    mark('flow')
+    // THE WARM IS NOW A QUEUE, NOT A CALL. It used to be the last thing enter()
+    // did, on the reasoning that this is the one moment the whole graph is
+    // present. That reasoning is still true and it is why the chunker is queued
+    // LAST — behind the pools, the ragdolls, items, gore and the recorder, so
+    // that by the time the compile steps run the graph they walk is complete.
+    // What changed is that a full-scene renderer.compile() is atomic and was
+    // the single biggest item in enter()'s block. See _queueWarmChunks().
+    this._queueWarmChunks()
     this.startRound(1)
+    mark('startRound')
+    // One line, once per match, and it is the number defect 8 is about. Logged
+    // unconditionally rather than behind ?prof: the profiler cannot see inside
+    // enter(), and this is the only place the split is knowable.
+    const enterMs = _now() - _t0Enter
+    this._enterMs = +enterMs.toFixed(1)
+    this._enterPhases = _phase.join(' | ')
+    try { if (typeof window !== 'undefined') window.__enterProf = { ms: this._enterMs, phases: _phase.slice(), steps: this._buildSteps.length } } catch { /* frozen global */ }
+    const say = enterMs > 100 ? console.warn : console.debug
+    say(`[combat] enter() blocked ${this._enterMs} ms (${this._enterPhases || 'nothing over 1 ms'}) — ` +
+      `${this._buildSteps.length} build steps deferred to the round intro`)
   }
 
   // ---------------------------------------------------------------------------
@@ -610,9 +717,9 @@ export class MatchScreen {
    * never pays a call. One throw disables it for the match — a surface that
    * generates late is a soft picture, not a broken one.
    */
-  _pumpSurfaces() {
+  _pumpSurfaces(budgetMs = INTRO_TEXTURE_BUDGET_MS) {
     try {
-      const left = pumpTextureQueue(INTRO_TEXTURE_BUDGET_MS)
+      const left = pumpTextureQueue(budgetMs)
       if (!left) {
         this._surfacesDone = true
         if (this._surfacePumps) {
@@ -631,7 +738,7 @@ export class MatchScreen {
     }
   }
 
-  _warmArena(label = '') {
+  _warmArena(label = '', quiet = false) {
     const game = this.game
     const renderer = game?.renderer
     if (!renderer || !this.scene || !this.camera) return null
@@ -647,7 +754,7 @@ export class MatchScreen {
       console.warn('[combat] arena warm failed — the first frames will compile as they go', e)
       return null
     }
-    if (out && out.ms > 0) {
+    if (out && out.ms > 0 && !quiet) {
       console.debug(`[combat] arena warm (${label || 'match'}): ${out.ms} ms, ` +
         `${out.materials} materials, ${out.textures} textures uploaded, ` +
         `${out.programs} programs resident, target ${out.target}`)
@@ -655,8 +762,160 @@ export class MatchScreen {
     return out
   }
 
+  // ---------------------------------------------------------------------------
+  // THE DEFERRED BUILD QUEUE (defect 8).
+  //
+  // A step is `{ key, run }`. `run()` returning FALSE means "not finished, call
+  // me again" — that is how the shader warm walks the graph a chunk at a time
+  // without owning the pump. Anything else (including undefined) retires it.
+  //
+  // Contract for anything queued here:
+  //   * it may not be needed by a frame in phase 'intro' (or its call sites are
+  //     already null-guarded, which every one of these is — the systems are all
+  //     allowed to fail to construct);
+  //   * it is complete before phase 'fight', guaranteed by _flushBuild() in
+  //     _beginFight() rather than by hoping the budget kept up.
+  // ---------------------------------------------------------------------------
+  _queueBuild(key, run) {
+    if (typeof run !== 'function') return
+    if (!this._buildSteps) this._buildSteps = []
+    this._buildSteps.push({ key, run })
+  }
+
+  /**
+   * Run queued steps until the budget is spent. Always attempts at least one
+   * step per call, so a queue can never starve behind a budget that is already
+   * gone by the time we are called; a step is never interrupted mid-flight.
+   */
+  _pumpBuild(budgetMs = BUILD_BUDGET_MS) {
+    const q = this._buildSteps
+    if (!q || !q.length) return true
+    this._buildFrames++
+    const deadline = _now() + Math.max(1, budgetMs)
+    let ran = 0
+    while (q.length) {
+      if (ran && _now() >= deadline) return false
+      const step = q[0]
+      const t0 = _now()
+      let more = false
+      try {
+        more = step.run() === false
+      } catch (e) {
+        console.warn(`[combat] deferred build step '${step.key}' threw — the match runs without it`, e)
+        more = false
+      }
+      const ms = _now() - t0
+      ran++
+      if (ms >= 4) this._buildLog.push(`${step.key} ${ms.toFixed(0)}`)
+      if (!more) q.shift()
+    }
+    this._buildDone = true
+    // A final full-scene pass: the chunked warm patches scene.traverse to visit
+    // one batch at a time, which by construction never visits the Scene NODE
+    // itself, so scene.background / scene.environment are the two textures it
+    // cannot reach. Everything else is already resident, so this costs a cache
+    // walk and those two uploads.
+    this._warmArena('build-complete')
+    console.debug(`[combat] deferred build finished over ${this._buildFrames} intro frames` +
+      (this._buildLog.length ? ` — steps over 4 ms: ${this._buildLog.join(', ')}` : ''))
+    return true
+  }
+
+  /**
+   * Run everything that is left, right now. Called from _beginFight() — the
+   * fight may never start against a half-built match — and from exit(), where
+   * abandoning the queue is the whole point (see the `active` check there).
+   */
+  _flushBuild(reason = 'flush') {
+    const q = this._buildSteps
+    if (!q || !q.length) return
+    const t0 = _now()
+    const n = q.length
+    this._pumpBuild(Infinity)
+    const ms = _now() - t0
+    if (ms >= 8) {
+      console.debug(`[combat] deferred build flushed at ${reason}: ${n} step(s) left, ${ms.toFixed(0)} ms`)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // THE SHADER WARM, CHUNKED.
+  //
+  // Pipeline.warm() is the only correct way to compile in this build — the note
+  // over it explains that a bare renderer.compile() against the canvas builds
+  // the sRGB+ACES variant of every material while the frame draws into a linear
+  // half-float composer target, i.e. a whole second program set that is thrown
+  // away. But warm() takes a scene and three's compile() is atomic over it, and
+  // on a dressed arena that is hundreds of materials in one unbreakable call.
+  //
+  // three r166's compile(scene, camera, targetScene) reads EVERYTHING that
+  // decides a program key — fog, environment, the light list — off `targetScene`
+  // (three.module.js:29421-29505; `prepareMaterial(material, targetScene,
+  // object)`), and only walks `scene.traverse` to find the materials. So the
+  // batch and the key-defining context are already separate arguments. warm()
+  // does not expose the third one, but it does not have to: patching
+  // `traverse` on OUR OWN scene instance for the duration of one call feeds
+  // compile() a batch while `targetScene` stays the identical, fully-lit, fogged
+  // Scene object. The program keys are bit-for-bit the ones the frame needs.
+  //
+  // The callback is invoked directly per object rather than through
+  // Object3D.traverse, so a parent and its children landing in different
+  // batches cannot compile each other twice.
+  //
+  // Chunk size adapts the way prewarm.js's does: double when a batch came in
+  // well under budget, halve when it went over. A dressed arena is thousands of
+  // cheap cache hits and a handful of 100 ms first-compiles, and a fixed size
+  // is either too slow for the former or too coarse for the latter.
+  // ---------------------------------------------------------------------------
+  _queueWarmChunks() {
+    this._warmObjs = null
+    this._warmI = 0
+    this._warmGroup = WARM_CHUNK_OBJECTS
+    this._queueBuild('warm', () => this._warmStep())
+  }
+
+  _warmStep() {
+    if (!this.scene || !this.camera) return true
+    if (!this._warmObjs) {
+      const objs = []
+      try { this.scene.traverse((o) => { if (o.material) objs.push(o) }) } catch { /* torn down */ }
+      this._warmObjs = objs
+      this._warmI = 0
+      if (!objs.length) return true
+    }
+    const objs = this._warmObjs
+    if (this._warmI >= objs.length) return true
+    const end = Math.min(objs.length, this._warmI + this._warmGroup)
+    const batch = objs.slice(this._warmI, end)
+    const t0 = _now()
+    this._warmSubset(batch, `warm ${end}/${objs.length}`)
+    const took = _now() - t0
+    this._warmI = end
+    if (took < BUILD_BUDGET_MS * 0.25) this._warmGroup = Math.min(256, this._warmGroup * 2)
+    else if (took > BUILD_BUDGET_MS) this._warmGroup = Math.max(1, this._warmGroup >> 1)
+    return this._warmI >= objs.length
+  }
+
+  _warmSubset(objs, label) {
+    const scene = this.scene
+    if (!scene || !objs || !objs.length) return null
+    const own = Object.prototype.hasOwnProperty.call(scene, 'traverse')
+    const prev = scene.traverse
+    scene.traverse = function (cb) { for (let i = 0; i < objs.length; i++) cb(objs[i]) }
+    try {
+      return this._warmArena(label, true)
+    } finally {
+      if (own) scene.traverse = prev
+      else delete scene.traverse
+    }
+  }
+
   exit() {
     this.active = false
+    // Abandon whatever is still queued: exit() is about to dispose the scene
+    // these steps would build into.
+    this._buildSteps = []
+    this._warmObjs = null
     if (this.replayActive) this._abortInstantReplay(false)
     try { this._flushFx() } catch { /* teardown */ }
     this._offPause?.()
@@ -946,9 +1205,15 @@ export class MatchScreen {
     }
     if (this.paused) return
     if (!Number.isFinite(dt) || dt <= 0) dt = FIXED_STEP
-    // Spend the round banner on the surface queue rather than the first
-    // seconds of the fight. See INTRO_TEXTURE_BUDGET_MS.
-    if (this.phase === 'intro' && !this._surfacesDone) this._pumpSurfaces()
+    // THE ROUND BANNER IS THE BUILD BUDGET (defect 8). Two queues share it and
+    // the order matters: the deferred build has a hard deadline (FIGHT!) and
+    // the surface queue does not — a surface that generates late is a soft
+    // picture, a ragdoll that builds late is a crash risk. So the build goes
+    // first, and while it is still running the surfaces take the smaller slice.
+    if (this.phase === 'intro') {
+      const built = this._buildDone || this._pumpBuild()
+      if (!this._surfacesDone) this._pumpSurfaces(built ? INTRO_TEXTURE_BUDGET_MS : BUILD_BUDGET_MS)
+    }
     try { this.cam.update(dt) } catch { /* stub */ }
     // Post + lighting follow the camera, so they run right after it and before
     // the fixed-step sim below (which must stay untouched by any of this).
@@ -1070,8 +1335,11 @@ export class MatchScreen {
     try { this.physics.step(dt) } catch (e) { console.error('[combat] physics.step threw', e) }
     try { this.ragdolls.update(dt) } catch (e) { console.error('[combat] ragdolls.update threw', e) }
     try { this.arena.update?.(dt) } catch (e) { console.error('[combat] arena.update threw', e) }
-    this.props.update()
-    this.particles.update(dt)
+    // Optional-chained since defect 8: both pools are built on the round-intro
+    // frames now, and a handful of intro steps run before their step does. Both
+    // are guaranteed present from _beginFight() onward.
+    this.props?.update()
+    this.particles?.update(dt)
     // Decal fade / dripping, every phase. Inlined rather than routed through
     // _goreSafe() so the hottest gore call in the build does not allocate a
     // closure 60 times a second; the disable-on-throw contract is identical.
@@ -1197,6 +1465,12 @@ export class MatchScreen {
   }
 
   _beginFight() {
+    // THE DEADLINE. Everything enter() deferred is finished HERE, before the
+    // bell — the budgeted pump is an optimisation, this is the guarantee. On a
+    // machine that kept up it is a no-op; on one that did not, one long frame
+    // under the "FIGHT!" caption is strictly better than a fighter who cannot
+    // ragdoll because his bodies were still queued.
+    try { this._flushBuild('FIGHT!') } catch (e) { console.warn('[combat] deferred build flush threw', e) }
     this.phase = 'fight'
     this.cap('FIGHT!')
     this.game.audio.sfx('bell')

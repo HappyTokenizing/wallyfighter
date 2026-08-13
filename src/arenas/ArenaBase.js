@@ -1654,6 +1654,238 @@ export function crowdDetailTier(d) {
   return CROWD_LOD_HIGH
 }
 
+// ---------------------------------------------------------------------------
+// v3.7 THE CROWD SPINE — grounding, audit and LOD, shared by EVERY crowd in
+// the game, not just the ones that go through buildCrowd().
+//
+// WHY THIS EXISTS. buildCrowd's own stands were audited clean (381 spectators,
+// 0 floating, 0 buried) while four arenas never adopted it, and three of those
+// four cannot: liquidity-swamp seats FROGS on lily pads, frozen-token-lab
+// seats PENGUINS and mountain-node-village seats SHIBAS. Those are the arenas'
+// identities, they are wired into their own event handlers and audio, and
+// replacing them with human spectators would be a bigger regression than the
+// bug. The fork was never the SPECIES — it was that each builder re-derived
+// "which step is this instance standing on?" by hand, and got it wrong.
+//
+// So the seam moves down one level. Everything below is species-agnostic: it
+// works on transforms and on the boxes the stand actually built. buildCrowd
+// uses it, and so do the frogs, the penguins and the shibas. There is now
+// exactly one implementation of "is this crowd standing on anything?" in the
+// codebase, and one audit() shape for the harness to assert on.
+// ---------------------------------------------------------------------------
+
+/**
+ * LOD tier from viewing distance, in metres. The knob has existed since v3.6
+ * and no arena used it, so every stand in the game — including the ones 20 m
+ * behind a barrier — carried the full 481-triangle actor.
+ *
+ *   < 10 m   'high'    the stand you can walk the camera into
+ *   10-18 m  'medium'  -23 % triangles, no readable difference at that size
+ *   > 18 m   'low'     -60 % triangles
+ *
+ * Draw calls are tier-independent (see the CROWD LOD block), so this is pure
+ * vertex-shader savings with no batching cost.
+ */
+export function crowdDetailForDistance(dist, opts = {}) {
+  const near = opts.near ?? 10
+  const far = opts.far ?? 18
+  if (!Number.isFinite(dist)) return 'high'
+  return dist > far ? 'low' : (dist > near ? 'medium' : 'high')
+}
+
+/** Distance from a crowd-group position to the point the camera watches. */
+export function crowdDetailFor(at, focus = [0, 0, 0], opts = {}) {
+  const dx = (at?.[0] ?? at?.x ?? 0) - (focus[0] ?? 0)
+  const dz = (at?.[2] ?? at?.z ?? 0) - (focus[2] ?? 0)
+  return crowdDetailForDistance(Math.hypot(dx, dz), opts)
+}
+
+/**
+ * The analytic support set for a stand that banks its rows on buildCrowd's own
+ * riser boxes. This is the table buildCrowd.audit() used to build inline.
+ *   -> [{ name, top, x0, x1, z0, z1 }], ground first.
+ */
+export function crowdSupportsFromRows(o = {}) {
+  const nRiser = Math.max(0, Math.floor(o.nRiser ?? 0))
+  const rowRise = o.rowRise ?? RISER_STEP
+  const rowDepth = o.rowDepth ?? 0.85
+  const halfW = (o.width ?? 1e4) / 2
+  const out = [{ name: 'ground', top: o.groundTop ?? 0, x0: -1e4, x1: 1e4, z0: -1e4, z1: 1e4 }]
+  for (let r = 1; r <= nRiser; r++) {
+    out.push({
+      name: `step${r}`, top: r * rowRise,
+      x0: -halfW, x1: halfW,
+      z0: -r * rowDepth - rowDepth * 0.5, z1: -r * rowDepth + rowDepth * 0.5,
+    })
+  }
+  return out
+}
+
+/**
+ * The support set a stand ACTUALLY built, read off its own meshes. This is the
+ * honest version: it cannot drift from the geometry the way a hand-written
+ * table can, because it IS the geometry.
+ *
+ * Only real TREADS qualify. A block course standing proud of a riser face, a
+ * snow drift piled at the end of a terrace and a blended contact decal are all
+ * meshes inside a crowd group and none of them is something you can stand on,
+ * so a candidate must span at least `minWidth` across X and `minDepth` in Z.
+ *
+ *   group      the crowd's own THREE.Group (matrices are updated in place)
+ *   minWidth   metres of X a tread must span (default: 45 % of the stand)
+ *   minDepth   metres of Z (default 0.4)
+ *   skip       RegExp of names that are never structure
+ */
+export function crowdSupportsFromGroup(group, o = {}) {
+  const minWidth = o.minWidth ?? ((o.width ?? 10) * 0.45)
+  const minDepth = o.minDepth ?? 0.4
+  const skip = o.skip ?? /shade|contact|decal|banner|pennant|glow|halo|fence|rail/i
+  const out = [{ name: 'ground', top: o.groundTop ?? 0, x0: -1e4, x1: 1e4, z0: -1e4, z1: 1e4 }]
+  if (!group) return out
+  group.updateMatrixWorld(true)
+  const box = new THREE.Box3()
+  group.traverse((n) => {
+    if (!n.isMesh || n.isInstancedMesh) return
+    if (skip.test(n.name || '')) return
+    if (n.userData?.notCrowdSupport) return
+    box.setFromObject(n)
+    if (!Number.isFinite(box.max.y)) return
+    if (box.max.x - box.min.x < minWidth) return
+    if (box.max.z - box.min.z < minDepth) return
+    out.push({
+      name: n.name || 'tread', top: box.max.y,
+      x0: box.min.x, x1: box.max.x, z0: box.min.z, z1: box.max.z,
+    })
+  })
+  return out
+}
+
+/** Highest tread top under (x, z) that is not above `y + lift`. null = void. */
+export function crowdSupportTop(supports, x, z, y = 1e4, lift = 0.36, pad = 0.05) {
+  let top = null
+  for (const st of supports) {
+    if (x < st.x0 - pad || x > st.x1 + pad) continue
+    if (z < st.z0 - pad || z > st.z1 + pad) continue
+    if (st.top > y + lift) continue
+    if (top === null || st.top > top) top = st.top
+  }
+  return top
+}
+
+/**
+ * GROUND AND DE-TRUNCATE ONE SEAT — the raycast-down-and-snap the critics
+ * asked for, done as a box query because a stand's treads are boxes and a
+ * query is exact where a ray is a sample.
+ *
+ * Two failures, and they are opposite signs of the same missing step:
+ *   FLOATING   the seat was lifted a row without a step under it, or its
+ *              jitter carried it off the back of the tread it was assigned.
+ *   TRUNCATED  the seat is standing at floor height INSIDE a riser volume, so
+ *              the terrace cuts it off at mid-thigh. (Measured on the shiba
+ *              congregation: 82.8 % of the rank, buried up to 0.455 m.)
+ *
+ * Both are fixed by the same rule: a seat stands on the highest tread whose
+ * footprint contains it. `nose` is the de-truncation seam — a seat within that
+ * many metres of a tread's FRONT edge is standing on the lip rather than on
+ * the tread proper, so it is nudged clear instead of levitated onto a 0.17 m
+ * ledge it half overhangs.
+ *
+ *   -> { y, z, on }   (z may be moved forward; x never is)
+ */
+export function snapCrowdSeat(supports, x, z, y = 0, o = {}) {
+  const lift = o.lift ?? 0.36
+  const nose = o.nose ?? 0.20
+  let best = null
+  for (const st of supports) {
+    if (st.top <= (o.groundTop ?? 0) + 1e-4) continue      // the ground itself
+    if (x < st.x0 - 0.02 || x > st.x1 + 0.02) continue
+    if (z < st.z0 - 0.02 || z > st.z1 + 0.02) continue
+    if (st.top > y + lift + 1e-4) {
+      // A tread ABOVE this seat's row: the seat is standing INSIDE it. Push it
+      // out of the front face rather than teleporting it up a row it was never
+      // laid out for — the row's own X clustering stays intact that way.
+      if (best === null || st.top > best.top) best = { ...st, inside: true }
+      continue
+    }
+    if (best === null || st.top > best.top || best.inside) best = { ...st, inside: false }
+  }
+  if (!best) return { y: o.groundTop ?? 0, z, on: 'ground' }
+  if (best.inside) return { y: o.groundTop ?? 0, z: best.z1 + nose, on: 'ground' }
+  // On the tread. If the seat overhangs the tread's nose, pull it back on.
+  const zOut = z > best.z1 - nose * 0.5 ? best.z1 - nose * 0.5 : z
+  return { y: best.top, z: zOut, on: best.name }
+}
+
+/**
+ * THE ONE CROWD AUDIT. Walks instance buffers, decomposes every transform out
+ * of the same data the GPU gets, and differences each foot height against the
+ * top of the tread that spans it. Read-only, allocates nothing per instance,
+ * safe mid-match. This is what buildCrowd.audit() runs, and it is what the
+ * frog / penguin / shiba stands now run too, so the harness asserts one shape.
+ *
+ *   { mesh, meshes, count, supports, lift, sink, extra, skip }
+ *   -> { ok, count, checked, worstGap, bad: [...], unwritten: [...] }
+ *
+ * `skip(i, meshName)` (v3.8) excludes instances that are DELIBERATELY off their
+ * support at this instant: a frog mid-dive, a spectator mid-tumble. Without it
+ * an audit run during Unhinged mode reports the ragdolls as floating, and an
+ * audit nobody can run mid-match is an audit nobody runs.
+ */
+export function auditCrowdInstances(o = {}) {
+  const skip = typeof o.skip === 'function' ? o.skip : null
+  const supports = o.supports || []
+  const tol = o.tolerance ?? 0.05
+  const lift = (o.lift ?? 0.308) + tol
+  const sink = (o.sink ?? 0.36) + tol
+  const zPad = o.zPad ?? 0.30
+  const bodies = o.bodies || (o.mesh ? [o.mesh] : [])
+  const attachments = (o.meshes || []).filter((m) => m && !bodies.includes(m))
+  const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3()
+  const m = new THREE.Matrix4()
+  const bad = []
+  let worstGap = 0
+  let checked = 0
+  for (const bm of bodies) {
+    if (!bm) continue
+    const n = o.count != null && bodies.length === 1 ? Math.min(o.count, bm.count) : bm.count
+    for (let i = 0; i < n; i++) {
+      if (skip && skip(i, bm.name)) continue
+      bm.getMatrixAt(i, m)
+      checked++
+      if (isIdentityMatrix(m)) { bad.push({ i, mesh: bm.name, why: 'identity' }); continue }
+      m.decompose(p, q, s)
+      if (p.y < -20) continue        // a parked spare slot, deliberately gone
+      const top = crowdSupportTop(supports, p.x, p.z, p.y, lift, zPad)
+      if (top === null) {
+        bad.push({ i, mesh: bm.name, why: 'unsupported', y: +p.y.toFixed(4), z: +p.z.toFixed(3) })
+        continue
+      }
+      const gap = p.y - top
+      if (Math.abs(gap) > worstGap) worstGap = Math.abs(gap)
+      if (gap > lift || gap < -sink) {
+        bad.push({
+          i, mesh: bm.name, why: gap > 0 ? 'floating' : 'buried',
+          gap: +gap.toFixed(4), y: +p.y.toFixed(4), z: +p.z.toFixed(3), on: top,
+        })
+      }
+    }
+  }
+  const unwritten = []
+  for (const am of attachments) {
+    for (let k = 0; k < am.count; k++) {
+      am.getMatrixAt(k, m)
+      checked++
+      if (isIdentityMatrix(m)) unwritten.push(`${am.name}#${k}`)
+    }
+  }
+  return {
+    ok: bad.length === 0 && unwritten.length === 0,
+    count: o.count ?? bodies.reduce((a, b) => a + (b ? b.count : 0), 0),
+    checked, worstGap: +worstGap.toFixed(4), bad, unwritten,
+    ...(o.extra || {}),
+  }
+}
+
 // `kind:tier` -> BufferGeometry. Every entry is tagged `userData.__shared`, so
 // the arena dispose walk steps past it and the next arena's crowd re-uses the
 // same GPU buffer. disposeSharedCrowdAssets() is the only thing that frees them.
@@ -2132,14 +2364,51 @@ function buildHatGeo(lod) {
 // band's albedo was linear ~0.003 — a value no amount of light rescues, and the
 // measured largest dark mass in the arena. The gradient still spans a 1.9:1
 // range top to bottom, which is all the contact read ever needed.
+// v3.8 (defect 4b): a monotone vertical ramp is not STRUCTURE, it is a
+// gradient, and a stack of them reads as one dark card — which is exactly what
+// the meme-market measurement says the stands are (the crowd band is 24.76 % of
+// frame, 22.55 % of its own pixels below luma 8, and the STANDS own 54 % of
+// that). The critic's reference read is Tekken's: "a dark overlapping mass
+// punctuated by camera flashes — you read crowd from density and value".
+// Density we have. Value we did not, because every face of every step carried
+// the same ramp, so nothing in the structure had an EDGE.
+//
+// So the box is now faced and banded, in vertex colour, at zero cost:
+//   TREAD (+Y)       the one horizontal surface up there. It sees the sky, so
+//                    it is the brightest thing in the stand's structure and it
+//                    draws the horizontal line that makes a step a step.
+//   NOSING           the top ~22 % of the FRONT face, catching the same bounce
+//                    as the tread it belongs to.
+//   REVEAL           the band immediately under the nosing, in the tread's own
+//                    shadow. Nosing-next-to-reveal is the readable edge; a
+//                    ramp alone has none.
+//   FRONT (+Z)       faces the arena and its floor bounce: lifted.
+//   BACK / SIDES     turned away from everything: the dark part of the mass,
+//                    but ON A FLOOR (see RISER_MIN_LUM) rather than at zero.
+// The same geometry is the back wall and the banners, and it does the right
+// thing for both: the wall gains a bright top rail and a shadow under it, and
+// a banner is a bright front face with a lit top edge.
 function riserGeometry() {
   return sharedCrowdGeo('Riser', CROWD_LOD_HIGH, () => {
-    const g = new THREE.BoxGeometry(1, 1, 1)   // unit box, scaled per instance
+    // 4 height segments so the nosing/reveal bands have vertices to land on.
+    // 48 vertices, 12 triangles per side face — still a unit box, still one
+    // shared buffer for every stand in the game.
+    const g = new THREE.BoxGeometry(1, 1, 1, 1, 4, 1)
     const pos = g.attributes.position
+    const nrm = g.attributes.normal
     const col = new Float32Array(pos.count * 3)
     for (let i = 0; i < pos.count; i++) {
       const t = THREE.MathUtils.clamp(pos.getY(i) + 0.5, 0, 1)
-      const v = 0.52 + 0.48 * Math.pow(t, 0.62)
+      const ny = nrm.getY(i), nz = nrm.getZ(i)
+      let v = 0.58 + 0.42 * Math.pow(t, 0.62)
+      if (ny > 0.5) v = 1.16                       // tread: the sky-facing plane
+      else if (ny < -0.5) v *= 0.72                // underside, never lit
+      else if (nz > 0.5) {                         // front face
+        v *= 1.10
+        if (t > 0.74) v *= 1.16                    // nosing
+        else if (t > 0.49) v *= 0.82               // reveal, under the lip
+      } else v *= 0.86                             // sides and back
+      v = THREE.MathUtils.clamp(v, 0.34, 1.30)
       col[i * 3] = v; col[i * 3 + 1] = v; col[i * 3 + 2] = v
     }
     g.setAttribute('color', new THREE.BufferAttribute(col, 3))
@@ -2202,7 +2471,12 @@ const RISER_FILL_HEX = 0x23262d     // the steps get a flatter, dimmer one
 // gradient and the back-step scale it reached ~0.003, which is a surface that
 // renders black under any light in the game. 0.045 is still a dark grey — the
 // stand keeps reading as a dark mass — but it is a mass with a value.
-const RISER_MIN_LUM = 0.045
+// v3.8: 0.045 -> 0.062. At 0.045 the DARK SIDE of the new faced ramp (x0.86 for
+// the sides and back, x0.72 underneath) lands back under the old floor, and the
+// measurement that opened this round still had the stands owning 54 % of
+// meme-market's remaining sub-luma-8 mass. The floor has to be under the
+// DARKEST face, not under the average one.
+const RISER_MIN_LUM = 0.062
 
 /**
  * liftDarkMass(color, minLum) — raise a colour to a minimum LINEAR luminance
@@ -2545,10 +2819,40 @@ export function buildCrowd(opts = {}) {
       // that light can act on (linear ~0.13 rather than ~0.077 before the row
       // crush), so the stand reads as a dark mass with value structure instead
       // of the largest sub-luma-8 region in the frame.
+      //
+      // v3.7 — DARK MASS *WITH STRUCTURE*, NOT A VOID. meme-market's crowd
+      // band is 24.76 % of frame with 22.55 % of its own pixels below luma 8,
+      // contributing 5.58 of that arena's 10.28 points against a limit of 10:
+      // the crowd is 54 % of the remaining dark mass in the game. The reference
+      // is explicit about what it should be instead — "a dark overlapping mass
+      // punctuated by camera flashes — you read crowd from density and value,
+      // never from an individual" — and a mass has INTERNAL VALUE STEPS. Two
+      // changes, and neither touches saturation (the bag-of-Skittles failure
+      // this curve was written against is a CHROMA failure, still fixed):
+      //
+      //  a. THE FLOOR RISES, THE CEILING DOES NOT. 0.155 -> 0.205 with the
+      //     span pulled in (0.40 -> 0.33), so the mean seat barely moves
+      //     (0.315 -> 0.337) while the darkest seat in the darkest row goes
+      //     from HSL-L 0.127 to 0.180 — an albedo light can still act on
+      //     instead of one that bottoms the histogram out. The back-row crush
+      //     softens 0.18 -> 0.12 for the same reason: it was subtracting from
+      //     the rows that are already deepest in the stand's own shadow.
+      //  b. STRUCTURE, which is the half that was actually missing. A stand
+      //     whose values are drawn from one smooth curve is noise, and noise
+      //     at crowd scale averages to a flat field — exactly the featureless
+      //     dark region the measurement finds. Seats now carry a deterministic
+      //     ±14 % banding term keyed to (row, seat) that groups neighbours into
+      //     alternating light and dark clumps of two-to-three, so the mass
+      //     reads as overlapping bodies at thumbnail size instead of one
+      //     silhouette. It is free: same rng draw count, same buffers.
       const vr = Math.pow(rng(), 1.5)
-      let val = 0.155 + vr * (isAccent ? 0.54 : 0.40)
-      val *= (1 - rowT * 0.18) * valueScale
-      color.setHSL(hsl.h, THREE.MathUtils.clamp(sat, 0, 1), THREE.MathUtils.clamp(val, 0.085, 0.78))
+      let val = 0.205 + vr * (isAccent ? 0.50 : 0.33)
+      // Banding: two interleaved integer periods that never line up (3 and 5
+      // along the row, 2 across the rows), so the clumps read as bodies rather
+      // than as a stripe pattern.
+      const band = (Math.floor(i / 3) % 2 ? 1 : -1) * 0.09 + (Math.floor(i / 5) % 2 ? 1 : -1) * 0.05
+      val *= (1 + band) * (1 - rowT * 0.12) * valueScale
+      color.setHSL(hsl.h, THREE.MathUtils.clamp(sat, 0, 1), THREE.MathUtils.clamp(val, 0.135, 0.78))
     }
     // v2.1 §27: a TEAM SHIRT is never crushed. It is the one colour in the
     // stand that carries information (whose fighter this section is behind),
@@ -2723,7 +3027,12 @@ export function buildCrowd(opts = {}) {
       // than a modulation, so multiplying the fill by it would put the floor
       // right back where it was; their value structure comes from the baked
       // vertical gradient instead, which the flat term preserves additively.
-      emissive: RISER_FILL_HEX, emissiveIntensity: fill * 0.55,
+      // v3.8: 0.55 -> 0.74. The steps are the part of the crowd band the key
+      // never reaches at all, and the flat bounce is the only light they get;
+      // at 0.55 the faces turned away from the arena still integrated to a
+      // near-zero pixel. Structure now comes from the baked faces above, so the
+      // fill can be raised without flattening anything.
+      emissive: RISER_FILL_HEX, emissiveIntensity: fill * 0.74,
     })
     riserGeo = riserGeometry()                  // shared unit box, scaled per instance
     riserMesh = new THREE.InstancedMesh(riserGeo, riserMat, nRiser + nBanner + nFence)
@@ -3106,62 +3415,25 @@ export function buildCrowd(opts = {}) {
     // buried, and no instance in ANY of the crowd's meshes was left at the
     // identity matrix the InstancedMesh was allocated with.
     // -----------------------------------------------------------------------
+    // v3.7: the walk itself now lives in auditCrowdInstances() so that the
+    // frog / penguin / shiba stands run the SAME code and return the SAME
+    // shape. Nothing about this stand's semantics changed — the support set is
+    // still built from the riser instances exactly as they were written, the
+    // tolerances are still the bounce height and the seated sink, and the
+    // returned object still carries the stand's own fields.
     audit(o = {}) {
       const tol = o.tolerance ?? 0.05
-      // The support set, exactly as the riser instances were written.
-      const steps = [{ name: 'ground', top: 0, z0: -1e4, z1: 1e4 }]
-      for (let r = 1; r <= nRiser; r++) {
-        steps.push({
-          name: `step${r}`, top: r * rowRise,
-          z0: -r * rowDepth - rowDepth * 0.5, z1: -r * rowDepth + rowDepth * 0.5,
-        })
-      }
-      const sink = 0.30 * 1.20 + tol      // deepest a seated spectator sinks in
-      const lift = bounceH * 1.4 + tol    // highest the bounce can carry one up
-      const _ap = new THREE.Vector3()
-      const _aq = new THREE.Quaternion()
-      const _as = new THREE.Vector3()
-      const _am = new THREE.Matrix4()
-      const bad = []
-      let worstGap = 0
-      for (let i = 0; i < count; i++) {
-        mesh.getMatrixAt(i, _am)
-        if (isIdentityMatrix(_am)) { bad.push({ i, why: 'identity' }); continue }
-        _am.decompose(_ap, _aq, _as)
-        let top = null
-        for (const st of steps) {
-          // half a seat of Z slack: the layout jitters +/-0.13 m off the row
-          if (_ap.z < st.z0 - 0.30 || _ap.z > st.z1 + 0.30) continue
-          if (st.top > _ap.y + lift) continue          // a step ABOVE the feet
-          if (top === null || st.top > top) top = st.top
-        }
-        if (top === null) { bad.push({ i, why: 'unsupported', y: +_ap.y.toFixed(4), z: +_ap.z.toFixed(3) }); continue }
-        const gap = _ap.y - top
-        if (Math.abs(gap) > worstGap) worstGap = Math.abs(gap)
-        if (gap > lift || gap < -sink) {
-          bad.push({
-            i, why: gap > 0 ? 'floating' : 'buried',
-            gap: +gap.toFixed(4), y: +_ap.y.toFixed(4), z: +_ap.z.toFixed(3), on: top,
-          })
-        }
-      }
-      // Attachments ride a composed body matrix; one left at identity means an
-      // index/count mismatch between the pose arrays and the instance count.
-      const unwritten = []
-      for (const mm of meshes) {
-        if (mm === mesh) continue
-        for (let k = 0; k < mm.count; k++) {
-          mm.getMatrixAt(k, _am)
-          if (isIdentityMatrix(_am)) unwritten.push(`${mm.name}#${k}`)
-        }
-      }
-      return {
-        ok: bad.length === 0 && unwritten.length === 0,
-        count, rows, rowRise, hasSteps, nRiser, nBanner, nFence, lod: CROWD_LODS[lod],
-        checked: count + meshes.reduce((a, mm) => a + (mm === mesh ? 0 : mm.count), 0),
-        worstGap: +worstGap.toFixed(4),
-        bad, unwritten,
-      }
+      return auditCrowdInstances({
+        mesh, meshes, count,
+        supports: crowdSupportsFromRows({ nRiser, rowRise, rowDepth }),
+        tolerance: tol,
+        sink: 0.30 * 1.20,   // deepest a seated spectator sinks into its step
+        lift: bounceH * 1.4, // highest the bounce can carry one off its step
+        zPad: 0.30,          // half a seat of Z slack for the layout jitter
+        extra: {
+          rows, rowRise, hasSteps, nRiser, nBanner, nFence, lod: CROWD_LODS[lod],
+        },
+      })
     },
 
     // Everybody LOSES THEIR MINDS. Strength stacks, decays on its own.

@@ -1,5 +1,115 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 13 — the disputed 1080p number, settled on paper. Do not re-litigate.
+
+Two verifiers reported the same scene (`permanent-reserve-core`, tier `high`, "1920x1080 pr2")
+as **10.68 ms / 94 fps** and **37.6 ms / 22-27 fps**. Both cannot be right. The reconciliation
+below is derived from the code, not measured — I could not drive a browser. The Verify agent
+confirms it with the protocol at the bottom.
+
+### What `high` actually costs at 1080p (read the two lines that decide it)
+
+- `Game.js:36` — `renderer.setPixelRatio(Math.min(devicePixelRatio || 1, quality.pixelRatio))`.
+  This sizes the **canvas drawbuffer only**.
+- `Pipeline.js:_postPixelRatio()` — the composer runs at `min(renderer.getPixelRatio(), renderScale)`,
+  and round 12 set `TIERS.high.renderScale = 1.0`.
+
+`min(2, 1.0) === min(1, 1.0) === 1.0`. So at a 1920x1080 CSS viewport, **`high` renders the scene,
+GTAO, bloom, bokeh, SMAA and the grade at 1920x1080 whether the canvas is pr1 or pr2.** Post cost is
+identical in both measurements. The 3840x2160 drawbuffer the second verifier confirmed from
+`renderer.domElement.width/height` is real, but only **one pass ever touches it**: the final
+`OutputPass` blit (8.3 Mpx, plus an MSAA resolve, because `Game.js:32` asks for `antialias: true`).
+
+So the mental model that makes 37.6 ms plausible — "pr2 means 4x the work" — is **wrong**. pr2 costs
+one extra fullscreen blit + resolve, order 1-3 ms on an M-series laptop, not 27 ms. **The disagreement
+is not caused by pixelRatio.** It has to be rig or environment. Ranked candidates, all checkable:
+
+1. **The 10.68 ms run was probably not at 3840x2160 at all.** `window.__viewport()` defaults to
+   `(1600, 900, 1)` = 1.44 Mpx canvas. Round 12's own note records 1600x900/pr1 at 5.3-7.4 ms
+   across arenas, so 10.68 ms for the heaviest arena fits that configuration far better than it
+   fits a 4K present path.
+2. **The 37.6 ms run was inflated by the capture rig.** `__viewport` only exists under `?cap=1`,
+   which constructs the renderer with `preserveDrawingBuffer: true` — a per-frame full-drawbuffer
+   copy (8.3 Mpx at pr2) and a known ANGLE/Metal fast-path killer. `__step()`/`__draw()` are also
+   synchronous and unpaced, so CPU frame N+1 never overlaps GPU frame N the way rAF lets it;
+   a serialized loop reads 1.5-2x high on its own.
+3. **A second live WebGL context.** Documented in this project as a 2.4 s -> 27.8 s inflater.
+   `ReplayUI.js:230` builds a *second* renderer and a second `RenderPipeline`; a leftover clip
+   viewer, or a second tab of the game, is enough.
+4. **A degraded composer.** If a structural pass fails, `_degrade()` falls back to a direct
+   `renderer.render()` — which DOES run at the full 3840x2160 canvas, multisampled. That is a
+   genuine 4x fill jump and would explain 37.6 ms honestly. `stats().composer === false` is the tell.
+
+### Decision (GameConfig, mine)
+
+**`high.pixelRatio` 2 -> 1, `medium.pixelRatio` 1.5 -> 1. `ultra` stays at 2.**
+
+This is not a quality cut and it is not a guess — it is the one lever that is provably free:
+- The post chain is unchanged. `_postPixelRatio()` returns 1.0 for `high` either way; the proof is
+  the `min()` above, not a measurement.
+- The image is unchanged. The composer output is 1080p in both cases; pr2 upsampled it in a
+  fragment shader, pr1 lets the window compositor do the same upscale for free. The HUD is DOM +
+  2D canvases, so it is unaffected either way.
+- What is saved: the present path drops from 8.3 Mpx to 2.07 Mpx, and the multisampled resolve of
+  the default framebuffer drops with it. ~230 MB/frame of memory traffic at pr2 on a 4K present.
+- It also makes the *failure* path survivable: if the composer ever degrades to a direct render,
+  the fallback now rasterises 2.07 Mpx instead of 8.3.
+- `ultra` keeps 2 because its `renderScale` is 1.5 and `min(devicePixelRatio, 1.5)` needs a 2x
+  canvas. Ultra remains the tier that supersamples.
+
+**COUPLING — the one way to break this.** `pixelRatio` is now the ceiling on `renderScale`. If a
+later round restores `TIERS.high.renderScale` to 1.25/1.5, `high.pixelRatio` must go back up to at
+least that value in the same commit or the supersample silently does not happen.
+
+**Corollary for whoever owns Pipeline.js.** Round 12 paid for the pr2 present path by cutting
+`renderScale` 1.25 -> 1.0, i.e. it degraded the resolution of every pass in the chain to pay for the
+cost of the *last* one. With the present path now 4x cheaper there may be room to restore
+`renderScale` 1.25 and get `high`'s supersampling back. Measure before doing it, and raise
+`high.pixelRatio` to 1.25+ in the same change or it will do nothing.
+
+### Two free wins that are NOT in my files — hand these to their owners
+
+- **`src/core/Game.js:32` — `antialias: true` on the WebGLRenderer is wasted whenever the composer
+  is live.** The only geometry ever drawn to the default framebuffer is OutputPass's fullscreen
+  quad; MSAA cannot antialias a quad's interior, and SMAA already ran inside the chain. It buys
+  nothing and costs a 4x-sample store plus a resolve every frame. Suggest
+  `antialias: qualityName === 'low'` (the `low` tier is the only direct-to-canvas path).
+- **`src/core/Game.js:34` — `preserveDrawingBuffer: this.captureMode`** is correct as written, but
+  it means **every `?cap=1` measurement is inflated** and must never be quoted as a perf number.
+  The `?prof=1` path does not set it. Perf claims come from `?prof=1` only.
+
+### Verification protocol — quote these fields or the number is not admissible
+
+Real Chrome (`--remote-debugging-port`), **no `?cap=1`**, one tab, no other live WebGL context.
+Load `?prof=1`, start a match in `permanent-reserve-core`, let it run 20 s past the ARENA mark
+(the published `ARENA {...}` title covers the first 120 frames and is contaminated by arena build —
+that is defect 8, not steady state), then take the median of `window.__prof.f.slice(-600)`.
+
+Record with the number, every time: `window.__game.pipeline.stats()` (main.js publishes `__game`
+unconditionally, so this works without `?cap=1`) -> `composer`, `pixelRatio`, `canvasPixels`,
+`postPixels`, `postSize`, `renderScale`, `tier`; plus the CSS viewport and the
+display's `devicePixelRatio` and refresh rate. **rAF is vsync-capped**: a 16.7 ms median on a 60 Hz
+panel means "at or above 60", and 94 fps is only measurable on a 120 Hz panel at all — which is
+itself a plausible part of the original disagreement.
+
+PASS = steady-state median <= 16.67 ms at `postPixels` 2073600.
+
+### If it still misses 16.67 ms, apply this ladder in order and stop at the first pass
+
+Each step is a GameConfig-only change; record the measured ms after each so the next person sees
+the cost of each rung. Do NOT reach for exposure, and do NOT cut `renderScale` first — that is the
+lever round 12 already spent.
+1. `high.post.dof: false`. BokehPass renders the scene depth AGAIN (an extra full geometry
+   submission at dofScale 0.75) on top of a full-res bokeh pass. It is the most expensive single
+   pass in the tier and the least visible in a fighting-game read.
+2. `high.shadowSize` 2048 -> 1536. Shadow cost is resolution-bound and independent of the viewport;
+   defect 2 wants shadow *shape*, which is a filter/bias question, not a resolution question.
+3. `high.crowd` 120 -> 96 and `high.propLimit` 40 -> 32.
+4. Only then: talk to Pipeline's owner about `aoScale` or `renderScale`.
+If none of that reaches 16.67 ms, the honest move is to change what the tier CLAIMS —
+GRAPHICS_CONTRACT.md line 47 ("60 fps at 1080p on `high`, on an M-series laptop") is the sentence
+to edit, and it is not owned by the config agent. Say which of the two you did.
+
 ## v3.2 — 2026-08-09: menus + intro brought up a generation. Build GREEN, harness PASS.
 
 ROOT CAUSE of "the menus look much worse than the game": the menus never adopted the render layer.

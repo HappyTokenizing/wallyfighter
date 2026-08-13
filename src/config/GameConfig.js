@@ -57,6 +57,45 @@ export const GameConfig = {
   //
   // Budget note: one 512 map set is ~3.6 MB of GPU memory, so `high`'s 80 MB
   // ceiling is about 22 distinct surface kinds in a match scene.
+  //
+  // -------------------------------------------------------------------------
+  // WHAT `pixelRatio` ACTUALLY BUYS — ROUND 13, read before raising it again.
+  //
+  // `pixelRatio` here feeds ONE line: Game.js does
+  //     renderer.setPixelRatio(Math.min(devicePixelRatio || 1, quality.pixelRatio))
+  // so it sizes the CANVAS drawbuffer. It does NOT size the render. On every
+  // tier above `low` the composer is live and Pipeline._postPixelRatio() runs
+  // the whole chain at
+  //     min(renderer.getPixelRatio(), TIERS[tier].renderScale)
+  // — and TIERS.medium.renderScale and TIERS.high.renderScale are both 1.0
+  // (round 12 dropped high from 1.25). min(2, 1.0) === min(1, 1.0) === 1.0.
+  //
+  // Consequence, and it is exact rather than a guess: at a 1920x1080 CSS
+  // viewport, `high` renders the scene, GTAO, bloom, bokeh, SMAA and the grade
+  // at 1920x1080 whether pixelRatio is 1 or 2. The ONLY thing pixelRatio 2
+  // changed was the final OutputPass blit — it upsampled that same 1920x1080
+  // image into a 3840x2160 default framebuffer (8.3 Mpx, and multisampled,
+  // because Game.js asks for `antialias: true`). Four times the present-path
+  // fill and an MSAA resolve, to display pixels that carry no extra detail:
+  // the source image is 1080p either way, and dropping to pixelRatio 1 simply
+  // moves the same upscale from a fragment shader to the window compositor,
+  // which does it for free. The HUD is DOM + 2D canvases, so it stays crisp
+  // regardless. Nothing in the frame is softer.
+  //
+  // COUPLING — the trap. pixelRatio is now the CEILING on renderScale. If a
+  // later round restores TIERS.high.renderScale to 1.25 or 1.5 for edge
+  // quality, this MUST go back up to at least that value or the supersample
+  // silently will not happen (min() takes the smaller). `ultra` keeps
+  // pixelRatio 2 for exactly that reason: its renderScale is 1.5, so it needs
+  // a 2x canvas to reach 2880x1620. Ultra is the tier that supersamples.
+  //
+  // WHAT THE TIER CLAIMS. `high` targets 60 fps at a 1920x1080 CSS viewport on
+  // an M-series laptop, and the budget is spent on pipeline.stats().postPixels
+  // (2.07 Mpx), not on canvasPixels. Quote postPixels when you measure it —
+  // a 1080p-CSS/pr2 measurement and a 1080p-CSS/pr1 measurement were both
+  // called "1080p high" by different verifiers and they are not the same
+  // configuration on the present path. See BACKLOG.md "ROUND 13 — the disputed
+  // 1080p number" for the full reconciliation.
   // -------------------------------------------------------------------------
   quality: {
     low: {
@@ -70,7 +109,9 @@ export const GameConfig = {
     },
     medium: {
       name: 'Medium', tier: 'medium',
-      pixelRatio: 1.5, shadows: true, shadowSize: 1024, shadowType: 'pcf',
+      // 1.5 -> 1: composer runs at renderScale 1.0, so 1.5 only enlarged the
+      // present blit by 2.25x. Same image, less fill. See the note above.
+      pixelRatio: 1, shadows: true, shadowSize: 1024, shadowType: 'pcf',
       crowd: 60, maxDebris: 45, particleScale: 0.75, propLimit: 24, reflections: false,
       textureSize: 256, anisotropy: 4, textureBudgetMB: 48, envResolution: 128,
       post: { ao: false, bloom: true, dof: false, motionBlur: false, aa: true, grain: 0.018 },
@@ -78,7 +119,11 @@ export const GameConfig = {
     },
     high: {
       name: 'High', tier: 'high',
-      pixelRatio: 2, shadows: true, shadowSize: 2048, shadowType: 'pcf',
+      // 2 -> 1. NOT a quality cut: renderScale 1.0 already caps the whole post
+      // chain at CSS resolution, so this only stops OutputPass upsampling a
+      // 1080p image into a 4x-larger multisampled default framebuffer every
+      // frame. Raise it again ONLY together with TIERS.high.renderScale.
+      pixelRatio: 1, shadows: true, shadowSize: 2048, shadowType: 'pcf',
       crowd: 120, maxDebris: 90, particleScale: 1, propLimit: 40, reflections: true,
       textureSize: 512, anisotropy: 8, textureBudgetMB: 80, envResolution: 256,
       post: { ao: true, bloom: true, dof: true, motionBlur: true, aa: true, grain: 0.026 },
@@ -86,6 +131,9 @@ export const GameConfig = {
     },
     ultra: {
       name: 'Ultra', tier: 'ultra',
+      // STAYS 2 — and it is the only tier for which 2 does anything. Ultra's
+      // renderScale is 1.5, and min(devicePixelRatio, 1.5) needs a 2x canvas
+      // to reach 2880x1620. Drop this to 1 and ultra stops supersampling.
       pixelRatio: 2, shadows: true, shadowSize: 4096, shadowType: 'pcf',
       crowd: 160, maxDebris: 140, particleScale: 1.2, propLimit: 56, reflections: true,
       // Deliberately NOT 1024 textures: `hero` map sets are 4x the memory and

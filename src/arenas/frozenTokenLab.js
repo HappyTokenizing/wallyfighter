@@ -13,6 +13,8 @@ import * as THREE from 'three'
 import {
   ArenaBase, makeRng, flatMat, canvasTexture, makeLightRig, makeSign,
   makeCoinMesh, resolveTeamColors, makeLightShaft,
+  auditCrowdInstances, crowdSupportsFromGroup, snapCrowdSeat,
+  crowdDetailForDistance, crowdDetailTier,
 } from './ArenaBase.js'
 import {
   roundedBox, chamferBox, roundedCylinder, roundedCone,
@@ -1464,12 +1466,24 @@ function penguinBib(x, y, z, nx, ny, nz, BLACK, COAT) {
 // position, and the silhouette extras gate on `screenPixels()`. Nothing is
 // hard-coded: move a stand nearer and it gets its detail back automatically.
 // `at` is the stand's world position; omitted, it behaves exactly as before.
+// v3.8 (defect 3, item 4): `detail` now also speaks ArenaBase's vocabulary —
+// 'low' | 'medium' | 'high' (or 0..2), the knob every other stand in the game
+// takes — so there is ONE crowd LOD language in the codebase. The mapping is
+// exact and lossless in both directions:
+//   'far'  == 'low'      6-segment base, no tail, no feet, no headgear
+//   'near' == 'high'     8-segment base
+//   'medium'             7-segment base, extras still gated on coverage
+// The pixel gates below are NOT replaced by the tier: they are the more
+// precise instrument (they know where the stand actually is), and the tier
+// only sets the base they trim from.
 function penguinGeometry(detail = 'near', at = null) {
-  const near = detail !== 'far'
+  const tier = detail === 'far' ? 0 : (detail === 'near' ? 2 : crowdDetailTier(detail))
+  const near = tier >= 1
   const BLACK = 0x2c313a, COAT = 0xd8dee4, ORANGE = 0xc98a3a
   // 0.34 m is the body's own world radius — the honest input to the decision.
   const px = at ? screenPixels(0.34, at) : Infinity
-  const S = at ? lodSegments(near ? 8 : 6, 0.34, at, { min: 5, step: 1 }) : (near ? 8 : 6)
+  const base = [6, 7, 8][tier]
+  const S = at ? lodSegments(base, 0.34, at, { min: 5, step: 1 }) : base
   // Extras survive only while they are more than a couple of pixels across,
   // and they are NOT one decision. The tail is a rear SILHOUETTE break and
   // survives as long as the bird is recognisably a bird (50 px); the feet are
@@ -1587,6 +1601,11 @@ export function buildPenguinCrowd(opts = {}) { // exported for headless §27 che
   // where the flock actually IS rather than against a guess. Optional: the §27
   // headless checks call this with no `at` and get the round-10 tessellation.
   const at = opts.at || null
+  // One tier for the whole stand, in ArenaBase's vocabulary, whichever
+  // vocabulary the caller used (see penguinGeometry).
+  const tier = opts.detail === 'far' ? 0
+    : (opts.detail === 'near' || opts.detail == null ? 2 : crowdDetailTier(opts.detail))
+  const detail = ['low', 'medium', 'high'][tier]
   const geo = penguinGeometry(opts.detail, at)
   // A real feathered surface, not a flat vertex colour: the sheen term is what
   // puts a soft wrap highlight on a penguin's back under a cold sky, and the
@@ -1611,8 +1630,16 @@ export function buildPenguinCrowd(opts = {}) { // exported for headless §27 che
   // ...and the same pixel test the body uses: three extra instanced draws are
   // cheap, but they are not free, and below ~110 px of coverage a hard hat is
   // four pixels of orange on a black head.
-  const wantHats = opts.hats !== false && opts.detail !== 'far'
-    && (!at || screenPixels(0.34, at) > 55)
+  // MEASURED, at the shipped LOD eye [0, 2.4, 9.5]: this flock's three stands
+  // cover 56.2 px (back, 17.0 m), 59.6 px and 59.6 px (flanks, 16.0 m). The
+  // gate sits deliberately between them. The back stand is the widest and the
+  // most populous — 46 % of the flock — so it is the one where three extra
+  // instanced draws buy the least: at 56 px a hard hat is four pixels of
+  // orange on a black head, and its silhouette break is already carried by the
+  // pose spread. The flanks are closer to camera in the corner shots and keep
+  // their headgear. Tier 'low' never gets hats at all.
+  const wantHats = opts.hats !== false && tier >= 1
+    && (!at || screenPixels(0.34, at) > 58)
   const hatOf = new Int8Array(count)
   const hatSlot = new Int32Array(count)
   const hatCount = [0, 0, 0]
@@ -1706,9 +1733,27 @@ export function buildPenguinCrowd(opts = {}) { // exported for headless §27 che
       const hgt = r * 0.42
       const riser = new THREE.Mesh(roundedBox(areaW + 0.7, hgt, 0.85, 0.035, 1, { unique: true }), riserMat)
       riser.position.set(0, hgt / 2, -r * 0.85)
+      riser.name = `iceRiser${r}`
       riser.receiveShadow = true
       group.add(riser)
     }
+  }
+
+  // -- v3.8 GROUND AND DE-TRUNCATE (defect 3, item 2) ------------------------
+  // Every seat is now snapped to the tread it belongs on, and the tread set is
+  // read off the boxes this stand ACTUALLY BUILT (crowdSupportsFromGroup) —
+  // not off the same `-row * 0.85` arithmetic that placed the seats, which is
+  // the mistake that put spectators in mid-air everywhere it was made twice.
+  // A bird whose Z jitter carried it off the back of its step gets lifted onto
+  // the step behind; a bird standing at floor height inside a riser volume is
+  // pushed out of the riser's front face instead of being cut off at the ribs.
+  // With `risers: false` there is nothing but the ground and every seat snaps
+  // to y = 0, which is exactly right for a stand with no structure.
+  const supports = crowdSupportsFromGroup(group, { width: areaW, groundTop: 0 })
+  for (let i = 0; i < count; i++) {
+    const snapped = snapCrowdSeat(supports, baseX[i], baseZ[i], baseY[i], { lift: 0.30, nose: 0.18 })
+    baseY[i] = snapped.y
+    baseZ[i] = snapped.z
   }
 
   const tipped = new Map()
@@ -1776,7 +1821,39 @@ export function buildPenguinCrowd(opts = {}) { // exported for headless §27 che
   return {
     group,
     mesh,
+    meshes: [mesh, ...hatMeshes.filter(Boolean)],
+    detail,
     count,
+
+    /**
+     * v3.8 — THE SHARED CROWD AUDIT (defect 3, item 3), the same walk and the
+     * same return shape as ArenaBase.buildCrowd().audit(), over this stand's
+     * own ice risers.
+     *   -> { ok, count, checked, worstGap, bad, unwritten, species, rows, ... }
+     * `bad: []` means no penguin is in mid-air and none is standing inside a
+     * riser; `unwritten: []` means no hat instance was left at the identity
+     * matrix its InstancedMesh was allocated with. Read-only and allocation-
+     * free per instance, so it is safe to call mid-match.
+     */
+    audit(o = {}) {
+      return auditCrowdInstances({
+        mesh,
+        meshes: hatMeshes.filter(Boolean),
+        count,
+        // The set captured at BUILD, while the group was still at the origin.
+        // crowdSupportsFromGroup() reports WORLD boxes and the instance
+        // matrices are LOCAL, so re-reading it after the arena has positioned
+        // and rotated the stand would compare two different spaces.
+        supports,
+        tolerance: o.tolerance ?? 0.05,
+        lift: bounceH * 1.6,   // the cheer hop, which is a bird's own doing
+        sink: 0.20,
+        zPad: 0.30,
+        skip: (i) => tipped.has(i),   // mid-tumble is not mid-air
+        extra: { species: 'penguin', rows, perRow, detail, hats: wantHats },
+      })
+    },
+
     update(dt) {
       time += dt
       hypeExtra = Math.max(0, hypeExtra - dt * 1.4)

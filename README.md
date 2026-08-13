@@ -208,9 +208,9 @@ per-mode keys, touch details and the complete combo grammar live in
   works: flick the stick **straight down twice**, then tap **ATTACK**.
 - **Landscape is the supported orientation** (the UI is tuned down to
   844×390); portrait shows a big ROTATE DEVICE screen.
-- Touch devices default to the **Low** quality preset with a capped render
-  resolution for a stable frame rate — raise it in Settings if your device
-  keeps up; your choice persists.
+- Touch devices default to the **Low** quality preset — no post chain, no
+  shadows, a capped device pixel ratio and a 24-head crowd, for a stable frame
+  rate. Raise it in Settings if your device keeps up; your choice persists.
 - Desktop testing: set `localStorage` key `wcs-touch` to `1` to force the
   overlay on any machine (or `0` to suppress it on a touch laptop).
 
@@ -233,10 +233,12 @@ per-mode keys, touch details and the complete combo grammar live in
 
 Open **Settings** ("TOKENOMICS & TUNING") from the main menu:
 
-- **Graphics quality** — Low / Medium / High. Scales render resolution
-  (pixel ratio), shadows and shadow-map size, crowd size, debris and particle
-  counts, prop limits, and reflections. Applies live and persists. Touch
-  devices default to Low.
+- **Graphics quality** — Low / Medium / High. Scales the post-processing stack
+  (Low has none, Medium adds bloom and SMAA, High adds ambient occlusion and
+  depth of field), shadows and shadow-map size, texture resolution, crowd size,
+  debris and particle counts, prop limits, and reflections. All three render at
+  the window's own resolution — the presets buy quality with passes and detail,
+  not with pixel count. Applies live and persists. Touch devices default to Low.
 - **Physics preset** — Standard / Silly / Unhinged. Scales knockback, bounce,
   spin and debris. Applies to the next match (and can be cycled live in the
   Ragdoll Playground with **B**).
@@ -327,10 +329,26 @@ never touches combat, combat never touches the DOM).
   with an accumulator (and a spiral-of-death guard), so game speed never
   depends on display refresh — a 144 Hz monitor renders more, simulates the same.
 - Press **F3** for the built-in FPS / active-screen / quality overlay.
-- If it stutters, drop the quality preset. **Low** disables shadows and
-  reflections, halves resolution scaling, and cuts crowd (24 heads), debris,
-  particles and prop limits. **High** is 2× pixel ratio, 2048 shadow maps,
-  120-head crowds and full debris — tuned for a mid-range GPU.
+- If it stutters, drop the quality preset. **Low** disables shadows,
+  reflections and the whole post chain (it renders straight to the canvas), and
+  cuts crowd to 24 heads along with debris, particles and prop limits.
+  **High** is 2048 shadow maps, 120-head crowds, full debris, and the complete
+  post stack — ambient occlusion, bloom, depth of field, SMAA and the grade.
+- **Where the resolution actually goes.** The post-processing chain is
+  deliberately decoupled from the canvas: on **High** every pass runs at the
+  window's CSS resolution (1920×1080 in a 1080p window), and the canvas matches
+  it 1:1, so the frame is rendered once at one resolution end to end. **Ultra**
+  is the tier that supersamples — it renders the chain at 1.5× and downsamples
+  on the way out, which is what its 2× pixel ratio is for. Raising the pixel
+  ratio on High would only stretch the finished 1080p image into a larger
+  buffer; it would not add detail, so High doesn't pay for it. The HUD is DOM,
+  not canvas, so it stays sharp on a Retina display at every preset.
+- The frame budget is **60 fps at a 1080p window on High**, on an M-series
+  laptop. If you are measuring it: use `?prof=1` (never `?cap=1`, whose
+  capture mode keeps the drawing buffer alive and inflates every frame), close
+  any second tab of the game, and quote
+  `window.__game.pipeline.stats().postPixels` — that, not the canvas size, is
+  the number the budget is spent on. Full reasoning in `BACKLOG.md`.
 - Touch devices boot on **Low** with a capped device pixel ratio; the setting
   is yours to raise and it persists.
 - Physics bodies sleep when settled, debris is culled oldest-first past the
