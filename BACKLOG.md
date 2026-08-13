@@ -1,5 +1,77 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 17 — 1080p budget MET on throughput. Round 13's ladder is now moot.
+
+Measured under round 13's own admissibility protocol (below), 2026-08-13. Both free wins
+it handed out are now applied, and the ladder it specified was never needed — not one rung.
+
+    postPixels 2073600  canvasPixels 2073600  postSize [1920,1080]  css [1920,1080]
+    composer true  tier high  renderScale 1  pixelRatio 1  dpr 1  canvasMSAA false
+    n 600   median 10.1 ms   p90 24.0 ms   p99 156.2 ms   (99 fps)
+
+PASS on the stated criterion (median <= 16.67 ms at postPixels 2073600), with 40 % headroom.
+GRAPHICS_CONTRACT.md line 47 was FALSE when written and is now TRUE; it has been updated to
+quote the measurement rather than assert the claim.
+
+### OPEN P1 — FRAME PACING. The tail is bad and the median hides it.
+
+p90 24.0 ms against a 10.1 ms median is a bimodal distribution: ~10 % of frames cost more than
+twice the median, and a **156 ms** frame landed inside steady state (last 600 frames, 20 s past
+the arena mark — this is not arena build). Throughput is solved; smoothness is not, and the
+user has asked twice for the game to "run much smoother". Do not close this with a median.
+
+Do NOT start by guessing. Instrument first — the last two perf rounds were both spent on the
+wrong lever because the symptom was assumed rather than located:
+1. Log a per-frame breakdown for any frame over 2x median (CPU update vs render submit vs
+   composer), and dump the 20 worst frames with their phase split.
+2. Prime suspects, in the order they are cheap to falsify: (a) time-sliced texture generation
+   in `src/render/textures.js` — `flushTextureQueue()` is exactly the kind of synchronous drain
+   that produces a single 156 ms frame, and it has form: it caused the 1547 ms intro hitch;
+   (b) shader compile / program link on first use of a VFX material (`progs` was 159 at match
+   start); (c) GC from per-frame allocation in the animation or particle path.
+3. Only after the split is known, fix the phase that owns it.
+
+### Mood histograms after the two AO/band fixes (all measured this build)
+
+    arena                    mood               median  below8  clip  pureBlack  frameReport
+    calm-before-liquidation  liquidation-storm      88   5.002  .001      0      PASS  (was 8.919 FAIL)
+    mountain-node-village    mountain-dawn          92   0.033     0      0      PASS  (band retuned)
+    settlement-express       subway-tunnel          89   3.038     0      0      PASS
+    permanent-reserve-core   reserve-core           46   5.165     0      0      PASS
+    meme-market              meme-plaza             41   6.304     0      0      PASS
+    bull-market-colosseum    sunset-stadium         58   3.016     0      0      FAIL
+
+### OPEN P1 — bull-market-colosseum median 58 against a 100-158 band
+
+PRE-EXISTING, not caused by this round (`sunset-stadium` was not touched). Note the shape:
+below8 3.016 and pureBlack 0, i.e. nothing is crushed — the scene is simply far dimmer than a
+band that groups it with daylight moods. That is the SAME diagnosis that was correct for
+mountain-dawn, which is exactly why the band must not just be widened to make it green.
+Someone has to look at the arena and decide which is wrong:
+- If the sunset rig is genuinely underlit, fix the rig; a stadium at sunset should not read at
+  the same median as a night market (meme-plaza measures 41).
+- If 58 is the right answer for this art direction, move `sunset-stadium` out of the daylight
+  group in MOOD_FRAME_TARGETS and say so in the comment, as was done for mountain-dawn.
+Do not touch the number in MOOD_FRAME_TARGETS without a screenshot justifying the choice.
+Widening a band because it is the file you happen to have open is metric-gaming — cf. the
+round-9 pipeline that added a 4-count black floor so pctPureBlack read 0.000 while the black
+holes were still there at RGB(4,4,4).
+
+### MEASUREMENT METHOD — one arena per browser session. This bit twice.
+
+`screens.goto('match', ...)` does NOT reliably rebuild when a match is already running: after
+~45 s a KO ends the round and the goto lands on a results screen instead, so the pipeline keeps
+the PREVIOUS arena's mood and you silently measure the previous arena again. Two runs produced
+byte-identical duplicate rows this way before it was caught (`mountain-node-village` reporting
+mood `liquidation-storm`). Guard on `pipeline._mood` matching the arena's declared mood before
+sampling, and prefer one arena per browser launch. Also: `screens.current.arena.id` reads null —
+do not use it as a readiness signal. And give every CDP call a timeout; a script without one
+hung for nine minutes instead of failing in twenty seconds.
+
+### Also open, found in the same run
+- One `404 (Not Found)` on the preview build. Harmless-looking, but a shipped 404 is a shipped
+  bug — find it and either add the asset or stop requesting it.
+
 ## ROUND 13 — the disputed 1080p number, settled on paper. Do not re-litigate.
 
 Two verifiers reported the same scene (`permanent-reserve-core`, tier `high`, "1920x1080 pr2")

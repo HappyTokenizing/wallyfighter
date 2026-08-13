@@ -948,7 +948,7 @@ const EXPOSURE_DEFAULT = {
 // ---------------------------------------------------------------------------
 const AO_ARCH = { aoScreenScale: 96, aoThickness: 1.90, aoDistanceExponent: 1.45, aoDistanceFallOff: 0.15, aoScale: 2.45 }
 
-// Per-mood departures from AO_ARCH. Only two moods need one.
+// Per-mood departures from AO_ARCH. Only the crushed-shadow moods need one.
 const MOOD_AO = {
   // The vault is one emissive glyph in a near-black room; the full 2.45 pow on
   // top of an already crushed shadow end turns corners into the pure-zero holes
@@ -956,6 +956,16 @@ const MOOD_AO = {
   'reserve-core': { aoScreenScale: 96, aoThickness: 1.90, aoDistanceExponent: 1.45, aoDistanceFallOff: 0.15, aoScale: 1.75 },
   // meme-plaza is the P0 black-hole arena. Same reasoning, harder.
   'meme-plaza': { aoScreenScale: 96, aoThickness: 1.80, aoDistanceExponent: 1.45, aoDistanceFallOff: 0.15, aoScale: 1.80 },
+  // Same disease as the two above, found by measurement rather than by eye.
+  // calm-before-liquidation was failing below8 at 8.9% against its ceiling of
+  // 6, and the arena was rebuilt twice trying to fix it from the light rig. Two
+  // independent CPU estimators driven off that arena's OWN rig and stage machine
+  // both put below8 at 0.4% and FALLING as the storm builds -- two orders of
+  // magnitude under what the browser measures, in the same direction, twice.
+  // The one term neither estimator models is GTAO, and this mood was taking the
+  // full AO_ARCH 2.45 pow: ao 0.60 -> x0.26, ao 0.40 -> x0.055, with 12.6% of
+  // the frame sitting in exactly that band. The dark is made here, not there.
+  'liquidation-storm': { aoScreenScale: 96, aoThickness: 1.90, aoDistanceExponent: 1.45, aoDistanceFallOff: 0.15, aoScale: 1.85 },
 }
 
 /** Per-mood GTAO request. Shaped for `RenderPipeline.setAO()`. */

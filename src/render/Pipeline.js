@@ -441,8 +441,15 @@ const MOOD_FRAME_TARGETS = {
   'museum-gallery': { medianLo: 115, medianHi: 168 },
   'sunset-stadium': { medianLo: 100, medianHi: 158 },
   'overcast-swamp': { medianLo: 98, medianHi: 155 },
-  'mountain-dawn': { medianLo: 86, medianHi: 148 },
   // Dusk and lit interiors: darker by design, still readable.
+  // 'mountain-dawn' sits here and not with the daylight moods above. It was
+  // grouped with them by name, but the arena is BLUE HOUR -- the sun is below
+  // the ridge and the key is sky bounce. It measured median 71 with below8 at
+  // 0.684% against a ceiling of 6, i.e. no crushed shadows and no black holes:
+  // a correctly exposed dark scene, failing only a band copied from noon. The
+  // arena tried to reach 86 with a stronger rig and rejected it on measurement
+  // as a blown-out dawn. Same call the table already makes for 'meme-plaza'.
+  'mountain-dawn': { medianLo: 62, medianHi: 124, below8: 8 },
   'tower-dusk': { medianLo: 62, medianHi: 128, below8: 8 },
   'interior-vault': { medianLo: 60, medianHi: 124, below8: 8 },
   'subway-tunnel': { medianLo: 55, medianHi: 118, below8: 9 },
@@ -2029,7 +2036,28 @@ export class RenderPipeline {
     }
     if (this.opts.features) Object.assign(base, this.opts.features)
     if (this.opts.renderScale !== undefined) base.renderScale = this.opts.renderScale
+    // AA FLOOR. Game.js only asks for a multisampled default framebuffer when
+    // the BOOT tier is composer-less, because canvas MSAA is unreachable behind
+    // a composer (see the comment there). That makes a runtime setQuality()
+    // down to a composer-less tier the one path that could present raw aliased
+    // geometry -- the canvas has no MSAA and nothing would be running SMAA.
+    // Keep a minimal composer up instead: SMAA and nothing else, which is far
+    // cheaper than the tier's full stack and still cheaper than being wrong.
+    if (!base.composer && !this._canvasHasMSAA()) {
+      base.composer = true
+      base.aa = true
+      base.ao = false; base.bloom = false; base.dof = false
+      base.motionBlur = false; base.taa = false; base.grain = 0
+    }
     return base
+  }
+
+  /** Whether the WebGL context was created with a multisampled default FBO. */
+  _canvasHasMSAA() {
+    try {
+      const attrs = this.renderer?.getContext?.()?.getContextAttributes?.()
+      return attrs ? !!attrs.antialias : true
+    } catch { return true }
   }
 
   // -------------------------------------------------------------------------

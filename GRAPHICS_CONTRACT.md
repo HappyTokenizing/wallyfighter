@@ -46,6 +46,19 @@ judged against these:
   accent. Fighters must stay readable against their arena (rim light is the tool).
 - Performance budget: 60 fps at 1080p on `high`, on an M-series laptop. Draw calls
   under ~900 in a match. Do not exceed ~250k triangles in a match scene.
+  **Status: MET for throughput, NOT met for frame pacing.** Measured 2026-08-13,
+  real Chrome, no `?cap=1`, `permanent-reserve-core`, median of the last 600
+  frames 20 s past the arena mark, `postPixels` 2073600 / `composer` true /
+  `tier` high / `renderScale` 1 / `pixelRatio` 1 / `dpr` 1:
+  **median 10.1 ms (99 fps), p90 24.0 ms, p99 156.2 ms.**
+  The median clears 16.67 ms with 40 % headroom. The tail does not: p90 at 2.4x
+  the median is a bimodal distribution, and a 156 ms frame inside steady state is
+  a visible hitch. Quote BOTH numbers. A budget line that reports only the median
+  is how "runs at 99 fps" and "feels stuttery" end up in the same build.
+  The triangle figure is a SCENE-CONTENT budget. Do not check it with
+  `renderer.info.render.triangles` -- that is a per-FRAME total including every
+  shadow pass and both fighters, and reading it as scene content is what produced
+  the bogus "623k-912k, 3.6x over cap" panic. Arena content measures 40-88k.
 
 ---
 

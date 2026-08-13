@@ -28,8 +28,25 @@ export class Game {
     // back as a PNG. Off by default: it costs a little bandwidth every frame.
     this.captureMode = typeof location !== 'undefined' && new URLSearchParams(location.search).has('cap')
 
+    // AA OWNERSHIP — WHY THIS IS NOT JUST `true`. The canvas's own MSAA buffer
+    // is only ever used on a tier that runs WITHOUT a composer. Once
+    // EffectComposer is live, RenderPass draws into an offscreen target and the
+    // only thing ever written to the default framebuffer is a single fullscreen
+    // triangle, which has no geometric edges to antialias. Asking for a
+    // multisampled default framebuffer in that case buys nothing and costs a
+    // 4x-sample write of the whole screen plus a resolve, every frame. SMAAPass
+    // owns AA whenever the composer is up.
+    //
+    // This flag is immutable after context creation, so it reads the BOOT tier.
+    // A later setQuality() down to a composer-less tier is covered on the other
+    // side: Pipeline._resolveFeatures() keeps a minimal SMAA-only composer alive
+    // when it sees the canvas has no MSAA, so a runtime downgrade can never land
+    // on raw aliased geometry.
+    const bootComposer = this.quality?.post?.composer !== undefined
+      ? !!this.quality.post.composer
+      : (this.quality?.tier || 'high') !== 'low'
     this.renderer = new THREE.WebGLRenderer({
-      antialias: true,
+      antialias: !bootComposer,
       powerPreference: 'high-performance',
       preserveDrawingBuffer: this.captureMode,
     })
