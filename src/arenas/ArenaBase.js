@@ -3958,6 +3958,104 @@ export const ARENA_SURFACE_HINTS = {
 // like meshes it must skip. The interaction is documented HERE, on the merge
 // side, because this is the call site every arena already reads.)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// cullShadowCasters(root, opts) — v3.6, ROUND 15.
+//
+// WHY. Round 15 attributed the frame's draw submissions per pass for the first
+// time (Pipeline.profileDraws() / drawProfile()). On permanent-reserve-core at
+// 1920x1080, tier high, AFTER the duplicate shadow render was removed:
+//
+//   shadow 305   beauty 250   GTAO normal prepass 204   post quads 18
+//
+// The shadow map is still the single largest block of submissions in the frame
+// — LARGER than the beauty pass — because 301 of the arena's meshes carry
+// castShadow and the two shadow-casting lights each rasterise the ones inside
+// their frustum. And the caster set is mostly noise: measured on reserve-core,
+// 83 casters have a largest world dimension under 0.35 m and 124 under 1 m.
+//
+// A 0.2 m bolt on a 2048 shadow map spanning a ~40 m frustum is under a texel
+// and a half. It cannot produce a shadow anybody can see; it can only produce
+// a draw call and a little shadow acne. Dropping it is free.
+//
+// WHAT IS DELIBERATELY NOT TOUCHED, because these are the things previous
+// rounds paid for and this pass must never regress:
+//   * Ground-decal contact shadows. Those are depthWrite:false decal meshes
+//     (`contactShadow`, contact discs, AO plates) — they are not shadow casters
+//     at all, so this pass cannot reach them. It also skips anything with
+//     castShadow already false, so it can never turn a shadow ON.
+//   * Fighters and anything skinned/dynamic/physics-driven. `dynamic`,
+//     `animated`, `breakable` and skinned meshes are kept unconditionally: a
+//     prop that gets punched across the floor needs its cast shadow to sell the
+//     hit, whatever size it is.
+//   * Anything an arena agent has explicitly protected with
+//     `userData.keepShadow = true`. That tag always wins.
+//   * Anything genuinely big. `minSize` is a hard floor in metres, not a
+//     percentile, so an arena full of small dressing does not silently lose all
+//     of it.
+//
+// Order of operations matters: run this AFTER any merge, never before.
+// mergeStatic unions the shadow flags of its sources, so a bucket that swallows
+// one caster casts for all of them — culling first just gets undone.
+// ---------------------------------------------------------------------------
+const _cullBox = new THREE.Box3()
+
+/** True when this mesh's cast shadow must be left exactly as the arena set it. */
+function shadowCullExempt(o) {
+  const u = o.userData || {}
+  if (u.keepShadow || u.dynamic || u.animated || u.breakable) return true
+  if (o.isSkinnedMesh) return true
+  if (u.isFighter || u.isProp || u.physics) return true
+  return false
+}
+
+export function cullShadowCasters(root, opts = {}) {
+  const out = { tested: 0, dropped: 0, kept: 0, exempt: 0, droppedTiny: 0, droppedFar: 0 }
+  if (!root || !root.isObject3D) return out
+  const minSize = opts.minSize ?? 0.3          // metres, largest world dimension
+  const farDist = opts.farDist ?? 14           // metres beyond the play volume
+  const farMinSize = opts.farMinSize ?? 1.5    // what still earns a shadow out there
+  const b = opts.bounds || {}
+  const minX = b.minX ?? -9, maxX = b.maxX ?? 9
+  const minZ = b.minZ ?? -5.5, maxZ = b.maxZ ?? 5.5
+  try { root.updateMatrixWorld(true) } catch (e) { /* detached — local boxes */ }
+
+  root.traverse((o) => {
+    if (!o.castShadow) return
+    if (!o.isMesh && !o.isInstancedMesh) return
+    if (!o.geometry) return
+    out.tested++
+    if (shadowCullExempt(o)) { out.exempt++; return }
+    const g = o.geometry
+    if (!g.boundingBox) { try { g.computeBoundingBox() } catch (e) { out.kept++; return } }
+    if (!g.boundingBox) { out.kept++; return }
+    _cullBox.copy(g.boundingBox).applyMatrix4(o.matrixWorld)
+    const sx = _cullBox.max.x - _cullBox.min.x
+    const sy = _cullBox.max.y - _cullBox.min.y
+    const sz = _cullBox.max.z - _cullBox.min.z
+    const size = Math.max(sx, sy, sz)
+    if (!Number.isFinite(size)) { out.kept++; return }
+    if (size < minSize) { o.castShadow = false; out.dropped++; out.droppedTiny++; return }
+    // The far test needs a real world position, and an InstancedMesh has none
+    // worth trusting here: `geometry.boundingBox` is the BASE mesh, and the
+    // instanced cloud is usually spread across the arena under an identity
+    // transform. The size test above is still meaningful (every instance is
+    // that size); the distance test is not, so instanced sets never far-cull.
+    if (o.isInstancedMesh) { out.kept++; return }
+    // Distance is to the PLAY VOLUME, not the origin: an arena whose fight
+    // floor sits off-centre must not lose the dressing right beside it.
+    const dx = Math.max(0, minX - _cullBox.max.x, _cullBox.min.x - maxX)
+    const dz = Math.max(0, minZ - _cullBox.max.z, _cullBox.min.z - maxZ)
+    if (Math.hypot(dx, dz) > farDist && size < farMinSize) {
+      o.castShadow = false
+      out.dropped++
+      out.droppedFar++
+      return
+    }
+    out.kept++
+  })
+  return out
+}
+
 const PANEL_NAME_RE = /panel|screen|board|ticker|billboard|jumbotron|monitor|marquee|display|scoreboard|crt|sign|banner|hologram/i
 
 /** True when this mesh must stay its own draw call. Exported for arena agents. */
@@ -4186,6 +4284,13 @@ export class ArenaBase {
     this._disposers = []
     this._disposed = false
     this._occTagged = false
+    // ROUND 15 shadow-caster cull. `shadowCull = false` opts an arena out
+    // wholesale; `shadowCullOpts` retunes minSize/farDist/farMinSize. Neither
+    // is set by ArenaBase — they exist so an arena agent can override without
+    // editing this file. Stats land in `_shadowCullStats`.
+    this.shadowCull = true
+    this.shadowCullOpts = null
+    this._shadowCullStats = null
 
     // v3.3 shared-material flip bookkeeping (see the flatMat header).
     //   _ownMats   materials this arena created off the global cache and must
@@ -4390,6 +4495,18 @@ export class ArenaBase {
       // set (round-2 "alpha-sorted ghost geometry"). Same one-shot moment: the
       // subclass constructor is done, no runtime fade has started yet.
       try { fixTransparentSorting(this.group) } catch (e) { /* best-effort */ }
+      // ROUND 15: last in the one-shot, deliberately. Every merge, upgrade and
+      // isolation pass above can add or move meshes, and mergeStatic unions the
+      // shadow flags of whatever it welds together — culling before them would
+      // simply be undone. See cullShadowCasters() for what it will not touch.
+      try {
+        if (this.quality && this.quality.shadows !== false && this.shadowCull !== false) {
+          this._shadowCullStats = cullShadowCasters(this.group, {
+            bounds: this.bounds,
+            ...(this.shadowCullOpts || {}),
+          })
+        }
+      } catch (e) { /* best-effort */ }
     }
     for (const fn of this._updaters) fn(dt)
   }

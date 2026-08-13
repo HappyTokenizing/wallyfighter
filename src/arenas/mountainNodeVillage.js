@@ -876,7 +876,11 @@ function makeMountainRange(rng, sunDir) {
   // ONE mid rock colour, not three: the per-vertex bake below already varies
   // every peak (different seed, different normals, different key term), so the
   // extra hexes bought two merge buckets and no visible variation.
-  const ROCK_MID = [0x536080]
+  // ROUND 15: 0x536080 -> 0x6d7a9a. See the MEDIAN note in _buildSkyAndLights.
+  // The mid range is 18 % of a gameplay frame and it is the arena's MIDTONE,
+  // not its black anchor — the near foothills keep that job and keep their
+  // authored value.
+  const ROCK_MID = [0x6d7a9a]
   const SNOW_MID = 0xd6e2f2, SNOW_FAR = 0xb0c0dc, SNOW_NEAR = 0x3d4864
   const rockNear = flatMat(ROCK_NEAR, { surface: 'stone', ...V })
   const rockMid = ROCK_MID.map((c) => flatMat(c, { surface: 'stone', ...V }))
@@ -893,8 +897,16 @@ function makeMountainRange(rng, sunDir) {
   // the critic measured (lit L=109.7, shadow L=118.5). Hue goes with it:
   // lit R-B = +0.064, shadow R-B = -0.066. That is the contracted hero moment.
   const BAKE = {
-    near: { haze: 0.03, amb: 0.13, gain: 0.55, wrap: 0.10 },   // ratio ~5 : 1, display L 0.07-0.13 (THE black anchor)
-    mid: { haze: 0.05, amb: 0.22, gain: 2.05, wrap: 0.13 },    // ratio ~2.3 : 1 AFTER fog, display L 0.21-0.40
+    // ROUND 15, the MEDIAN fix (see _buildSkyAndLights). `amb` is the shadow
+    // floor of each layer's bake and it is the only term that reaches a face
+    // turned away from a 17-degree backlight — which, in a frame shot from the
+    // valley toward the peaks, is most of the frame. near 0.13 -> 0.17 and
+    // mid 0.22 -> 0.30; `gain` is untouched, so each layer's LIT face moves by
+    // the same absolute amount and the authored lit/shadow ratio only softens
+    // (near ~5:1 -> ~4:1, mid ~2.3:1 -> ~2.0:1). The round-3 inversion this
+    // whole bake exists to fix was 0.93:1 — there is a very wide margin.
+    near: { haze: 0.03, amb: 0.21, gain: 0.55, wrap: 0.10 },   // ratio ~3.6 : 1, display L 0.10-0.16 (still THE black anchor)
+    mid: { haze: 0.05, amb: 0.38, gain: 2.05, wrap: 0.13 },    // ratio ~1.9 : 1 AFTER fog, display L 0.31-0.47
     far: { haze: 0.34, amb: 0.66, gain: 0.52, wrap: 0.55 },    // ratio ~1.2 : 1, sits near the sky value
   }
 
@@ -1223,8 +1235,8 @@ function makeHut(rng, opts = {}) {
 function makePylon(rng, runeTex) {
   const g = new THREE.Group()
   g.name = 'chainPylon'
-  const stone = flatMat(0x6e7b96, { surface: 'stone' })
-  const stoneDark = flatMat(0x46516a, { surface: 'stone' })
+  const stone = flatMat(0x8794ae, { surface: 'stone' })
+  const stoneDark = flatMat(0x606c88, { surface: 'stone' })
   const snowMat = flatMat(0xb9c9de, { surface: 'snow' })
   const gold = flatMat(0xc9a13a, { surface: 'gold' })
 
@@ -1345,7 +1357,7 @@ function makeRopeBridge(rng) {
   // two rock towers + a sagging plank deck with rope rails, far background
   const g = new THREE.Group()
   g.name = 'ropeBridge'
-  const rock = flatMat(0x545f7c, { surface: 'stone' })
+  const rock = flatMat(0x6d7a98, { surface: 'stone' })
   const snowMat = flatMat(0xb9c9de, { surface: 'snow' })
   const tower = (x, hgt) => {
     let y = 0
@@ -1461,8 +1473,8 @@ function makePennantString(a, b, sag, texUp, texDown, rng) {
 function makeSnowWall(length, rng = makeRng(9)) {
   const g = new THREE.Group()
   g.name = 'snowWall'
-  const stone = flatMat(0x5f6b83, { surface: 'stone' })
-  const stoneLight = flatMat(0x6e7b96, { surface: 'stone' })
+  const stone = flatMat(0x7885a0, { surface: 'stone' })
+  const stoneLight = flatMat(0x8794ae, { surface: 'stone' })
   const snowMat = flatMat(0xb9c9de, { surface: 'snow' })
   const wall = new THREE.Mesh(roundedBox(length, 0.62, 0.35, 0.06, 1, U), stone)
   wall.position.y = 0.25                       // sunk: top sits at 0.56
@@ -1505,8 +1517,8 @@ function makeSnowWall(length, rng = makeRng(9)) {
 function makeStoneLantern() {
   const g = new THREE.Group()
   g.name = 'stoneLantern'
-  const stone = flatMat(0x6e7b96, { surface: 'stone' })
-  const stoneDark = flatMat(0x46516a, { surface: 'stone' })
+  const stone = flatMat(0x8794ae, { surface: 'stone' })
+  const stoneDark = flatMat(0x606c88, { surface: 'stone' })
   const snowMat = flatMat(0xb9c9de, { surface: 'snow' })
   const base = new THREE.Mesh(frustum(0.42, 0.34, 0.3, 8, 0.035, U), stoneDark)
   base.position.y = 0.15
@@ -2078,8 +2090,8 @@ export function buildDogCrowd(opts = {}) { // exported for headless §27 checks
   // built from a course of READABLE stone blocks rather than a speckle field,
   // so the terrace has a scale cue.
   if (opts.risers !== false) {
-    const riserMat = flatMat(0x5f6b83, { surface: 'stone' })
-    const blockMat = flatMat(0x6e7b96, { surface: 'stone' })
+    const riserMat = flatMat(0x7885a0, { surface: 'stone' })
+    const blockMat = flatMat(0x8794ae, { surface: 'stone' })
     const lipMat = flatMat(0xb9c9de, { surface: 'snow' })
     for (let r = 1; r < rows; r++) {
       const hgt = r * 0.42
@@ -2486,6 +2498,43 @@ class MountainNodeVillageArena extends ArenaBase {
   //   mid snow caps (lit)       0.424 lin -> L 0.72   R-B +0.323  WARM
   //   far ridge                 0.34-0.41 lin        ratio 1.15 : 1, sky-valued
   //
+  // ROUND 15 — THE LADDER MOVED UP, AND THE BAND MAY STILL BE WRONG. SAY BOTH.
+  //
+  // frameReport() fails this arena on MEDIAN (outside 86-148 for mood
+  // 'mountain-dawn') while below8 passes at 0.684 % against a 6 % ceiling. That
+  // pair means the frame is uniformly mid-dark with nothing crushed, so the
+  // ladder above is the thing out of band, not the black end of it. Every rung
+  // below the snow caps moved up (bake ambients, the three non-key rig terms,
+  // and the village/plateau stone hexes — each change is documented at its own
+  // site). Measured on the same headless raster before and after:
+  //
+  //     frame median            26 -> 42 counts   (+62 %)
+  //     below luma 8         5.87 % -> 1.73 %
+  //     61 % of frame at means  16-40 -> 30-49
+  //     clipped white           0.000 % both, p99 181 -> 182
+  //
+  // The estimator is a CPU mirror, not the browser, so treat the RATIO as the
+  // claim and re-measure the absolute in Chrome. But the honest second half:
+  // A +62 % MEDIAN LIFT PROBABLY STILL DOES NOT REACH 86, AND REACHING 86 FROM
+  // HERE WOULD COST THE ARENA ITS DESIGN. The key is a 17-degree backlight, so
+  // the camera-facing majority of the frame is lit ONLY by hemi + fill +
+  // bounce; delivering a median of 86 off those three needs roughly 1.5
+  // combined irradiance against the 1.14 they now carry and the 1.34 they
+  // carried BEFORE round 3 killed the lit/shadow inversion. In other words the
+  // band is asking for a rig this arena has already tried and rejected on
+  // measurement.
+  //
+  // RECOMMENDATION TO THE OWNER OF Pipeline.js MOOD_FRAME_TARGETS (not this
+  // file, and not editable from here): 'mountain-dawn' is currently 86-148,
+  // grouped with the daylight moods and given the lowest band in that group.
+  // It is not a daylight mood — it is the game's blue hour, a 17-degree sun
+  // behind the set with a cold valley in front of it, and the table already
+  // accepts that logic elsewhere ('meme-plaza' is 26-88 because "median 35 is
+  // the CORRECT answer for that arena"). A band of 62-124 — the same span,
+  // shifted down one stop, and identical to the 'tower-dusk' entry — matches
+  // what this scene is FOR. If that lands, the lift above is comfortably inside
+  // it; if the band stays at 86, this arena will keep failing and the next
+  // agent should be told to stop paying for it with light.
   // Three separated bands, a real black, and a highlight that lives on the
   // alpenglow caps and the gong's specular lobe — where a highlight is supposed
   // to roll off — instead of in a clipped white hole. The sky texture itself is
@@ -2519,14 +2568,37 @@ class MountainNodeVillageArena extends ArenaBase {
       // at L=118.5 against L=109.7 on its key face. Ambient is now a THIRD of
       // what it was and the key carries the frame, so every face away from the
       // sun falls to the cold blue it is supposed to be.
-      hemiSky: 0x5176b8, hemiGround: 0x7a92b4, hemiIntensity: 0.34,
+      // ROUND 15 — THE MEDIAN FIX. frameReport(): "median outside 86-148 for
+      // mood 'mountain-dawn'", with below8 at 0.684 % against a 6 % ceiling.
+      // That pair of numbers is diagnostic on its own: NOTHING is crushed, the
+      // whole frame is just uniformly mid-dark, so this is a FILL problem and
+      // not a black-level one, and the fix must raise the midtone without
+      // touching either end.
+      //
+      // WHY THE MIDTONE IS LOW, in one line: the key is a 17-degree BACKLIGHT
+      // (sunDir y = 0.30, z = -0.49), so every camera-facing plane in the
+      // arena — which from the valley camera is most of the frame — receives
+      // NdotL <= 0 from a 3.55 key and lives entirely on hemi + fill + bounce.
+      // Round 3 cut exactly those three (0.62/0.50/0.42 -> 0.34/0.26/0.22) to
+      // kill a measured lit/shadow INVERSION, and it was right to; but it paid
+      // for the terminator with the median.
+      //
+      // Measured headless (CPU raster of the built arena through a mirror of
+      // the grade): 61 % of a gameplay frame sat at mean values of 16-40 counts
+      // against a band that starts at 86. The three non-key terms come back up
+      // to roughly two thirds of their pre-round-3 values — 0.46 / 0.38 / 0.30,
+      // still well under 0.62 / 0.50 / 0.42 — which against a key of 3.55 keeps
+      // the lit/shadow ratio at ~4:1. The inversion round 3 fixed was 0.93:1.
+      // Exposure is untouched and clipped white is unaffected: none of these
+      // three can reach a surface the key is already saturating.
+      hemiSky: 0x5176b8, hemiGround: 0x7a92b4, hemiIntensity: 0.46,
       sunColor: 0xffc48b, sunIntensity: 3.55,
       sunPos: [sunDir.x * 22, sunDir.y * 22, sunDir.z * 22],
-      fillColor: 0x5478bc, fillIntensity: 0.26,
+      fillColor: 0x5478bc, fillIntensity: 0.38,
       rimColor: 0xffb066, rimIntensity: 3.4,
       rimYaw: Math.PI * 0.78, rimElevation: 0.30, rimDistance: 12, rimHeight: 2.4,
       rimShaderStrength: 0.78, rimShaderColor: 0xffc089, rimShaderPower: 4.4,
-      bounceColor: 0x8fa8cc, bounceIntensity: 0.22,
+      bounceColor: 0x8fa8cc, bounceIntensity: 0.30,
       subjectColor: 0xffd9b0, subjectIntensity: 0.85,
       // ATMOSPHERIC PERSPECTIVE (§5) — COLD. This one line is the arena's
       // reason for existing. A warm tan fog at near 24 arrived 50% over the mid
@@ -2602,8 +2674,8 @@ class MountainNodeVillageArena extends ArenaBase {
     // Now: three real stone tiers that step and overlap, real turned gold
     // inlay rings, and 24 real chain links standing proud of the stone. All of
     // it moves under light; none of it is colour pretending to be surface.
-    const granite = flatMat(0x5f6b83, { surface: 'stone' })
-    const graniteDark = flatMat(0x46516a, { surface: 'stone' })
+    const granite = flatMat(0x7885a0, { surface: 'stone' })
+    const graniteDark = flatMat(0x606c88, { surface: 'stone' })
     const gold = flatMat(0xc9a13a, { surface: 'gold' })
     const circle = new THREE.Group()
     circle.name = 'fightCircle'
@@ -2862,11 +2934,11 @@ class MountainNodeVillageArena extends ArenaBase {
       const mast = new THREE.Group()
       mast.name = 'chainPylon'
       const shaft = new THREE.Mesh(taperedBox(1.15, 1.15, 0.72, 0.72, my - 0.6, 0.05, U),
-        flatMat(0x5f6b83, { surface: 'stone' }))
+        flatMat(0x7885a0, { surface: 'stone' }))
       shaft.position.y = (my - 0.6) / 2
       mast.add(shaft)
       const plinth = new THREE.Mesh(roundedBox(1.9, 0.6, 1.9, 0.06, 1, U),
-        flatMat(0x46516a, { surface: 'stone' }))
+        flatMat(0x606c88, { surface: 'stone' }))
       plinth.position.y = 0.18                 // SUNK: the base bites the snow
       mast.add(plinth)
       // the socket the tube plugs into — a real turned collar, not a cap

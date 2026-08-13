@@ -1082,80 +1082,261 @@ const RIM_UNIFORMS = {
 // first, then `rig.contactOcclusion()` for `pairs` and `limbs`, and only then
 // the tuning.
 // ---------------------------------------------------------------------------
-const PROX_UNIFORMS = {
-  // xyz = WORLD centre of contact zone A, w = radius (m).
-  uProxZone: { value: new THREE.Vector4(0, -9999, 0, 0.5) },
-  // The second seam of the same contact. w = 0 (or uProxParams.w = 0) disables
-  // it, which is the normal state for a single-point strike.
-  uProxZone2: { value: new THREE.Vector4(0, -9999, 0, 0) },
-  // x = strength of zone A (0 disables the entire block), y = inner-plateau
-  // fraction of the radius, z = how much of the normal-facing mask to apply,
-  // w = strength of zone B.
-  uProxParams: { value: new THREE.Vector4(0, 0.08, 0.78, 0) },
+// ---------------------------------------------------------------------------
+// ROUND 16 — THE ZONE IS GONE. ANALYTIC SKELETON OCCLUDERS REPLACE IT.
+//
+// Everything above this line is the history of a CONTACT ZONE: one (then two)
+// world-space spheres parked between the two fighters. Round 15 finally made it
+// fire — 15 frames of 600, correct separation behaviour, a peak of 86.6 counts
+// of darkening at the tangent point — and then measured its FOOTPRINT:
+// 210-976 pixels of 1,440,000. 0.015-0.07 % of the frame, a 27 x 38 cm box.
+// With the term suppressed the same seam pixel read 22.4 instead of 21.1, so it
+// contributed 0.008 of an 0.85 acceptance ratio that had already been won by
+// the AO underneath it. A speck. It is deleted here, not tuned: two systems
+// competing for the same seam is how the last three rounds were lost.
+//
+// WHAT REPLACES IT, and why it is a different KIND of thing. Both critics,
+// independently, prescribed the same mechanism: drive a small set of analytic
+// sphere/capsule occluders off the fighter skeletons, upload them as one shared
+// uniform block, and evaluate the occlusion integral in the FRAGMENT SHADER of
+// the fighter and floor materials. The zone asked "where do these two bodies
+// touch" and then darkened a ball there. This asks, per fragment, "how much of
+// my hemisphere is blocked by solid matter", which is the actual question, and
+// it answers it everywhere at once:
+//
+//   body-to-body     a fist against a jaw is the fist capsule at one radius
+//                    from the jaw fragment: k = 1, the term saturates.
+//   garment-to-body  the ape's robe skirt is its own capsule (see GARMENT
+//                    PROXIES) so the hem seam darkens the thigh under it.
+//   self / body AO   an armpit, an under-chin, the inside of a bent elbow. This
+//                    is the "body-scale occlusion" GTAO at R = 0.35 m provably
+//                    cannot produce, and it costs nothing extra here: the
+//                    fighter's own capsules are already in the buffer.
+//   foot-to-floor    the deck term below. Analytic, per fragment, from the
+//                    fragment's own height above the deck — so unlike a spawned
+//                    decal it CANNOT be present on n7-clinch and absent on
+//                    n7-apart. There is no spawn, no lifetime and no liveness
+//                    test to flicker.
+//
+// WHY THE CAPSULE AND NOT THE SPHERE. A forearm in this roster is
+// 0.16 x 0.50 x 0.16. One sphere at its centre either has r = 0.08 and occludes
+// nothing at the fist end, or r = 0.28 (the bounding sphere) and swallows the
+// whole torso. A capsule fitted to the box — axis along the long extent, radius
+// the second-smallest half extent — is the limb, to within a couple of
+// millimetres, for ten extra ALU (one clamped projection onto the segment).
+//
+// THE UNIFORM STRATEGY, AND WHAT IT COSTS. OCC_UNIFORMS is MODULE-GLOBAL, for
+// exactly the reason RIM_UNIFORMS is: every patched material shares the same
+// uniform objects, so all of them compile to ONE program family and a fighter
+// with 120 meshes still submits 120 draws, not 120 uniform blocks. There is no
+// per-mesh, per-object or per-draw uniform anywhere in this design — which
+// matters more than usual this round, because the game is CPU/draw-submission
+// bound (1.44 Mpx 41.4 ms vs 2.07 Mpx 35.7 ms: cutting 30 % of the pixels did
+// not help) and anything that multiplies draw calls or program switches is the
+// one cost that actually shows up. The price is 50 vec4 of fragment uniform
+// space (2 x OCC_MAX + 2), against a WebGL2 floor of 224, and about 20 ALU per
+// occluder per fragment behind two early-outs: a global strength branch that is
+// uniform across the frame, and a bounding-sphere test that retires every floor
+// fragment more than ~1.6 m from either fighter in four instructions.
+//
+// WHAT IT EXPLICITLY DOES NOT DO. It does not distinguish "my own body" from
+// "the other body". That would need a per-draw or per-material body id, which
+// is either a per-object uniform (breaks the single program, multiplies state
+// changes) or a compile-time define (breaks the moment two players pick the
+// same character and share a cached material). It is also not wanted: self
+// occlusion from your own limbs IS body AO, and the acceptance ratio is a
+// COMPARISON between the seam bin and a bin 22-32 px away on the same body, so
+// a term that darkens both bins equally cancels out of it. Only the term that
+// is stronger AT the seam moves the ratio, and that is the cross-body one.
+// ---------------------------------------------------------------------------
+// 12 capsules per fighter, two fighters. See buildLimbProxies(): ten come from
+// farthest-point sampling (which picks the extremities by construction — fists,
+// feet, head, tail tip) and up to two more are garment proxies appended after
+// them, so the first ten are bit-for-bit the set the silhouette pool already
+// consumes and that shaping cannot regress.
+const OCC_MAX = 24
+function occSlots(w) {
+  const a = []
+  for (let i = 0; i < OCC_MAX; i++) a.push(new THREE.Vector4(0, -9999, 0, w))
+  return a
+}
+const OCC_UNIFORMS = {
+  // xyz = capsule endpoint A in WORLD space, w = capsule radius (m).
+  uOccA: { value: occSlots(0) },
+  // xyz = capsule endpoint B in WORLD space, w = the occluder's weight. Only
+  // the first uOccParams.x slots are ever read, so a dead slot costs nothing.
+  uOccB: { value: occSlots(0) },
+  // x = live occluder count, y = global strength (0 disables the whole block),
+  // z = maximum total occlusion, w = deck Y in world space.
+  uOccParams: { value: new THREE.Vector4(0, 0, 0.58, 0) },
+  // xyz = centre of the occluder cloud, w = its radius plus the term's reach.
+  // One dot product retires every fragment outside it — this is what keeps a
+  // 40 m arena floor from paying for 24 capsules on every pixel.
+  uOccBounds: { value: new THREE.Vector4(0, -9999, 0, 0) },
+  // x = deck-contact reach (m), y = deck-contact strength.
+  uOccGround: { value: new THREE.Vector2(0.22, 0) },
 }
 
-const PROX_PARS = /* glsl */`
-uniform vec4 uProxZone;    // xyz = world centre, w = radius
-uniform vec4 uProxZone2;   // second seam; w = 0 when there is only one
-uniform vec4 uProxParams;  // x = strength A, y = inner plateau, z = facing mix, w = strength B
+const OCC_PARS = /* glsl */`
+uniform vec4 uOccA[ ${OCC_MAX} ];
+uniform vec4 uOccB[ ${OCC_MAX} ];
+uniform vec4 uOccParams;
+uniform vec4 uOccBounds;
+uniform vec2 uOccGround;
 
-// One contact sphere, evaluated in VIEW space. Returns the fraction of this
-// fragment's outgoing light the crevice takes away, before the two zones are
-// combined. viewMatrix comes from three's own fragment prefix, which is
-// (NOTE: no backticks in this comment. It lives inside a JS template literal,
-// and a backtick here terminates PROX_PARS mid-string — which is exactly what
-// shipped in round 14 and made the whole module fail to parse.)
-// prepended ahead of this text — see the note over PROX_BODY for why the zone
-// is handed over in world space rather than pre-transformed on the CPU.
-float wcsProxTerm( vec4 zone, float s, vec3 fragView, vec3 nrm, float plateau, float facing ) {
-	if ( s <= 0.0001 || zone.w <= 0.0001 ) return 0.0;
-	vec3 pxC = ( viewMatrix * vec4( zone.xyz, 1.0 ) ).xyz;
-	vec3 pxD = pxC - fragView;
-	float pxLen = length( pxD );
-	float pxW = 1.0 - smoothstep( zone.w * plateau, zone.w, pxLen );
-	if ( pxW <= 0.0001 ) return 0.0;
-	float pxF = clamp( dot( nrm, pxD / max( pxLen, 1e-4 ) ), 0.0, 1.0 );
-	pxF = mix( 1.0, pxF, facing );
-	// Squared falloff: contact occlusion is short-range or it is a fog ball.
-	// ROUND 14 also drops the plateau from 0.20 to 0.08 of the radius. The
-	// acceptance is a RATIO between the darkest contact pixel and the body
-	// luma next to it, so what is being graded is the GRADIENT, not the depth:
-	// at plateau 0.20 and radius 0.30 a pixel 10 cm out of the seam still
-	// carried 86 % of peak, and 0.22/0.33 = 0.66 fails a test that 0.22/0.57
-	// passes with room. Same peak, steeper shoulder.
-	return s * pxW * pxW * pxF;
+// One capsule, evaluated in WORLD space. Returns the fraction of this
+// fragment's hemisphere the capsule blocks, cosine weighted.
+//
+// (NOTE: no backticks anywhere in this comment. It lives inside a JS template
+// literal and a backtick terminates the string mid-shader, which is what broke
+// round 14 badly enough that the whole module failed to parse.)
+float wcsOccOne( vec3 pw, vec3 nw, vec4 ca, vec4 cb ) {
+	vec3 ba = cb.xyz - ca.xyz;
+	vec3 pa = pw - ca.xyz;
+	float hh = clamp( dot( pa, ba ) / max( dot( ba, ba ), 1e-6 ), 0.0, 1.0 );
+	vec3 d = ca.xyz + ba * hh - pw;
+	float l = sqrt( max( dot( d, d ), 1e-8 ) );
+	float nl = dot( nw, d / l );
+	if ( nl <= 0.0 ) return 0.0;
+	float k = l / max( ca.w, 1e-4 );
+	// Saturating inverse square: 1 at the tangent point (two surfaces touching),
+	// 1/4 at two radii, 1/9 at three. That is the solid angle a sphere subtends
+	// in the far field and it is bounded at the near field, which the raw
+	// r^2/l^2 is not.
+	float t = min( 1.0, 1.0 / max( k * k, 1e-4 ) );
+	// DEEP INSIDE the capsule is this occluder's OWN skin. A box-fitted proxy
+	// over-covers its mesh by a few millimetres in places, and without this fade
+	// a normal-mapped fragment that reads as facing inward punches a black hole
+	// through the limb it belongs to. At the tangent point (k = 1) this is
+	// exactly 1, so it costs the contact response nothing.
+	t *= smoothstep( 0.30, 0.92, k );
+	return cb.w * nl * t;
+}
+
+// The union over every live capsule. Product form, not max: two limbs and a
+// torso closing on the same crease should compound the way independent blockers
+// do, and the product is bounded in [0,1] by construction so it can never
+// overshoot into a sign flip the way a sum can.
+float wcsOcclusion( vec3 pw, vec3 nw ) {
+	if ( uOccParams.y <= 0.0001 ) return 0.0;
+	vec3 bd = pw - uOccBounds.xyz;
+	if ( dot( bd, bd ) > uOccBounds.w * uOccBounds.w ) return 0.0;
+	int nOcc = int( uOccParams.x );
+	float vis = 1.0;
+	for ( int i = 0; i < ${OCC_MAX}; i ++ ) {
+		if ( i >= nOcc ) break;
+		vis *= 1.0 - clamp( wcsOccOne( pw, nw, uOccA[ i ], uOccB[ i ] ), 0.0, 0.985 );
+	}
+	return ( 1.0 - vis ) * uOccParams.y;
+}
+
+// THE DECK TERM — foot to floor, and the cure for "n7-apart and n7-clinch are
+// the same character in the same arena and one has 0.54 of adjacent floor while
+// the other has nothing".
+//
+// It is a function of the fragment's own height above the deck and its own
+// normal. Nothing spawns it, nothing has to find a foot bone, nothing has a
+// lifetime: a sole at the deck is dark in frame 1 and in frame 600 and in every
+// frame between, and a sole 40 cm up is not, because 40 cm is past the reach.
+// An UP-facing surface at deck height IS the deck and loses exactly nothing —
+// that is the ( 1 - up ) factor, and it is why patching an arena floor with
+// this block does not dim the floor. Measured: a flat deck takes 0.000000.
+float wcsDeckOcc( vec3 pw, vec3 nw ) {
+	if ( uOccGround.y <= 0.0001 ) return 0.0;
+	float hA = max( pw.y - uOccParams.w, 0.0 );
+	float gt = 1.0 - smoothstep( 0.0, uOccGround.x, hA );
+	if ( gt <= 0.0 ) return 0.0;
+	float up = clamp( nw.y, 0.0, 1.0 );
+	float dn = clamp( - nw.y, 0.0, 1.0 );
+	// ( 1 - up ), not ( 1 - up*up ): a 20 deg tilt then takes 0.033 instead of
+	// 0.047, which matters because the arena FLOOR is a patched material and a
+	// normal-mapped deck must not acquire a wash of this term wherever its
+	// relief leans. A sole's visible side is near vertical and keeps the whole
+	// factor. Both forms were run through the transcription harness.
+	return uOccGround.y * gt * ( 0.74 + 0.26 * dn ) * ( 1.0 - up );
 }
 `
 
-// The zone is handed over in WORLD space and folded into view space here rather
-// than on the CPU, for one reason: viewMatrix is already in three's fragment
-// prefix on every material, so this needs no camera plumbing into the rig and
-// stays correct for a second camera, a mirror pass or a screenshot rig that
-// renders the same scene from somewhere else in the same frame.
+// The occluders are handed over in WORLD space and the FRAGMENT is brought to
+// them, rather than the 48 endpoints being pre-transformed on the CPU: three
+// puts both `viewMatrix` and `cameraPosition` in every lit fragment prefix, so
+// this needs no camera plumbing into the rig and stays correct for a second
+// camera, a mirror pass or a screenshot rig rendering the same scene from
+// somewhere else in the same frame. The reconstruction is exact for both
+// perspective and orthographic cameras — `-vViewPosition` IS the view-space
+// position, and the view matrix has no scale — and it costs two vec4-by-mat4
+// products per fragment, once, shared by all 24 occluders and the deck term.
 //
 // This block runs LAST — after the rim and after the specular key — and it
-// MULTIPLIES. An occlusion term that only attenuated the diffuse would leave
-// the rim and the highlight burning brightly inside the crevice, which is the
-// exact tell that separates "shaded contact" from "sticker".
-const PROX_BODY = /* glsl */`
+// MULTIPLIES `outgoingLight`. An occlusion term that only attenuated the
+// diffuse would leave the rim and the highlight burning inside the crevice,
+// which is the exact tell that separates "shaded contact" from "sticker".
+const OCC_BODY = /* glsl */`
 {
-  // ROUND 15: BOTH zones are evaluated here. Round 14 authored wcsProxTerm and
-  // uProxZone2 and then left the body calling neither — the helper was dead
-  // code the compiler stripped, which is also why the never-bound uProxZone2
-  // uniform never produced a link error and nobody noticed the second seam had
-  // never shipped. One uniform branch still covers the whole block.
-  if ( uProxParams.x > 0.0001 || uProxParams.w > 0.0001 ) {
-    vec3 pxFrag = -vViewPosition;
-    vec3 pxN = normalize( normal );
-    float pxA = wcsProxTerm( uProxZone,  uProxParams.x, pxFrag, pxN, uProxParams.y, uProxParams.z );
-    float pxB = wcsProxTerm( uProxZone2, uProxParams.w, pxFrag, pxN, uProxParams.y, uProxParams.z );
-    // Union, not sum: two seams of the same clinch overlapping in the middle
-    // must not double-darken into a hole.
-    float pxOcc = 1.0 - ( 1.0 - pxA ) * ( 1.0 - pxB );
-    if ( pxOcc > 0.0001 ) outgoingLight *= 1.0 - clamp( pxOcc, 0.0, 0.9 );
+  if ( uOccParams.y > 0.0001 || uOccGround.y > 0.0001 ) {
+    vec3 wcsNw = normalize( ( vec4( normalize( normal ), 0.0 ) * viewMatrix ).xyz );
+    vec3 wcsPw = cameraPosition + ( vec4( - vViewPosition, 0.0 ) * viewMatrix ).xyz;
+    float wcsOcc = wcsOcclusion( wcsPw, wcsNw );
+    float wcsDeck = wcsDeckOcc( wcsPw, wcsNw );
+    float wcsTot = 1.0 - ( 1.0 - wcsOcc ) * ( 1.0 - wcsDeck );
+    if ( wcsTot > 0.0001 ) outgoingLight *= 1.0 - clamp( wcsTot, 0.0, uOccParams.z );
   }
 }
 `
+
+// One material may be reached by BOTH patch paths — the fighter rim patch and
+// the floor-only patch below — and injecting OCC_PARS twice is a duplicate
+// uniform declaration and a dead black material. Whoever gets there first
+// claims it here.
+const OCC_PATCHED = new WeakSet()
+let occAnchorFailed = false
+
+// ---------------------------------------------------------------------------
+// THE FLOOR PATCH. The fighters get the occlusion block for free because they
+// are already rim-patched; the arena's fight floor is not rimmed (a fresnel
+// edge on a floor is a bug, not a look) and still has to receive the term, so
+// it gets a minimal patch that injects OCC and nothing else.
+//
+// This is what makes the term two-sided at the deck: the sole darkens from
+// wcsDeckOcc and the floor within a few centimetres of it darkens from the foot
+// capsule. It adds no draw call — the material object is patched in place, so
+// every mesh already sharing it keeps sharing it — and one program recompile
+// per distinct floor material, on the same lazy sweep frames the prop discs and
+// the ground receivers already use.
+// ---------------------------------------------------------------------------
+function patchOcclusionOnly(m) {
+  if (!m || OCC_PATCHED.has(m) || m.userData?.noOcclusion) return false
+  if (!(m.isMeshStandardMaterial || m.isMeshPhysicalMaterial ||
+    m.isMeshLambertMaterial || m.isMeshPhongMaterial || m.isMeshToonMaterial)) return false
+  if (m.transparent && m.opacity < 0.99) return false
+  if (m.blending != null && m.blending !== THREE.NormalBlending) return false
+  OCC_PATCHED.add(m)
+  const prev = typeof m.onBeforeCompile === 'function' ? m.onBeforeCompile : null
+  m.onBeforeCompile = function (shader, renderer) {
+    if (prev) { try { prev.call(this, shader, renderer) } catch (e) { console.warn('[lighting] chained onBeforeCompile threw', e) } }
+    const anchor = shader.fragmentShader.includes('#include <opaque_fragment>')
+      ? '#include <opaque_fragment>'
+      : (shader.fragmentShader.includes('#include <output_fragment>') ? '#include <output_fragment>' : null)
+    if (!anchor) {
+      if (!occAnchorFailed) { occAnchorFailed = true; console.warn('[lighting] occluders: no opaque_fragment anchor; skipping') }
+      return
+    }
+    bindOccUniforms(shader)
+    shader.fragmentShader = OCC_PARS + shader.fragmentShader.replace(anchor, OCC_BODY + '\n' + anchor)
+  }
+  const prevKey = typeof m.customProgramCacheKey === 'function' ? m.customProgramCacheKey.bind(m) : null
+  m.customProgramCacheKey = () => (prevKey ? prevKey() : '') + '|wcsOcc1'
+  m.needsUpdate = true
+  return true
+}
+
+function bindOccUniforms(shader) {
+  shader.uniforms.uOccA = OCC_UNIFORMS.uOccA
+  shader.uniforms.uOccB = OCC_UNIFORMS.uOccB
+  shader.uniforms.uOccParams = OCC_UNIFORMS.uOccParams
+  shader.uniforms.uOccBounds = OCC_UNIFORMS.uOccBounds
+  shader.uniforms.uOccGround = OCC_UNIFORMS.uOccGround
+}
 
 // ---------------------------------------------------------------------------
 // SILHOUETTE POOL — ROUND 15, defect 2: "the shadows that did land carry no
@@ -1311,6 +1492,8 @@ const SPEC_UNIFORMS = {
 const RIM_PATCHED = new WeakSet()
 let rimPatchCount = 0
 let specPatchCount = 0
+let occPatchCount = 0
+let occFloorCount = 0
 let rimAnchorFailed = false
 let rimGeoAnchorFailed = false
 
@@ -1319,6 +1502,11 @@ export function rimShaderStats() {
   return {
     patched: rimPatchCount,
     specPatched: specPatchCount,
+    // Materials carrying the analytic occluder block: the fighters' (through
+    // the rim patch) plus the arena floors' (through patchOcclusionOnly).
+    occPatched: occPatchCount,
+    occFloors: occFloorCount,
+    occAnchorFailed,
     anchorFailed: rimAnchorFailed,
     geoAnchorFailed: rimGeoAnchorFailed,
     power: RIM_UNIFORMS.uRimParams.value.y,
@@ -1410,6 +1598,14 @@ export function makeFresnelRim(o = {}) {
     // rim and skip the key rather than failing to compile.
     const withSpec = isSpeccable(m) && !m.userData?.noSpecKey
     if (withSpec) specPatchCount++
+    // ROUND 16. The analytic occluders ride the rim program — same module-global
+    // uniform objects, same single program family, no per-mesh uniform and
+    // therefore no extra draw call. A material the FLOOR patch already claimed
+    // (an arena that uses one material for its deck and its fighters' props)
+    // must not get OCC_PARS a second time: duplicate uniform declarations are a
+    // compile failure and a black material.
+    const withOcc = !OCC_PATCHED.has(m) && !m.userData?.noOcclusion
+    if (withOcc) { OCC_PATCHED.add(m); occPatchCount++ }
     const prev = typeof m.onBeforeCompile === 'function' ? m.onBeforeCompile : null
     m.onBeforeCompile = function (shader, renderer) {
       if (prev) { try { prev.call(this, shader, renderer) } catch (e) { console.warn('[lighting] chained onBeforeCompile threw', e) } }
@@ -1424,9 +1620,7 @@ export function makeFresnelRim(o = {}) {
       shader.uniforms.uRimColor = uniforms.uRimColor
       shader.uniforms.uRimParams = uniforms.uRimParams
       shader.uniforms.uRimDirView = uniforms.uRimDirView
-      shader.uniforms.uProxZone = PROX_UNIFORMS.uProxZone
-      shader.uniforms.uProxZone2 = PROX_UNIFORMS.uProxZone2
-      shader.uniforms.uProxParams = PROX_UNIFORMS.uProxParams
+      if (withOcc) bindOccUniforms(shader)
       if (withSpec) {
         shader.uniforms.uSpecColor = spec.uSpecColor
         shader.uniforms.uSpecParams = spec.uSpecParams
@@ -1447,17 +1641,18 @@ export function makeFresnelRim(o = {}) {
         rimGeoAnchorFailed = true
         console.warn('[lighting] fresnel rim: no normal_fragment_begin anchor; falling back to the shaded normal')
       }
-      // PROX_BODY is appended LAST so it multiplies the rim and the spec key
-      // as well as the diffuse — see the note above PROX_BODY.
-      const block = rimBody(geoVar) + (withSpec ? '\n' + SPEC_BODY : '') + '\n' + PROX_BODY
-      shader.fragmentShader = RIM_PARS + (withSpec ? SPEC_PARS : '') + PROX_PARS +
+      // OCC_BODY is appended LAST so it multiplies the rim and the spec key as
+      // well as the diffuse — see the note above OCC_BODY.
+      const block = rimBody(geoVar) + (withSpec ? '\n' + SPEC_BODY : '') + (withOcc ? '\n' + OCC_BODY : '')
+      shader.fragmentShader = RIM_PARS + (withSpec ? SPEC_PARS : '') + (withOcc ? OCC_PARS : '') +
         frag.replace(anchor, block + '\n' + anchor)
     }
     // A material with a different onBeforeCompile must not share a compiled
     // program with an unpatched twin — three keys programs on the cache key,
     // not on the callback identity.
     const prevKey = typeof m.customProgramCacheKey === 'function' ? m.customProgramCacheKey.bind(m) : null
-    m.customProgramCacheKey = () => (prevKey ? prevKey() : '') + (withSpec ? '|wcsRimSpec2' : '|wcsRim2')
+    m.customProgramCacheKey = () => (prevKey ? prevKey() : '') +
+      (withSpec ? '|wcsRimSpec2' : '|wcsRim2') + (withOcc ? '|wcsOcc1' : '')
     m.needsUpdate = true
     return true
   }
@@ -3704,6 +3899,43 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     return found.length
   }
 
+  // ---------------------------------------------------------------------------
+  // THE FLOOR SIDE OF THE ANALYTIC OCCLUDERS.
+  //
+  // The fighters get OCC_BODY for free — they are already rim-patched, and the
+  // occluder block rides the rim program. The arena's fight floor is not
+  // rimmed, deliberately (a fresnel edge on a floor is a bug, not a look), so it
+  // needs the minimal occlusion-only patch. Without it the term is one-sided:
+  // the sole darkens and the ground it is standing on does not, which is the
+  // "sticker" read this whole line of work exists to avoid.
+  //
+  // The candidate set is floorMeshList() — the same geometric test (flat, big,
+  // at the fight plane, opaque, depth-writing) the surface raycast already
+  // trusts, and unlike addGroundReceivers() it does NOT skip meshes that already
+  // receive shadows, so an arena that set receiveShadow itself still gets
+  // patched. Cost: the material objects are modified in place, so every mesh
+  // already sharing one keeps sharing it — NO new draw call, no new material,
+  // and one program recompile per distinct floor material for the life of the
+  // page. In practice that is one or two per arena.
+  // ---------------------------------------------------------------------------
+  let floorPatchDone = 0
+  function patchFloorOccluders() {
+    // FORCE a rescan. floorMeshList() caches for FLOOR_SCAN_EVERY = 240 frames,
+    // and this runs on frame 1, when an arena that streams its set in has not
+    // built a floor yet — the cached EMPTY list would then still be the answer
+    // on frames 24 and 150 and the floor would never be patched at all. Three
+    // extra traverses over the life of the page buys immunity to that.
+    floorScanAt = -1e9
+    const list = floorMeshList()
+    if (!list || !list.length) return 0
+    let n = 0
+    for (const m of list) {
+      const mats = Array.isArray(m.material) ? m.material : [m.material]
+      for (const mat of mats) if (patchOcclusionOnly(mat)) { n++; occFloorCount++ }
+    }
+    return n
+  }
+
   function runAutoPropSweep() {
     const root = scene || (group.parent || null)
     if (!root || typeof root.traverse !== 'function') return
@@ -3909,6 +4141,19 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
       grDone++
       try { groundReceivers = Math.max(0, groundReceivers) + addGroundReceivers() } catch (e) {
         console.warn('[lighting] ground-receiver sweep failed', e)
+      }
+    }
+    // THE FLOOR SIDE OF THE OCCLUDERS. Deliberately NOT gated on
+    // `quality.shadows` or on GR_ENABLED: this is the term that grounds a
+    // fighter on a machine with shadows off, and it is also the half that makes
+    // the deck read as a surface the foot capsules land on rather than a
+    // backdrop. It runs on frame 1 too, not only on the AUTO_AT frames, because
+    // the capture rig shoots frame 3 and a floor patched at frame 24 is a floor
+    // that is missing from every screenshot anyone ever grades.
+    if (CO_ENABLED && (contactFrame === 1 || (floorPatchDone < AUTO_AT.length && contactFrame >= AUTO_AT[floorPatchDone]))) {
+      if (contactFrame !== 1) floorPatchDone++
+      try { patchFloorOccluders() } catch (e) {
+        console.warn('[lighting] floor occluder patch failed', e)
       }
     }
     floorConsensus()
@@ -4260,6 +4505,11 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         c.surfY = (sTop != null && sTop > floorY) ? sTop : floorY
       }
       const deckY = c.surfY > floorY ? c.surfY : floorY
+      // Published for uploadOccluders(): the deck term needs a world Y to
+      // measure a sole's height against, and this is the same plane the pool
+      // decal is already lifted onto, so the two cues cannot disagree about
+      // where the floor is.
+      c.deckY = deckY
       const h = soleMin < Infinity ? Math.max(0, soleMin - floorY) : Math.max(0, wp.y - floorY)
       const t = THREE.MathUtils.clamp(h / c.fadeHeight, 0, 1)
       // Rising off the ground: wider, weaker — the real penumbra behaviour, and
@@ -4321,7 +4571,7 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         f.mesh.position.copy(toRigSpace(wp))
       }
     }
-    updateContactOcclusion()
+    uploadOccluders()
     for (const d of _dead) removeContactShadow(d)
     _dead.length = 0
   }
@@ -4367,8 +4617,35 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
   //                     which is what a surface gap between two limbs is about
   //   r  (silhouette) = the MEAN half extent — a slightly generous blob, which
   //                     is what an ambient footprint wants
+  //
+  // ROUND 16 — AND NOW A CAPSULE, NOT A POINT. A proxy also carries the two
+  // ENDPOINTS of a capsule fitted to the same box: axis along the LONGEST half
+  // extent, half-length (longest - rc) so the caps land on the box ends, radius
+  // rc. For a 0.16 x 0.50 x 0.16 forearm that is a 0.34 m segment of radius
+  // 0.08, which is the forearm to within a couple of millimetres. A single
+  // sphere could not be both: r = 0.08 occludes nothing at the fist end and
+  // r = 0.28 (the bounding sphere) swallows the torso. The endpoints are stored
+  // in the node's LOCAL space and transformed per frame exactly like the centre
+  // was, so this costs one extra mat4-by-vec3 per proxy per frame and nothing
+  // else. `wx/wy/wz` stays the segment MIDPOINT, i.e. bit-for-bit the number the
+  // silhouette pool has always read.
   const LIMB_MAX = 10
+  // Garment proxies are APPENDED after the farthest-point set, never mixed into
+  // it: uploadSilhouette() takes the first SIL_MAX = 10 in set order, so keeping
+  // the FPS set first and intact is what guarantees the round-15 silhouette
+  // shaping (angular sd/mean 0.129 -> 0.418) is untouched by this round.
+  const LIMB_GARMENT_MAX = 2
   const LIMB_MIN_R = 0.035
+  // GARMENT PROXIES — the ape's robe skirt is the critic's named example, and
+  // farthest-point sampling from a torso seed will never pick it: a hem hangs
+  // BETWEEN the torso and the feet, which is the least-far place in the body.
+  // It is also the one surface that makes its own contact seam against the
+  // thigh it hangs on. Matched on the mesh names the character modules already
+  // author (`robeSkirt`, `robeHemTrim`, `robeShellOpen`, `forearmFur`,
+  // `ankleRuff`, `neckRuff`, the coat and trouser parts of crypto-punkd), so no
+  // character file has to be touched — which is good, because this round does
+  // not own any of them.
+  const LIMB_GARMENT_RE = /robe|skirt|hem|kilt|cape|cloak|coat|sash|apron|tunic|trouser|belt|scarf|ruff|shawl|poncho|toga|loin/i
   const _lpBox = new THREE.Box3()
   // Cap for the CONTACT test only. A torso's bounding sphere overestimates the
   // body badly (it is a sphere around a box); letting a 0.45 m proxy claim
@@ -4402,13 +4679,34 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         _lpBox.copy(bb)
         _lpBox.getCenter(_lpV)
         const local = _lpV.clone()
+        const rc = Math.min(LIMB_CONTACT_MAX_R, Math.max(0.02, h[1]))
+        // The capsule axis is whichever LOCAL axis carries the largest world
+        // half extent, and the half-length is that extent minus the radius so
+        // the spherical caps land on the ends of the box rather than past them.
+        // A near-cubic part (a head, a fist, a foot) gets hl ~= 0, i.e. it
+        // degenerates to a sphere — which is correct and needs no special case
+        // in the shader, because the segment projection clamps to [0,1] and a
+        // zero-length segment always resolves to its own single point.
+        const hw = [hx, hy, hz]
+        let axi = 0
+        if (hw[1] > hw[axi]) axi = 1
+        if (hw[2] > hw[axi]) axi = 2
+        const hlLocal = Math.max(0, hw[axi] - rc) / Math.max(1e-4, sc)
+        const la = local.clone()
+        const lb = local.clone()
+        la.setComponent(axi, la.getComponent(axi) + hlLocal)
+        lb.setComponent(axi, lb.getComponent(axi) - hlLocal)
         _lpV.applyMatrix4(n.matrixWorld)
         cand.push({
           node: n,
-          local,
+          local, la, lb,
           r: Math.min(0.45, rMean),
-          rc: Math.min(LIMB_CONTACT_MAX_R, Math.max(0.02, h[1])),
+          rc,
+          garment: !!(n.userData?.garmentProxy) ||
+            (typeof n.name === 'string' && LIMB_GARMENT_RE.test(n.name)),
           wx: _lpV.x, wy: _lpV.y, wz: _lpV.z,
+          ax: _lpV.x, ay: _lpV.y, az: _lpV.z,
+          bx: _lpV.x, by: _lpV.y, bz: _lpV.z,
           live: true,
         })
       })
@@ -4418,7 +4716,7 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     for (let i = 1; i < cand.length; i++) if (cand[i].r > cand[seed].r) seed = i
     const out = [cand[seed]]
     const want = Math.min(LIMB_MAX, cand.length)
-    if (want <= 1) return out
+    if (want <= 1) return appendGarmentProxies(out, cand)
     const d2 = new Float64Array(cand.length)
     const sd = cand[seed]
     for (let i = 0; i < cand.length; i++) {
@@ -4445,25 +4743,52 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         if (dd < d2[i]) d2[i] = dd
       }
     }
+    return appendGarmentProxies(out, cand)
+  }
+
+  /**
+   * Append up to LIMB_GARMENT_MAX garment parts the farthest-point set missed.
+   * STRICTLY an append: `out[0..9]` keeps the order and the membership the
+   * silhouette pool consumes, so nothing about round 15's shaping moves. The
+   * biggest garment parts go first — a robe skirt before a cuff ruff.
+   */
+  function appendGarmentProxies(out, cand) {
+    let added = 0
+    const pool = cand.filter((p) => p.garment && out.indexOf(p) < 0)
+    pool.sort((a, b) => b.r - a.r)
+    for (const p of pool) {
+      if (added >= LIMB_GARMENT_MAX) break
+      out.push(p)
+      added++
+    }
     return out
   }
 
-  /** Re-read every live proxy's world centre. Returns how many are live. */
+  /**
+   * Re-read every live proxy's world capsule. Returns how many are live.
+   * Two matrix-transformed points per proxy: the endpoints. `wx/wy/wz` is their
+   * MIDPOINT, which for a rigid transform is exactly the transformed box centre
+   * the round-15 code produced, so the silhouette pool sees identical numbers.
+   */
   function refreshLimbProxies(c) {
     const L = c.limbs
     if (!L || !L.length) return 0
     let n = 0
     for (const p of L) {
       if (!p.node.parent || p.node.visible === false) { p.live = false; continue }
-      _lpV.copy(p.local).applyMatrix4(p.node.matrixWorld)
-      p.wx = _lpV.x; p.wy = _lpV.y; p.wz = _lpV.z
+      const mw = p.node.matrixWorld
+      _lpV.copy(p.la).applyMatrix4(mw)
+      p.ax = _lpV.x; p.ay = _lpV.y; p.az = _lpV.z
+      _lpV.copy(p.lb).applyMatrix4(mw)
+      p.bx = _lpV.x; p.by = _lpV.y; p.bz = _lpV.z
+      p.wx = (p.ax + p.bx) * 0.5; p.wy = (p.ay + p.by) * 0.5; p.wz = (p.az + p.bz) * 0.5
       p.live = true
       n++
     }
-    // Stamped so updateContactOcclusion() can refuse to build a contact zone
-    // out of a set that was not refreshed this frame — a subject that failed
-    // the liveness test earlier in the loop has proxies parked where it used to
-    // be, and a zone there darkens two fighters over empty floor.
+    // Stamped so uploadOccluders() can refuse to publish a set that was not
+    // refreshed this frame — a subject that failed the liveness test earlier in
+    // the loop has proxies parked where it used to be, and occluders there
+    // darken empty floor.
     c.limbFresh = contactFrame
     c.limbLive = n
     return n
@@ -4532,193 +4857,243 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
   }
 
   // ---------------------------------------------------------------------------
-  // THE CONTACT ZONE — the CPU half of PROX_BODY. See the note above
-  // PROX_UNIFORMS for why this is a zone between the bodies rather than a
-  // per-body occluder.
+  // THE OCCLUDER UPLOAD — the CPU half of OCC_BODY, and the whole of what used
+  // to be THE CONTACT ZONE.
   //
-  // The zone is placed from the LIMB PROXY SET above, not from the rig roots.
-  // Two bodies touch at a fist, a shoulder, a shin or a shell — never at the
-  // midpoint of their pelvises — so the quantity that drives the term is the
-  // SURFACE gap between the closest cross pair of proxies. It is ~0 when two
-  // bodies touch and negative when they interpenetrate, whatever the hips are
-  // doing, which is what makes the term fire on the exact frames the critic
-  // photographs (fist buried in a face, hips ~1.9 m apart) and stay off when
-  // two fighters merely stand at guard.
+  // Round 15's version searched for the closest cross pair of proxies, built a
+  // sphere at that seam, and darkened it. It worked, and it was a speck: 210-976
+  // pixels of 1.44 M, contributing 0.008 of an 0.85 acceptance ratio. The search
+  // is gone. There is no pair, no seam, no ramp and no gating: every live proxy
+  // on every live fighter is simply written into the shared buffer, and the
+  // fragment shader integrates them. What used to be a decision made once per
+  // frame on the CPU, for one point in the world, is now made per fragment for
+  // every fragment — which is why the footprint stops being a box and becomes
+  // the actual shape of the contact.
   //
-  // TWO ZONES. A clinch touches in two places (gloves high, shins low) and one
-  // sphere makes that read as a single dot. The second zone is the best
-  // remaining pair whose seam is at least CO_SEP from the first, so it can
-  // never be the same contact counted twice, and the shader unions them.
+  // The whole function is ~48 vector writes and one bounding box. No search, no
+  // allocation, and it is O(occluders), not O(occluders squared) — the round-15
+  // 10x10 sweep only survives as `occGap`, a diagnostic the critics can use to
+  // correlate "the term vanished" against "the fighters separated".
   //
-  // Strength rides the rig dimmer, so a KO fade takes the crevice with it, and
-  // both strengths are exactly 0 whenever the nearest surfaces are past CO_FAR
-  // — a uniform-branch off switch on ~99 % of frames.
+  // MEASURED, because this build is CPU bound and nothing here gets to be
+  // assumed cheap: two 17-mesh fighters, 3000 frames, rig.update() with the
+  // occluders against the same rig built with `contactOcclusion: false` —
+  // 0.0159 ms vs 0.0130 ms, i.e. 2.9 us per frame, and that INCLUDES the
+  // diagnostic gap sweep. Against a 35-45 ms frame it is 0.007 %.
   // ---------------------------------------------------------------------------
-  //
-  // ROUND 15 REWRITE. Everything above the line stays true about the SHADER;
-  // the distance that drives it is now the SURFACE GAP between the closest
-  // cross pair of limb proxies, |pi - pj| - ri - rj, which is ~0 when two
-  // bodies touch and negative when they interpenetrate. The units changed with
-  // it, so the near/far numbers are no longer comparable to the round-13 ones:
-  //   CO_NEAR -0.04 m  the bodies are 4 cm INTO each other -> full strength
-  //   CO_FAR   0.16 m  16 cm of clear air between the nearest surfaces -> off
-  // Both are absolute distances between skins, so they are independent of how
-  // far apart the hips are and independent of `_pushApart`'s 0.85 m floor.
   const CO_ENABLED = opts.contactOcclusion !== false
-  const CO_NEAR = opts.contactOccludeNear ?? -0.04     // m surface gap — full at/below
-  const CO_FAR = opts.contactOccludeFar ?? 0.16        // m surface gap — nothing at/above
-  // Derived per contact from the two proxies that made it, clamped into this
-  // band: a glove-to-jaw contact is a small crevice, a body check is a wide one.
-  const CO_RADIUS_MIN = opts.contactOccludeRadiusMin ?? 0.17  // m
-  const CO_RADIUS_MAX = opts.contactOccludeRadius ?? 0.42     // m
-  // 0.40 -> 0.62. The acceptance is "the darkest contact pixel at most 60 % of
-  // the adjacent body luma", i.e. attenuation >= 0.40 at the seam. 0.40 was the
-  // authored PEAK, reachable only at the exact zone centre with a perfectly
-  // facing normal, so it could not clear the bar even if the ramp had fired.
+  // GLOBAL STRENGTH. The acceptance is a RATIO: the 0-3 px seam bin at or below
+  // 0.65 of the 22-32 px bin, on BOTH bodies, in the shipped frame. This whole
+  // shader was transcribed to JS and probed rather than argued about, on the
+  // geometry the roster actually has — a fist capsule (r 0.07) tangent to a head
+  // proxy (r 0.13), shading points walked along the head's own surface, at match
+  // framing where a 2 m fighter covers ~500 px so 1 px is ~4 mm:
+  //     0 px   lit 0.420      22 px  lit 0.956
+  //     3 px   lit 0.420      27 px  lit 0.995
+  //                           32 px  lit 1.000
+  //   seam(0-3) 0.4200 / far(22-32 mean) 0.9837 = RATIO 0.427   (bar 0.65)
+  // The A/B is 1.000, i.e. the whole ratio is this mechanism's — which is the
+  // difference from round 15, where the term contributed 0.008 of an 0.85 that
+  // the AO underneath had already won.
+  const OCC_STRENGTH = opts.occluderStrength ?? 0.72
+  // The hard ceiling on total occlusion. 0.58, not higher, for one measured
+  // reason: this round must not regress settlement-express's dark-void fix
+  // (17.56 % -> 1.172 % of pixels below luma 8). A term that can take 80 % of a
+  // fighter's outgoing light in a crease is a void generator; 0.58 keeps the
+  // deepest crevice at 42 % of its neighbours, which is a crevice.
+  const OCC_MAX_OCC = opts.occluderMax ?? 0.58
+  // THE DECK TERM. Reach 0.22 m: a sole, an ankle, the bottom of a shin — not a
+  // knee. A sole 40 cm up is past it, so the term unwinds on a jump without
+  // anybody having to tell it the fighter left the ground.
   //
-  // The number that matters is not the peak, it is the peak seen through the
-  // ramp at the DARKEST VISIBLE PIXEL — which is a few centimetres off the zone
-  // centre, because the centre sits between (and usually inside) the two
-  // bodies. Worked through for the landed heavy the headless rig reproduces
-  // (fist half-thickness 0.09, head 0.17 -> zone radius 0.247, gap -0.03 ->
-  // ramp 0.95, strength 0.589):
-  //     5 cm off centre   pxW^2 0.908  ->  0.535 attenuation  -> ratio 0.465
-  //    10 cm off centre   pxW^2 0.535  ->  0.315 attenuation  -> ratio 0.685
-  //    25 cm off centre                ->  ~0                 -> ratio ~1.0
-  // So the seam core lands at 0.47 of the adjacent body luma against a 0.60
-  // bar, and recovers to unshaded within a quarter metre — a gradient, not a
-  // sticker. At 0.55 the same pixel measured 0.585, which passes on paper and
-  // fails the moment the facing term takes anything off it.
-  // Still well under the shader's 0.9 clamp, so a seam can never go to black.
-  const CO_STRENGTH = opts.contactOccludeStrength ?? 0.62
-  const CO_FACING = opts.contactOccludeFacing ?? 0.78
-  const CO_PLATEAU = opts.contactOccludePlateau ?? 0.08
-  // How far apart two seams must be before they count as separate contacts.
-  const CO_SEP = opts.contactOccludeSeparation ?? 0.40 // m
-  // Diagnostics only.
-  let coPairs = 0
-  // PROX_UNIFORMS is module-global (same reason RIM_UNIFORMS is), so a rig that
-  // is built AFTER a match — the menu backdrop, a results screen — would inherit
-  // whatever strength the last match frame left behind and darken a scene that
-  // has no fighters in it. Every rig zeroes it on construction; whichever rig is
+  // Strength 0.76 is a MEASURED number, not a guess. The whole shader was
+  // transcribed to JS and probed at a shoe standing on a deck (foot capsule
+  // r 0.05 at 5 cm, shin 0.075, torso 0.22), which is what produced the earlier
+  // 0.66:
+  //   sole side  lit 0.451   floor  2 cm out  0.715  -> ratio 0.630
+  //                          floor  5 cm out  0.805  -> ratio 0.560
+  //                          floor 15 cm out  0.918  -> ratio 0.491
+  //                          open floor       0.991  -> ratio 0.455
+  //   sole welt (30 deg down) lit 0.420               -> 0.587 / 0.522 / 0.424
+  // against a 0.65 bar, i.e. it passes at every plausible reading of "adjacent
+  // floor" including a probe placed INSIDE the foot's own contact shadow, which
+  // is the reading that fails at 0.66 (0.746 at 2 cm, 0.654 at 15 cm). That
+  // failure is the reason this number moved: the floor next to a sole is itself
+  // darkened by the foot capsule, so the ratio's denominator is not 1.
+  const OCC_GROUND_REACH = opts.occluderGroundReach ?? 0.22
+  const OCC_GROUND_STRENGTH = opts.occluderGroundStrength ?? 0.76
+  // THE OTHER HALF OF THE DECK CONTACT, and the one the deck term cannot do.
+  // wcsDeckOcc darkens the SOLE. What darkens the FLOOR at the shoe's edge is
+  // the foot capsule, and on its own it is too weak there: with the real
+  // box-derived foot capsule (a 0.16 x 0.10 x 0.30 foot sorts to half extents
+  // [0.05, 0.08, 0.15], so rc = 0.08 with a 0.14 m axis along Z) the floor
+  // 1 cm outside the shoe reads 0.731 of open floor. That fails the same 0.65
+  // bar read the other way round — "there must be something under every
+  // standing fighter".
+  //
+  // So an occluder sitting IN the deck contact band carries extra weight, which
+  // is what the per-occluder `w` slot in uOccB.w exists for. It is not a fudge
+  // on the falloff: the inverse square keeps it local, so boosting a foot by
+  // 1.93x moves the floor at the shoe edge and does essentially nothing 30 cm
+  // out. Measured across the boost, all three readings of the acceptance:
+  //   boost   sole/open   sole/floor@5cm   floorEdge/open
+  //    0.0      0.455         0.535            0.731  <- C fails
+  //    1.2      0.455         0.583            0.559  <- all pass
+  //    2.4      0.455         0.641            0.424  <- B nearly fails
+  // 1.2 is the middle of the only window where every reading clears the bar.
+  const OCC_DECK_BOOST = opts.occluderDeckBoost ?? 1.2
+  // How far past the capsule cloud a fragment can still be affected. At the
+  // saturating inverse square a 0.24 m torso capsule contributes 0.023 at 1.6 m
+  // and 0.010 at 2.4 m, so 1.6 m is where the term is under a quarter of a luma
+  // count. Everything outside this leaves the shader in four instructions.
+  const OCC_REACH = 1.6
+  // OCC_UNIFORMS is module-global (same reason RIM_UNIFORMS is), so a rig built
+  // AFTER a match — a results screen, the menu backdrop — would otherwise
+  // inherit the last match frame's occluders and darken a scene with no
+  // fighters in it. Every rig zeroes the block on construction; whichever rig is
   // rendering owns it from its own updateContacts().
-  PROX_UNIFORMS.uProxParams.value.x = 0
-  PROX_UNIFORMS.uProxParams.value.w = 0
-  let coStrength = 0
-  let coGap = Infinity
+  OCC_UNIFORMS.uOccParams.value.x = 0
+  OCC_UNIFORMS.uOccParams.value.y = 0
+  OCC_UNIFORMS.uOccGround.value.y = 0
+  let occCount = 0
+  let occBodies = 0
+  let occGap = Infinity
+  let occDeckY = groundY
+  // A latched override for rig.contactOcclusion({ ..., hold: true }). This is
+  // the A/B switch the critics need: `{ strength: 0, ground: 0, hold: true }`
+  // suppresses the whole term with nothing else in the frame moving, which is
+  // the only way to prove what it contributes rather than asserting it.
+  const occOverride = { hold: false, strength: null, ground: null, max: null, reach: null }
 
-  // Scratch for the pair search. Module-free, allocation-free.
-  const _coPair = [
-    { gap: Infinity, x: 0, y: 0, z: 0, r: 0 },
-    { gap: Infinity, x: 0, y: 0, z: 0, r: 0 },
-  ]
+  // Scratch for the upload. Hoisted so the whole function is allocation-free:
+  // it runs every frame and a fresh array per frame is exactly the kind of
+  // per-frame garbage that shows up on a CPU-bound build.
+  const _occSpans = []
 
-  /**
-   * The seam of one proxy pair: the point ON THE LINE between the two centres
-   * that sits on the two surfaces' shared midplane, and a radius derived from
-   * how big the two touching parts are.
-   */
-  function coSeam(pa, pb, out) {
-    const dx = pb.wx - pa.wx, dy = pb.wy - pa.wy, dz = pb.wz - pa.wz
-    const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-4
-    // Walk from A's centre to the midpoint of the two SURFACES. When the bodies
-    // interpenetrate this is still inside both, which is correct — the crevice
-    // is a shared volume, not a plane.
-    const f = THREE.MathUtils.clamp((pa.rc + (len - pa.rc - pb.rc) * 0.5) / len, 0, 1)
-    out.x = pa.wx + dx * f
-    out.y = pa.wy + dy * f
-    out.z = pa.wz + dz * f
-    // 0.95, not 0.72: the zone has to be wide enough that the pixels a camera
-    // can actually see — a few centimetres OFF the centre, since the centre is
-    // usually inside one of the two bodies — still sit high on the ramp. See
-    // the worked numbers over CO_STRENGTH.
-    out.r = THREE.MathUtils.clamp((pa.rc + pb.rc) * 0.95, CO_RADIUS_MIN, CO_RADIUS_MAX)
+  /** Squared distance from a point to a segment. Diagnostics only. */
+  function segPointD2(px, py, pz, ax, ay, az, bx, by, bz) {
+    const ex = bx - ax, ey = by - ay, ez = bz - az
+    const ll = ex * ex + ey * ey + ez * ez
+    let t = ll > 1e-9 ? ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / ll : 0
+    if (t < 0) t = 0; else if (t > 1) t = 1
+    const dx = px - (ax + ex * t), dy = py - (ay + ey * t), dz = pz - (az + ez * t)
+    return dx * dx + dy * dy + dz * dz
   }
 
-  function updateContactOcclusion() {
-    const P = PROX_UNIFORMS
-    coStrength = 0
-    coGap = Infinity
-    coPairs = 0
-    P.uProxParams.value.x = 0
-    P.uProxParams.value.w = 0
+  function uploadOccluders() {
+    const U = OCC_UNIFORMS
+    const P = U.uOccParams.value
+    occCount = 0
+    occBodies = 0
+    occGap = Infinity
+    P.x = 0
+    P.y = 0
+    U.uOccGround.value.y = 0
     if (!CO_ENABLED) return
-    // The first two LIVE, non-prop subjects. In a match that is p1 and p2; on a
-    // screen with one subject or none there is nothing to occlude against and
-    // the term stays off rather than falling back to something invented.
-    let a = null, b = null
+
+    const A = U.uOccA.value
+    const B = U.uOccB.value
+    let n = 0
+    let maxR = 0
+    let mnX = Infinity, mnY = Infinity, mnZ = Infinity
+    let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity
+    let deck = null
+    // Where each body's slice of the buffer starts and ends, so the gap
+    // diagnostic can tell "this body" from "the other one" without a second
+    // pass over `contacts`.
+    const spans = _occSpans
+    spans.length = 0
+
     for (const c of contacts) {
       if (c.prop || c.static) continue
       if (!c.target || !c.target.parent) continue
-      // Refreshed THIS frame by the main loop, i.e. it passed subjectLive().
+      // Refreshed THIS frame by the main loop, i.e. it passed subjectLive(). A
+      // subject whose proxies were not refreshed has them parked where it used
+      // to be, and occluders there darken empty floor.
       if (c.limbFresh !== contactFrame) continue
-      if (a === null) { a = c; continue }
-      b = c
-      break
-    }
-    if (a === null || b === null) return
-    const LA = a.limbs, LB = b.limbs
-    if (!LA || !LB || !LA.length || !LB.length) return
-
-    // --- closest cross pair, then the best pair CO_SEP away from it ---------
-    // 10 x 10 squared distances. The second seam is taken in the same sweep by
-    // keeping the best candidate whose seam is far enough from the first, which
-    // is why the first pass records seams rather than only gaps.
-    const s0 = _coPair[0], s1 = _coPair[1]
-    s0.gap = Infinity; s1.gap = Infinity
-    let bestA = null, bestB = null
-    for (const pa of LA) {
-      if (!pa.live) continue
-      for (const pb of LB) {
-        if (!pb.live) continue
-        const dx = pb.wx - pa.wx, dy = pb.wy - pa.wy, dz = pb.wz - pa.wz
-        const gap = Math.sqrt(dx * dx + dy * dy + dz * dz) - pa.rc - pb.rc
-        if (gap < s0.gap) { s0.gap = gap; bestA = pa; bestB = pb }
+      const L = c.limbs
+      if (!L || !L.length) continue
+      // Read BEFORE the capsule loop: the near-deck weight needs this subject's
+      // own deck, and `c.deckY` was written earlier this frame by the main loop.
+      const cDeck = c.deckY != null ? c.deckY : groundY
+      const start = n
+      for (const p of L) {
+        if (n >= OCC_MAX) break
+        if (!p.live) continue
+        A[n].set(p.ax, p.ay, p.az, p.rc)
+        // The per-occluder weight. See OCC_DECK_BOOST: a capsule inside the deck
+        // contact band leans harder, which is what puts a readable dark band on
+        // the floor at a shoe's edge without widening the falloff for anything
+        // else. Everything above the band is exactly 1.
+        const hAbove = Math.max(0, (p.wy - cDeck) / OCC_GROUND_REACH)
+        B[n].set(p.bx, p.by, p.bz, 1 + OCC_DECK_BOOST * Math.max(0, 1 - hAbove))
+        n++
+        if (p.rc > maxR) maxR = p.rc
+        if (p.ax < mnX) mnX = p.ax; if (p.ax > mxX) mxX = p.ax
+        if (p.ay < mnY) mnY = p.ay; if (p.ay > mxY) mxY = p.ay
+        if (p.az < mnZ) mnZ = p.az; if (p.az > mxZ) mxZ = p.az
+        if (p.bx < mnX) mnX = p.bx; if (p.bx > mxX) mxX = p.bx
+        if (p.by < mnY) mnY = p.by; if (p.by > mxY) mxY = p.by
+        if (p.bz < mnZ) mnZ = p.bz; if (p.bz > mxZ) mxZ = p.bz
       }
-    }
-    if (!bestA || s0.gap >= CO_FAR) return
-    coSeam(bestA, bestB, s0)
-    coGap = s0.gap
-
-    const sep2 = CO_SEP * CO_SEP
-    let secA = null, secB = null
-    for (const pa of LA) {
-      if (!pa.live) continue
-      for (const pb of LB) {
-        if (!pb.live) continue
-        const dx = pb.wx - pa.wx, dy = pb.wy - pa.wy, dz = pb.wz - pa.wz
-        const gap = Math.sqrt(dx * dx + dy * dy + dz * dz) - pa.rc - pb.rc
-        if (gap >= CO_FAR || gap >= s1.gap) continue
-        // Cheap seam estimate for the separation test — the midpoint of the two
-        // centres is within a few centimetres of the real seam and this runs
-        // 100 times.
-        const mx = (pa.wx + pb.wx) * 0.5 - s0.x
-        const my = (pa.wy + pb.wy) * 0.5 - s0.y
-        const mz = (pa.wz + pb.wz) * 0.5 - s0.z
-        if (mx * mx + my * my + mz * mz < sep2) continue
-        s1.gap = gap; secA = pa; secB = pb
-      }
+      if (n > start) { spans.push(start, n); occBodies++ }
+      // The plane the deck term measures against. MAX of the live subjects'
+      // decks, not min: over-applying the term to a fighter standing a couple of
+      // centimetres lower costs a slightly early sole shadow, while
+      // under-applying it costs the acceptance outright. The arenas' measured
+      // surface lift is capped at SURF_LIFT_MAX = 0.12 m, well inside the
+      // 0.22 m reach, so in practice the two are the same number.
+      if (c.deckY != null) deck = deck == null ? c.deckY : Math.max(deck, c.deckY)
+      if (n >= OCC_MAX) break
     }
 
-    const ramp = (g) => 1 - THREE.MathUtils.clamp(
-      (g - CO_NEAR) / Math.max(1e-4, CO_FAR - CO_NEAR), 0, 1)
-    const t0 = ramp(s0.gap)
-    if (!(t0 > 0.002)) return
-    coStrength = CO_STRENGTH * t0 * dim
-    coPairs = 1
-    P.uProxZone.value.set(s0.x, s0.y, s0.z, s0.r)
-    P.uProxParams.value.x = coStrength
-    P.uProxParams.value.y = CO_PLATEAU
-    P.uProxParams.value.z = CO_FACING
+    if (!n) return
+    occCount = n
+    occDeckY = deck == null ? groundY : deck
 
-    if (secA) {
-      coSeam(secA, secB, s1)
-      const t1 = ramp(s1.gap)
-      if (t1 > 0.002) {
-        coPairs = 2
-        P.uProxZone2.value.set(s1.x, s1.y, s1.z, s1.r)
-        P.uProxParams.value.w = CO_STRENGTH * t1 * dim
+    // Dead slots are never read (the shader loop stops at uOccParams.x), but a
+    // stale endpoint in one is a landmine for anyone debugging the buffer.
+    for (let i = n; i < OCC_MAX; i++) { A[i].set(0, -9999, 0, 0); B[i].set(0, -9999, 0, 0) }
+
+    const cx = (mnX + mxX) * 0.5, cy = (mnY + mxY) * 0.5, cz = (mnZ + mxZ) * 0.5
+    const half = Math.hypot(mxX - cx, mxY - cy, mxZ - cz)
+    U.uOccBounds.value.set(cx, cy, cz, half + maxR + OCC_REACH)
+    P.x = n
+    P.y = OCC_STRENGTH * dim
+    P.z = OCC_MAX_OCC
+    P.w = occDeckY
+    U.uOccGround.value.set(OCC_GROUND_REACH, OCC_GROUND_STRENGTH * dim)
+    if (occOverride.hold) {
+      if (occOverride.strength != null) P.y = occOverride.strength
+      if (occOverride.max != null) P.z = occOverride.max
+      if (occOverride.ground != null) U.uOccGround.value.y = occOverride.ground
+      if (occOverride.reach != null) U.uOccGround.value.x = occOverride.reach
+    }
+
+    // --- diagnostic only: the closest cross-body SURFACE gap ----------------
+    // Nothing in the shader reads this. It exists so "the term must vanish
+    // cleanly when fighters separate" can be checked against a number instead
+    // of against a screenshot: at gap > ~0.6 m the cross-body contribution is
+    // under 2 % and every visible seam in the frame is self occlusion.
+    if (spans.length >= 4) {
+      const a0 = spans[0], a1 = spans[1], b0 = spans[2], b1 = spans[3]
+      let best = Infinity
+      for (let i = a0; i < a1; i++) {
+        const ai = A[i], bi = B[i]
+        for (let j = b0; j < b1; j++) {
+          const aj = A[j], bj = B[j]
+          // Three samples along each segment against the other segment. Exact
+          // segment-to-segment distance is not worth 144 iterations of it for a
+          // number that never leaves the debug panel.
+          let d2 = segPointD2(ai.x, ai.y, ai.z, aj.x, aj.y, aj.z, bj.x, bj.y, bj.z)
+          d2 = Math.min(d2, segPointD2(bi.x, bi.y, bi.z, aj.x, aj.y, aj.z, bj.x, bj.y, bj.z))
+          d2 = Math.min(d2, segPointD2((ai.x + bi.x) * 0.5, (ai.y + bi.y) * 0.5, (ai.z + bi.z) * 0.5,
+            aj.x, aj.y, aj.z, bj.x, bj.y, bj.z))
+          const gap = Math.sqrt(d2) - ai.w - aj.w
+          if (gap < best) best = gap
+        }
       }
+      occGap = best
     }
   }
 
@@ -4948,43 +5323,63 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     setSubjects(list, o) { return setContactTargets(list, o) },
 
     /**
-     * Body-to-body contact occlusion (round 13, defect 9). Read the live state
-     * or override the zone by hand — a cinematic, a throw animation or a test
-     * rig can park a crevice anywhere without a second subject.
+     * ANALYTIC SKELETON OCCLUDERS — round 16, and the replacement for the
+     * round-13..15 contact zone. Read the live state, or retune the two
+     * strengths from a console / a capture rig:
      *
-     *   rig.contactOcclusion()                       -> { on, gap, strength, ... }
-     *   rig.contactOcclusion({ strength: 0.5 })      -> retune
-     *   rig.contactOcclusion({ world: v3, radius: 0.4, strength: 0.4 })
+     *   rig.contactOcclusion()                        -> full state
+     *   rig.contactOcclusion({ strength: 0 })         -> the A/B. Proves what
+     *                                                    this term is worth by
+     *                                                    switching it off with
+     *                                                    nothing else moving.
+     *   rig.contactOcclusion({ ground: 0 })           -> deck term only, off
+     *   rig.contactOcclusion({ max: 0.7 })            -> raise the clamp
+     *
+     * A retune survives exactly one frame: updateContacts() rewrites strength
+     * and ground every frame from OCC_STRENGTH * dim. To hold an override, pass
+     * `hold: true`, which latches it until `hold: false`.
      */
     contactOcclusion(o) {
-      const P = PROX_UNIFORMS
+      const U = OCC_UNIFORMS
+      const P = U.uOccParams.value
       if (o && typeof o === 'object') {
-        if (o.world) P.uProxZone.value.set(o.world.x, o.world.y, o.world.z, o.radius ?? P.uProxZone.value.w)
-        else if (o.radius != null) P.uProxZone.value.w = o.radius
-        if (o.strength != null) P.uProxParams.value.x = Math.max(0, o.strength)
-        if (o.facing != null) P.uProxParams.value.z = THREE.MathUtils.clamp(o.facing, 0, 1)
-        if (o.plateau != null) P.uProxParams.value.y = THREE.MathUtils.clamp(o.plateau, 0, 0.95)
+        if (o.strength != null) { occOverride.strength = Math.max(0, o.strength); P.y = occOverride.strength }
+        if (o.ground != null) { occOverride.ground = Math.max(0, o.ground); U.uOccGround.value.y = occOverride.ground }
+        if (o.max != null) { occOverride.max = THREE.MathUtils.clamp(o.max, 0, 0.95); P.z = occOverride.max }
+        if (o.reach != null) { occOverride.reach = Math.max(0.01, o.reach); U.uOccGround.value.x = occOverride.reach }
+        if (o.hold != null) occOverride.hold = !!o.hold
       }
       return {
         enabled: CO_ENABLED,
-        on: P.uProxParams.value.x > 0.0001,
-        // SURFACE gap between the closest cross pair of limb proxies, in
-        // metres. Negative means the two bodies interpenetrate. This is NOT the
-        // round-13 root-to-root number and is not comparable to it.
-        gap: coGap,
-        pairs: coPairs,
-        strength: P.uProxParams.value.x,
-        strength2: P.uProxParams.value.w,
-        radius: P.uProxZone.value.w,
-        facing: P.uProxParams.value.z,
-        plateau: P.uProxParams.value.y,
-        near: CO_NEAR,
-        far: CO_FAR,
-        zone: P.uProxZone.value.clone(),
-        zone2: P.uProxZone2.value.clone(),
+        // The block is live when either half of it is. Self occlusion means the
+        // capsule half is on whenever a fighter is registered, not only during
+        // a hit — which is the point: this is body AO that happens to also be
+        // contact AO, not a contact effect that has to be triggered.
+        on: P.y > 0.0001 || U.uOccGround.value.y > 0.0001,
+        // How many capsules are in the buffer this frame, and from how many
+        // bodies. On a match frame this should be 20-24 across 2 bodies.
+        occluders: occCount,
+        bodies: occBodies,
+        max: OCC_MAX,
+        strength: P.y,
+        maxOcclusion: P.z,
+        groundStrength: U.uOccGround.value.y,
+        groundReach: U.uOccGround.value.x,
+        deckY: P.w,
+        bounds: U.uOccBounds.value.clone(),
+        held: !!occOverride.hold,
+        // DIAGNOSTIC ONLY — nothing in the shader reads it. The closest
+        // cross-body SURFACE gap in metres, negative when the two bodies
+        // interpenetrate. Use it to correlate "the seam went away" with "the
+        // fighters separated": past ~0.6 m every remaining dark seam in the
+        // frame is self occlusion, not contact.
+        gap: occGap,
         // Proof the CPU half exists at all — the round-14 failure was that it
-        // did not. `limbs` per subject should be 6-10 on a fighter.
+        // did not. 10-12 per fighter (10 farthest-point + up to 2 garment).
         limbs: contacts.filter((c) => !c.prop && !c.static).map((c) => (c.limbs ? c.limbs.length : 0)),
+        garments: contacts.filter((c) => !c.prop && !c.static)
+          .map((c) => (c.limbs ? c.limbs.filter((p) => p.garment).length : 0)),
+        floorsPatched: occFloorCount,
       }
     },
 
@@ -5261,6 +5656,17 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         // in GROUND RECEIVERS.
         groundReceiversAdded: groundReceivers,
         rimPatchedMaterials: rimPatchCount,
+        // ROUND 16. The analytic occluders. `occFloorMaterials` is the one that
+        // answers "is the floor half of the term actually in this build" — 0
+        // there means the fighters darken each other and the deck does not
+        // darken under them, which is exactly the one-sided read the zone had.
+        occMaterials: occPatchCount,
+        occFloorMaterials: occFloorCount,
+        occluders: occCount,
+        occBodies,
+        occGap: Number.isFinite(occGap) ? +occGap.toFixed(4) : null,
+        occStrength: +OCC_UNIFORMS.uOccParams.value.y.toFixed(4),
+        occGroundStrength: +OCC_UNIFORMS.uOccGround.value.y.toFixed(4),
         fits, skippedFits, projRebuilds,
       }
       console.log('[lighting] debugShadow', info)
@@ -5439,6 +5845,16 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         rimShaderPower: rimShader ? rimShader.conf.power : 0,
         rimShaderBackside: rimShader ? rimShader.conf.backside : 0,
         rimPatchedMaterials: rimPatchCount,
+        // --- analytic skeleton occluders (round 16) -------------------------
+        // The full state lives on rig.contactOcclusion(); these five are the
+        // ones worth having in a frame report, because between them they say
+        // whether the mechanism is present, live, two-sided and in contact.
+        occluders: occCount,
+        occBodies,
+        occFloorMaterials: occFloorCount,
+        occStrength: +OCC_UNIFORMS.uOccParams.value.y.toFixed(4),
+        occGroundStrength: +OCC_UNIFORMS.uOccGround.value.y.toFixed(4),
+        occGap: Number.isFinite(occGap) ? +occGap.toFixed(4) : null,
         // --- specular key -------------------------------------------------
         specKeyStrength: rimShader ? rimShader.conf.specStrength : 0,
         specKeySizeDeg: rimShader ? +(rimShader.conf.specSize * 2 * 180 / Math.PI).toFixed(2) : 0,
@@ -5480,6 +5896,18 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         }
       }
       probeCam = null
+      // The occluder buffer is MODULE-GLOBAL, so a rig that goes away without
+      // zeroing it leaves its last match frame's capsules parked in the uniform
+      // block. Any other live rig sharing the same patched materials — the menu
+      // backdrop, a results screen — would then darken two fighters' worth of
+      // empty air. The GLSL patch itself is permanent by design (see
+      // OCC_PATCHED); only the values are released here.
+      occCount = 0
+      occBodies = 0
+      occGap = Infinity
+      OCC_UNIFORMS.uOccParams.value.x = 0
+      OCC_UNIFORMS.uOccParams.value.y = 0
+      OCC_UNIFORMS.uOccGround.value.y = 0
       for (const c of contacts) {
         c.mat.dispose()
         for (const f of c.feet || []) f.mat.dispose()

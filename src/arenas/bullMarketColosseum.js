@@ -58,7 +58,7 @@ import { stripBuriedFaces } from '../render/geometry.js'
 // palette — golden hour over old money.
 //
 // VALUE PLAN (the fix for "orange mid-tone soup"). Three anchors:
-//   BLACK   arcade interiors / gate tunnel / under-stand    VOID  0x1b140d
+//   BLACK   arcade interiors / gate tunnel / under-stand    VOID  0x2f2519
 //   MID     sand, sandstone, toga cloth                     0x8a..0xb2
 //   SPEC    gold statues, marble capitals, bronze, flame     highlight, rolls off
 // Sunlit sand lands around 190-205 sRGB, shadowed sand around 55-70, and the
@@ -69,7 +69,39 @@ const SAND_DEEP = 0x7c5c32      // raked / damp sand, the slab's sides
 const STONE = '#b09268'         // travertine in sun
 const STONE_DARK = 0x745c40     // in shade
 const STONE_DEEP = 0x4a3826     // recesses, string courses
-const VOID = 0x1b140d           // the black anchor: arcade interiors, tunnel
+// ROUND 15 — VOID WAS THE below8 FAILURE, AND IT WAS ALSO OUT OF CONTRACT.
+//
+// frameReport() on this arena: "below luma 8: 6.348 % (limit 6 %)". The cause
+// was already written down in this file, in the WHERE THE BLACKS GO note under
+// the light rig: "The arcade niches and the gate tunnel (albedo 0x1b140d =
+// 0.012 linear, unlit from every direction the rig has) see only ambientFloor
+// 0.048 + hemi: 0.048 * 0.012 / PI ~ 0.0002 -> under 12 sRGB." The note called
+// that "real blacks, still not crushed to zero" — but 12 sRGB is not "not
+// crushed", it is four counts above the metric's own floor, and a GTAO pass at
+// this mood's aoScale 2.45 takes any pixel in that band under 8 the moment it
+// finds a corner. Independently reproduced headless (a CPU raster of this arena
+// through a mirror of the grade): the merged VOID bucket is 4.22 % of a
+// gameplay frame at a mean of 10 counts, and it supplies 64 % of every pixel
+// the estimator puts below 8. It is the single offender, not one of several.
+//
+// 0x1b140d IS ALSO A CONTRACT VIOLATION. GRAPHICS_CONTRACT §0 style guardrails:
+// "albedo stays in 30-240 sRGB (never pure 0 or 255)". 0x1b140d is (27, 20, 13)
+// — every channel under 30, so pbr()'s albedo guard was silently clamping it
+// and the value that reached the screen was never the value written here. Same
+// class of bug as permanentReserveCore's STEEL_DARK (0x151b24, fixed round 14
+// with the same reasoning): a colour authored outside the guard is a colour
+// nobody is actually choosing.
+//
+// 0x2f2519 is (47, 37, 25) = 0.028 linear, 2.3x the delivered radiance, and it
+// is still by a wide margin the darkest surface in the arena — SAND_DEEP is
+// 0x7c5c32 and STONE_DEEP is 0x4a3826, both well above it. Combined with the
+// ambientFloor lift in _buildLights (0.048 -> 0.060, reasoned there), the
+// niches land near 20 counts instead of 10: a real black anchor in a sunset
+// frame, and above the ceiling with margin for the AO pass to eat.
+//
+// NOT an exposure change. Clipped white stays 0.000 % — this moves 4 % of the
+// frame from 10 counts to 20 and touches nothing above the black point.
+const VOID = 0x2f2519           // the black anchor: arcade interiors, tunnel
 const GOLD = 0xd9a334
 const GOLD_DARK = 0x9c6f1e
 const GOLD_PALE = 0xecd393
@@ -1741,10 +1773,29 @@ class BullMarketColosseumArena extends ArenaBase {
     // lobe and the sun disc and nothing else — the "clipping should be confined
     // to the sun disc and stay under ~0.5 % of pixels" ask, by construction.
     //
-    // WHERE THE BLACKS GO. The arcade niches and the gate tunnel (albedo
-    // 0x1b140d = 0.012 linear, unlit from every direction the rig has) see only
-    // ambientFloor 0.048 + hemi: 0.048 * 0.012 / PI ~ 0.0002 -> under 12 sRGB.
-    // Real blacks, still not crushed to zero.
+    // WHERE THE BLACKS GO — REWRITTEN IN ROUND 15, BECAUSE THE OLD ANSWER WAS
+    // THE below8 FAILURE. What used to be here: "the arcade niches and the gate
+    // tunnel (albedo 0x1b140d = 0.012 linear, unlit from every direction the
+    // rig has) see only ambientFloor 0.048 + hemi: 0.048 * 0.012 / PI ~ 0.0002
+    // -> under 12 sRGB. Real blacks, still not crushed to zero." frameReport()
+    // disagreed: "below luma 8: 6.348 % (limit 6 %)". Twelve counts is not a
+    // black anchor, it is four counts of headroom, and this mood's GTAO profile
+    // (AO_ARCH, aoScale 2.45, blend 1.05) spends all four the moment the kernel
+    // finds a corner in a niche.
+    //
+    // Both ends moved, and neither is exposure:
+    //   * VOID 0x1b140d -> 0x2f2519 (see the palette note — it was also under
+    //     the contract's 30 sRGB albedo floor and was being clamped anyway).
+    //     0.012 -> 0.028 linear.
+    //   * ambientFloor 0.048 -> 0.060. The flat floor is the ONLY term these
+    //     surfaces receive, so it is the only lever with any authority over
+    //     them, and 0.060 is still the smallest ambient of any outdoor mood in
+    //     the game. It is a floor, not a wash: at 0.060 a SUNLIT sand plane
+    //     (0.66 linear from the key alone) gains 0.0007 linear — under half a
+    //     count — so nothing above the black point can even measure it.
+    // Together: 0.060 * 0.028 / PI = 0.00053 linear, ~20 sRGB. Still the
+    // darkest surface in the arena by a wide margin, now with room for the AO
+    // pass to work in.
     //
     //   KEY    0xffb066  26-deg back-left sun. Rakes the sand, throws 2x-height
     //          shadows toward camera-right, BACKLIGHTS the fighters.
@@ -1762,7 +1813,7 @@ class BullMarketColosseumArena extends ArenaBase {
       // wall at 25 is DARKER than the foreground" — a backlit inner wall that
       // reads 25 is a hole, not a shadow.
       hemiSky: 0x8fa6d8, hemiGround: 0x7a5330, hemiIntensity: 0.62,
-      ambientColor: 0x4a3c52, ambientFloor: 0.048,
+      ambientColor: 0x4a3c52, ambientFloor: 0.060,
       sunColor: 0xffb877, sunIntensity: 9.6, sunPos: [S.x, S.y, S.z],
       fillColor: 0x6d8ed6, fillIntensity: 0.9, fillPos: [12, 6.5, 13],
       rimColor: 0x9fd6ff, rimIntensity: 3.4,
@@ -1957,9 +2008,47 @@ class BullMarketColosseumArena extends ArenaBase {
     })
     const stoneShade = flatMat(STONE_DARK, { surface: 'stone', mapOpts: { scale: 1.7, wear: 0.7, repeat: [12, 1] } })
     const stoneDeep = flatMat(STONE_DEEP, { surface: 'stone', mapOpts: { scale: 2.4, wear: 0.85, repeat: [12, 1] } })
+    // ROUND 15 — THE ANTI-VOID TERM, AND WHY ALBEDO ALONE COULD NOT DO IT.
+    //
+    // The palette note above VOID explains the albedo half of the below8 fix.
+    // Measured headless afterwards, the albedo half moved the merged VOID
+    // bucket from 7 counts to 10 and took only 19 pixels out of the sub-8 bin.
+    // The reason is in the numbers the light rig prints: these faces point INTO
+    // the bowl's structure, so of the rig's seven sources they receive the flat
+    // ambient (0.060) and the hemisphere's GROUND half (~0.05) and nothing
+    // else — key, fill, rim, bounce and subject fill are all plane waves or
+    // point sources aimed at the fight floor, and every one of them has
+    // NdotL <= 0 here. Total irradiance ~0.11. At albedo 0.028 that is
+    // 0.11 * 0.028 / PI = 0.00098 linear, which is ten counts no matter what
+    // the albedo says, and reaching 20 counts through albedo alone would need
+    // VOID at 0x63563f — a mid grey-brown, i.e. no black anchor at all.
+    //
+    // So the light comes from the material. In a real colosseum an arcade
+    // interior is not lit by the sky, it is lit by SUNLIGHT BOUNCING OFF THE
+    // SAND OUTSIDE IT, and that is a term no directional light in this rig can
+    // express. A small emissive floor on the recess material IS that bounce:
+    // 0x8a6a44 is the sand's own hue, and at intensity 0.055 it adds ~0.0043
+    // linear — under a third of a stop, invisible on anything that is actually
+    // lit, and a 4.5x on something that is not. This is the same mechanism and
+    // the same reasoning as buildCrowd's CROWD_FILL_HEX ("THE ANTI-VOID TERM",
+    // ArenaBase v3.6), applied to the other thing in the game that has no
+    // light source of its own.
+    //
+    // `shared: true` is required and is safe: flatMat's mutability heuristic
+    // treats any `emissive` as animation-prone and would hand back a PRIVATE
+    // material per call site otherwise, which would fragment mergeStatic's
+    // buckets across the podium, the shell and the gate. Nothing ever writes to
+    // these materials — there is no updater in this file that touches them —
+    // and pbr()'s cache key includes the emissive colour and intensity, so the
+    // entry belongs to this recess set and to nothing else.
+    //
+    // NOT a bloom risk: the emissive convention is "emitters >= 1.6 linear",
+    // and 0.0043 is three orders of magnitude under this mood's 1.18 bloom
+    // threshold, so it cannot glow, star or veil.
+    const VOID_BOUNCE = { emissive: 0x8a6a44, emissiveIntensity: 0.055, shared: true }
     // The black anchor. 'concrete' at this albedo has almost no envMapIntensity
     // contribution, which is exactly what a light-trap recess should do.
-    const voidMat = flatMat(VOID, { surface: 'concrete', mapOpts: { scale: 2.0, wear: 0.9 } })
+    const voidMat = flatMat(VOID, { surface: 'concrete', ...VOID_BOUNCE, mapOpts: { scale: 2.0, wear: 0.9 } })
 
     // Shell variants. An open-ended cylinder is seen from INSIDE the bowl, so
     // it needs a two-sided material — and that has to be asked for at
@@ -1971,7 +2060,7 @@ class BullMarketColosseumArena extends ArenaBase {
       { ...shell, mapOpts: { scale: 1.7, wear: 0.6, repeat: [14, 2] } })
     const stoneShadeShell = flatMat(STONE_DARK, { surface: 'stone', ...shell, mapOpts: { scale: 1.7, wear: 0.7, repeat: [14, 1] } })
     const stoneDeepShell = flatMat(STONE_DEEP, { surface: 'stone', ...shell, mapOpts: { scale: 2.4, wear: 0.85, repeat: [14, 1] } })
-    const voidShell = flatMat(VOID, { surface: 'concrete', ...shell, mapOpts: { scale: 2.0, wear: 0.9, repeat: [14, 2] } })
+    const voidShell = flatMat(VOID, { surface: 'concrete', ...shell, ...VOID_BOUNCE, mapOpts: { scale: 2.0, wear: 0.9, repeat: [14, 2] } })
 
     const ring = (r, h, y, mat, seg = 44, name) => {
       const m = new THREE.Mesh(
@@ -2478,7 +2567,12 @@ class BullMarketColosseumArena extends ArenaBase {
       cap.receiveShadow = shadows
       D.add(cap)
       const [rx, rz] = toWorld(0, -0.14)
-      const facia = new THREE.Mesh(roundedBox(6.24, 0.9, 1.0, 0.03, 1), flatMat(VOID, { surface: 'concrete', noMaps: true }))
+      // ROUND 15: same anti-void bounce as the arcade recesses (see voidMat).
+      // This facia is the deepest shadow line in the near field and it is the
+      // one the fighters stand in front of, so it is exactly a pixel the below8
+      // ceiling is about.
+      const facia = new THREE.Mesh(roundedBox(6.24, 0.9, 1.0, 0.03, 1),
+        flatMat(VOID, { surface: 'concrete', noMaps: true, emissive: 0x8a6a44, emissiveIntensity: 0.055, shared: true }))
       facia.position.set(rx, 0.42, rz)     // recessed 0.27 behind the cap lip
       facia.rotation.y = face
       D.add(facia)
@@ -2630,7 +2724,19 @@ class BullMarketColosseumArena extends ArenaBase {
       // mapOpts.scale/wear deliberately match voidMat's concrete field: a new
       // (scale, wear) pair is a whole new 512px PBR set to generate and upload,
       // while a new `repeat` is free (textures.js splits the two cache keys).
-      flatMat(0x3a2c1c, { surface: 'concrete', side: THREE.DoubleSide, mapOpts: { scale: 2.0, wear: 0.9, repeat: [16, 1] } })
+      // ROUND 15: the vomitorium wall carries the same anti-void bounce as the
+      // arcade recesses (see voidMat). It is the third surface the palette
+      // header calls a black anchor ("under-stand"), it is 4.3 % of a gameplay
+      // frame, and once the arcade recesses were fixed it was measured as the
+      // whole of the remaining sub-8 bin: 222 px, entirely on the arc that
+      // faces away from the key. Its albedo (0x3a2c1c) is already legal and
+      // already brighter than VOID, so this is the bounce term and nothing
+      // else — the lit half of the wall does not move.
+      flatMat(0x3a2c1c, {
+        surface: 'concrete', side: THREE.DoubleSide,
+        emissive: 0x8a6a44, emissiveIntensity: 0.055, shared: true,
+        mapOpts: { scale: 2.0, wear: 0.9, repeat: [16, 1] },
+      })
     )
     backing.position.set(0, 1.55, ARC_CZ)
     backing.name = 'standBacking'

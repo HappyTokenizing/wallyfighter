@@ -96,6 +96,55 @@ export const GameConfig = {
   // called "1080p high" by different verifiers and they are not the same
   // configuration on the present path. See BACKLOG.md "ROUND 13 — the disputed
   // 1080p number" for the full reconciliation.
+  //
+  // -------------------------------------------------------------------------
+  // ROUND 15 — WHAT THE FRAME IS ACTUALLY BOUND BY. Read this before spending
+  // another round on either fill or draw calls; it retires two earlier
+  // conclusions and it retires them for a reason that is now removed.
+  //
+  // ROUND 14 CONCLUDED: "performance is CPU/draw-submission bound, not
+  // fill-bound", from a resolution sweep on one scene —
+  //     1.44 Mpx -> 41.4 ms | 1.56 Mpx -> 44.6 ms | 2.07 Mpx -> 35.7 ms
+  // — where cutting 30% of the pixels did not help. That measurement was
+  // correct and its conclusion was correct FOR THAT BUILD. The reason it did
+  // not scale with pixels is that the frame was spending most of its CPU on
+  // work that has nothing to do with pixels: the shadow map was being
+  // rasterised TWICE per displayed frame, because GTAOPass's normal prepass
+  // calls renderer.render() on the same scene and three rebuilds the shadow
+  // map on every renderer.render(). Pipeline.js `_suppressShadowsIn()` removes
+  // the duplicate. See its header for the mechanism.
+  //
+  // MEASURED AFTER THAT FIX. permanent-reserve-core, tier `high`, real Chrome
+  // (?prof=1, never ?cap=1), CSS viewport = drawbuffer, renderScale 1.0,
+  // composer render+gtao+bloom+grade+smaa+output, steady-state match frames:
+  //
+  //   postPixels           frame median      CPU in pipeline.render()
+  //   0.92 Mpx (1280x720)      9.0 ms                7.4 ms
+  //   2.07 Mpx (1920x1080)    12.6 ms                4.3 ms
+  //   3.69 Mpx (2560x1440)    20.3 ms                4.5 ms
+  //
+  // Frame time is now LINEAR IN PIXELS — about 5.2 ms fixed plus 4.1 ms per
+  // megapixel (the fit predicts 13.7 ms at 2.07 Mpx against 12.6 measured) —
+  // while CPU submission stays flat across a 4x pixel range. So the frame is
+  // fill-bound again, the round-14 finding no longer describes this build, and
+  // renderScale/aoScale ARE valid levers once more. They are simply not needed
+  // yet, which is why nothing in the tiers below moved this round.
+  //
+  // THE 60 FPS CLAIM (GRAPHICS_CONTRACT.md §0) IS NOW TRUE AS WRITTEN, on
+  // median, on an M-series laptop: 1920x1080 tier `high` measures 12.1-14.6 ms
+  // (68-83 fps) on permanent-reserve-core and 8.4-8.6 ms (>100 fps) on
+  // bull-market-colosseum and meme-market. Do not weaken the claim. What it
+  // does NOT yet cover is the tail: p90 sits at 25-30 ms with ~3% of frames
+  // over 33 ms, and that is not shader compilation (one program compiled
+  // across a 6 s sample), so it is the next thing to chase — as a hitch
+  // problem, not a throughput one.
+  //
+  // DRAW CALLS. Same scene and configuration, per-pass attribution from
+  // Pipeline.profileDraws()/drawProfile(): 1113-1227 total before, 758-957
+  // after. The GRAPHICS_CONTRACT "~900 in a match" budget is met on median but
+  // has no headroom, and the split says where the rest is:
+  // shadow ~355 > beauty ~225 > GTAO normal prepass ~190 > post quads 18.
+  // The shadow map is still the largest single block in the frame.
   // -------------------------------------------------------------------------
   quality: {
     low: {

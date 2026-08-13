@@ -214,9 +214,79 @@ const PAL = {
   // round-3 fighter-separation work put it: the deck still reads a step darker
   // and cooler than every fighter palette, because all four moved together and
   // none of them moved far. Exposure is untouched.
+  // ---------------------------------------------------------------------
+  // ROUND 15 — WHY THIS SET STILL FAILS below8 AT 8.919 %, AND WHERE THE
+  // MECHANISM ACTUALLY LIVES. Read this before lifting anything else here.
+  //
+  // Rounds 3, 11 and 14 each attacked this number with light (hemi, hemiGround,
+  // ambientFloor) and with albedo, each with a worked solve, and the number did
+  // not move. That pattern means the model everyone was solving against is
+  // missing a term, so this round measured instead of solving.
+  //
+  // WHAT WAS MEASURED. A CPU raster of the built arena from a gameplay camera,
+  // shaded off this file's own rig (read back off the scene graph, not
+  // re-derived), fogged with this file's own fog, and run through a mirror of
+  // GradeShader including the corner vignette and the black-floor toe:
+  //
+  //     storm stage 1 (t=0)     below8 0.417 %   median 63
+  //     storm stage 2 (t=45 s)  below8 0.033 %   median 60
+  //     storm stage 3 (t=95 s)  below8 0.009 %   median 43
+  //
+  // The arena's own updaters were driven forward for those, so the stage
+  // machine's key/hemi/fog walk is included. below8 FALLS as the storm builds,
+  // because _updateLightning lifts the fog and the hemisphere faster than
+  // stageKey drops. An earlier agent's independent estimator reported the same
+  // shape (0.00-0.03 %). Two estimators that disagree with the browser by two
+  // orders of magnitude in the same direction are not both broken in the same
+  // way: THE LIT GEOMETRY IN THIS FILE DOES NOT PRODUCE 8.919 %.
+  //
+  // WHAT DOES. The one large darkening term neither estimator models is GTAO,
+  // and this mood takes the architectural profile: env.js AO_ARCH, aoScale 2.45
+  // (a pow on the AO term), composited by GTAOPass as mix(1, ao, blend) with
+  // blend = min(1.3, mood.ao = 1.05). So the multiply a pixel receives is
+  //     1 - 1.05 * (1 - ao^2.45)
+  // and that is brutal in the tail:  ao 0.80 -> x0.58,  ao 0.60 -> x0.26,
+  // ao 0.40 -> x0.055. A pixel needs to start above ~31 counts to survive the
+  // 0.26 case and above ~145 to survive the 0.055 case.
+  //
+  // The measured value distribution of this arena is exactly the at-risk band.
+  // 12.6 % of a gameplay frame sits between 12 and 31 final counts, and it is
+  // these entries: the torii lacquer pair (3.2 % of frame at 12-14 counts) and
+  // the terrace / grime greens (7.7 % at 28-31). 8.9 % out of an at-risk 12.6 %
+  // is the right order of magnitude, and it explains why LIGHT never fixed it —
+  // GTAO is a MULTIPLY, so no amount of ambient rescues a pixel it finds a
+  // corner in; only a higher starting value does.
+  //
+  // OWNERSHIP, STATED PLAINLY. The amplifier is `AO_ARCH.aoScale = 2.45` in
+  // src/render/env.js and the blend ceiling is in src/render/Pipeline.js.
+  // NEITHER IS THIS FILE. env.js already carries per-mood escape hatches for
+  // exactly this failure — MOOD_AO has entries for 'reserve-core' (aoScale
+  // 1.75) and 'meme-plaza' (1.80), both added because the full 2.45 pow "turns
+  // corners into the pure-zero holes the round-5 P0 is about". This arena has
+  // the same disease and no entry. THE RECOMMENDATION TO env.js' OWNER IS A
+  // THIRD ENTRY: 'liquidation-storm': { ...AO_ARCH, aoScale: 1.85 }. That is
+  // the single change most likely to close 8.919 % on its own, and it cannot be
+  // made from an arena file.
+  //
+  // WHAT THIS FILE CAN DO, AND WHAT IS DONE BELOW. Raise the starting value of
+  // the at-risk band so the AO multiply lands above 8 instead of below it. The
+  // three entries below are the ones the raster named, in frame-coverage order.
+  // Every one stays inside the 30-240 sRGB albedo guard, none of them touches
+  // exposure, and the LIT case moves by under a stop — this set is backlit by
+  // design and the values that carry the picture are the fill/hemi ones, which
+  // is precisely the band being moved.
   lawnA: 0x556948, lawnB: 0x4d5e42, soil: 0x5c4a39, subsoil: 0x4a4239,
-  rock: 0x5a5148, terrace: 0x52643f, terraceLip: 0x445639,
-  grime: 0x434f39,                // the contact/crevice colour, used everywhere
+  // terrace 0x52643f -> 0x5f7249, terraceLip 0x445639 -> 0x506445: 6.2 % of
+  // frame, measured at a mean of 31 counts, i.e. sitting exactly on the ao 0.60
+  // survival threshold with nothing to spare.
+  rock: 0x5a5148, terrace: 0x5f7249, terraceLip: 0x506445,
+  // grime 0x434f39 -> 0x515f44. THE SINGLE WORST OFFENDER BY CONSTRUCTION: it
+  // is, by its own comment, the CONTACT/CREVICE colour used everywhere, which
+  // means every pixel painted in it is a pixel GTAO is guaranteed to find and
+  // multiply hardest. Round 14 lifted it 0x36402c -> 0x434f39 for the ambient
+  // solve; this is the AO-survival notch on top. Measured at 29 counts, now
+  // ~38, which clears the ao 0.60 case with margin.
+  grime: 0x515f44,                // the contact/crevice colour, used everywhere
   sand: 0xa89b7c, sandRock: 0x6e7278,
   // stone
   stone: 0x878a8e, stoneDark: 0x6a6d72, stoneWet: 0x5e6166,
@@ -226,7 +296,19 @@ const PAL = {
   // instrument). This set is backlit by design, so a camera-facing facet never
   // sees the key at all and its whole budget is fill + hemi + ambient + probe.
   benchWood: 0x6e8a80, benchIron: 0x4a5658, post: 0x7a5c38,
-  bark: 0x5a4636, wicker: 0x9a7a48, torii: 0x9c3a2e, toriiDark: 0x772c23,
+  // ROUND 15 — THE DARKEST THING IN THE FRAME, AND IT IS ALSO THE MOST
+  // CAMERA-FACING. torii 0x9c3a2e -> 0xb04a3c, toriiDark 0x772c23 -> 0x92413a.
+  // The lacquer pair paints the torii legs, the arch sign and every plaque
+  // face: 3.2 % of a gameplay frame, measured at 12-14 final counts, the lowest
+  // named surface in the arena. It reads dark despite a mid albedo for the
+  // reason this file already documents about benchIron and steelDark — "this
+  // set is backlit by design, so a camera-FACING facet never sees the key at
+  // all" — and a SIGN is the most camera-facing object there is. At 12 counts
+  // it goes under 8 on any AO the kernel finds; at ~20 it does not. The hue is
+  // preserved (both stay vermillion, both stay the most saturated red in the
+  // set) and both stay well under the wicker and the koi in value, so the
+  // torii does not start competing with the practicals for attention.
+  bark: 0x5a4636, wicker: 0x9a7a48, torii: 0xb04a3c, toriiDark: 0x92413a,
   // life
   blossom: 0xc98fa6, blossomPale: 0xd8a3b8, leaf: 0x4c7040,
   fur: 0x8f6440, furDark: 0x6f4c30, tangerine: 0xd8802a,

@@ -1941,6 +1941,10 @@ export class RenderPipeline {
       geometries: 0, textures: 0, programs: 0,
     }
     this._ownsInfoReset = false
+    // Opt-in per-pass draw attribution. See profileDraws() / drawProfile().
+    this._drawProf = null
+    // A/B escape hatch for _suppressShadowsIn(). Always false in shipped play.
+    this._dupShadow = false
 
     // --- probe arming (see PROBES ARE OPT-IN) --------------------------------
     // The two probe passes are instrumentation. They used to render a
@@ -2156,7 +2160,7 @@ export class RenderPipeline {
         // Ground decals must not appear in the AO G-buffer. See guardAOGBuffer.
         return guardAOGBuffer(p)
       })
-      if (P.gtao) composer.addPass(P.gtao)
+      if (P.gtao) { this._suppressShadowsIn(P.gtao); composer.addPass(P.gtao) }
       else console.warn('[pipeline] AO requested by tier/quality but GTAOPass is not in the chain')
     }
 
@@ -2182,7 +2186,11 @@ export class RenderPipeline {
       // see, for a full extra scene traversal on top of RenderPass + GTAO's
       // normal prepass + the shadow pass. _applyUniforms() turns it on the
       // moment setCinematic() or setDoF() asks for a visible aperture.
-      if (P.bokeh) { P.bokeh.enabled = this._dofWanted(); composer.addPass(P.bokeh) }
+      if (P.bokeh) {
+        this._suppressShadowsIn(P.bokeh)
+        P.bokeh.enabled = this._dofWanted()
+        composer.addPass(P.bokeh)
+      }
     }
 
     // Motion blur: only if somebody actually asked for it. Building a disabled
@@ -2224,8 +2232,69 @@ export class RenderPipeline {
 
     this._applySizes()
     this._applyUniforms()
+    // A rebuild replaces every pass object, so re-install the draw-profiler
+    // wraps if somebody is mid-measurement across a setQuality()/resize.
+    if (this._drawProf) { try { this._wrapShadowProf(); this._wrapPassProf() } catch (e) { void e } }
     // Freshly allocated targets hold undefined content — clear before reading.
     this.resetHistory()
+  }
+
+  // -------------------------------------------------------------------------
+  // THE DUPLICATE SHADOW MAP — round 15's single largest submission saving.
+  //
+  // WHAT WAS HAPPENING. `renderer.render()` renders the shadow map before it
+  // renders anything else, every time it is called, because
+  // `WebGLShadowMap.render()` only early-outs when `autoUpdate === false`. Two
+  // passes in this chain call `renderer.render(scene, camera)` on the SAME
+  // scene in the SAME frame — GTAOPass for its normal/depth prepass
+  // (GTAOPass.js renderOverride) and BokehPass for its depth prepass — so the
+  // shadow map for every shadow-casting light was rasterised twice (three
+  // times with DoF live) for one displayed frame.
+  //
+  // MEASURED, permanent-reserve-core, 1920x1080, tier high, before this fix:
+  //   drawProfile() -> shadowRuns 2, shadow 741 of 1371 total draw calls.
+  // 54% of all submissions in the frame were the shadow map, and half of that
+  // was a byte-identical rebuild of a map nothing had invalidated.
+  //
+  // THE FIX, AND WHY IT IS SCOPED THIS WAY. The obvious version — set
+  // `shadowMap.autoUpdate = false` globally and hand out one `needsUpdate` per
+  // pipeline frame — is a trap: the moment the pipeline stops being called
+  // (index.js' permanent direct-render fallback) or anything else in the app
+  // renders the scene first, shadows freeze or vanish, and that failure is
+  // silent. So the suppression is wrapped around the two passes that are known
+  // not to want shadows instead: both draw the scene with an override material
+  // (MeshNormalMaterial / MeshDepthMaterial) that samples no shadow map at all,
+  // so skipping it cannot change a pixel they produce. The flags are saved and
+  // restored around the call, so nothing outside the pass ever observes them.
+  // -------------------------------------------------------------------------
+  //
+  // A/B: `setDuplicateShadowRender(true)` restores the old behaviour live, so
+  // the saving can be re-measured on a running build without a checkout. It is
+  // a measurement affordance, not a tier knob — nothing turns it on.
+  setDuplicateShadowRender(on) { this._dupShadow = !!on; return this._dupShadow }
+
+  _suppressShadowsIn(pass) {
+    if (!pass || pass.__wcsNoShadow) return pass
+    const orig = pass.render
+    if (typeof orig !== 'function') return pass
+    const renderer = this.renderer
+    const self = this
+    pass.__wcsNoShadow = true
+    pass.render = function (...args) {
+      const sm = renderer && renderer.shadowMap
+      if (!sm || self._dupShadow) return orig.apply(this, args)
+      const autoUpdate = sm.autoUpdate
+      const needsUpdate = sm.needsUpdate
+      sm.autoUpdate = false
+      sm.needsUpdate = false
+      try {
+        return orig.apply(this, args)
+      } finally {
+        sm.autoUpdate = autoUpdate
+        sm.needsUpdate = needsUpdate
+      }
+    }
+    return pass
   }
 
   // -------------------------------------------------------------------------
@@ -2371,6 +2440,10 @@ export class RenderPipeline {
   }
 
   _teardown() {
+    // Unwrap BEFORE anything is disposed: the profiler holds a reference to
+    // every pass's original render fn and must hand it back before the pass
+    // object is dropped.
+    try { this._unwrapDrawProf() } catch (e) { void e }
     const done = new Set()
     const kill = (p) => {
       if (!p || done.has(p)) return
@@ -3377,6 +3450,9 @@ export class RenderPipeline {
       fi.textures = info.memory.textures
       fi.programs = info.programs ? info.programs.length : 0
     } catch (e) { void e }
+    // Close the per-frame draw split HERE — same place the totals are read, so
+    // the split can never drift from stats().frame.calls.
+    try { this._closeDrawProf() } catch (e) { void e }
   }
 
   // Public, idempotent, safe to call from anywhere — including index.js'
@@ -3385,6 +3461,203 @@ export class RenderPipeline {
   // is about to stop being called, three has to own its counters again.
   releaseInfo() {
     this._endFrameInfo()
+  }
+
+  // -------------------------------------------------------------------------
+  // DRAW-SUBMISSION PROFILER — profileDraws(true), then drawProfile().
+  //
+  // WHY THIS EXISTS. `stats().frame.calls` is one number for the WHOLE frame:
+  // shadow map + RenderPass + GTAO's normal prepass + Bokeh's depth prepass +
+  // every fullscreen quad. "Arena draw calls run 594-1358" is therefore
+  // unactionable — you cannot tell a 900-draw beauty pass from a 300-draw
+  // beauty pass submitted three times. Round 14 measured that cutting 30% of
+  // the PIXELS did not move frame time at all (1.44 Mpx 41.4 ms, 2.07 Mpx
+  // 35.7 ms), which means the cost is submission, not fill, and submission has
+  // to be attributed before it can be cut.
+  //
+  // HOW. Two wraps, both installed only while armed, both removed on disarm:
+  //   * renderer.shadowMap.render — a plain assignable function property in
+  //     three (WebGLShadowMap is a factory, not a class), so the shadow pass
+  //     can be attributed even though it runs INSIDE renderer.render().
+  //   * every composer pass's own render — attributes the rest per pass.
+  // Everything is measured as a delta of renderer.info.render.calls, which the
+  // pipeline already owns for the duration of the frame (_beginFrameInfo sets
+  // autoReset false), so the deltas sum exactly to stats().frame.calls.
+  //
+  // A pass that submits geometry shows up with a call count in the hundreds; a
+  // fullscreen quad shows up as 1. That single distinction is the whole point:
+  // it is how "BokehPass renders the scene depth AGAIN" stops being a comment
+  // in _build() and becomes a number.
+  // -------------------------------------------------------------------------
+  profileDraws(on = true) {
+    if (!!on === !!this._drawProf) return this.drawProfile()
+    if (on) {
+      this._drawProf = {
+        frames: 0,
+        // Per-frame scratch, reused. `last` is the completed previous frame.
+        // `inPass` is which composer pass is on the stack right now, so a
+        // shadow submission can be charged to the pass whose renderer.render()
+        // triggered it — RenderPass and GTAOPass each trigger one, and
+        // subtracting the frame total from both would zero them out.
+        cur: { shadow: 0, shadowRuns: 0, passes: {}, byPassShadow: {}, order: [], inPass: null },
+        last: null,
+        hist: [],
+      }
+      this._wrapShadowProf()
+      this._wrapPassProf()
+    } else {
+      this._unwrapDrawProf()
+      this._drawProf = null
+    }
+    return this.drawProfile()
+  }
+
+  _profCalls() {
+    const r = this.renderer && this.renderer.info && this.renderer.info.render
+    return r ? r.calls : 0
+  }
+
+  _wrapShadowProf() {
+    const sm = this.renderer && this.renderer.shadowMap
+    if (!sm || sm.__wcsProfWrapped) return
+    const orig = sm.render
+    if (typeof orig !== 'function') return
+    const self = this
+    sm.__wcsProfOrig = orig
+    sm.__wcsProfWrapped = true
+    sm.render = function (...args) {
+      const before = self._profCalls()
+      const out = orig.apply(this, args)
+      const P = self._drawProf
+      if (P) {
+        const d = self._profCalls() - before
+        if (d > 0) {
+          P.cur.shadow += d
+          P.cur.shadowRuns++
+          const k = P.cur.inPass || 'outsideComposer'
+          P.cur.byPassShadow[k] = (P.cur.byPassShadow[k] || 0) + d
+        }
+      }
+      return out
+    }
+  }
+
+  _wrapPassProf() {
+    const c = this._composer
+    if (!c || !c.passes) return
+    const self = this
+    const label = (p) => {
+      const hit = Object.entries(this._passes).find(([, v]) => v === p)
+      return hit ? hit[0] : (p.constructor && p.constructor.name) || '?'
+    }
+    for (const p of c.passes) {
+      if (!p || p.__wcsProfWrapped) continue
+      const orig = p.render
+      if (typeof orig !== 'function') continue
+      const name = label(p)
+      p.__wcsProfOrig = orig
+      p.__wcsProfWrapped = true
+      p.__wcsProfName = name
+      p.render = function (...args) {
+        const before = self._profCalls()
+        const P0 = self._drawProf
+        const prev = P0 ? P0.cur.inPass : null
+        if (P0) P0.cur.inPass = name
+        let out
+        try {
+          out = orig.apply(this, args)
+        } finally {
+          const P = self._drawProf
+          if (P) {
+            P.cur.inPass = prev
+            const d = self._profCalls() - before
+            if (P.cur.passes[name] === undefined) { P.cur.passes[name] = 0; P.cur.order.push(name) }
+            P.cur.passes[name] += d
+          }
+        }
+        return out
+      }
+    }
+  }
+
+  _unwrapDrawProf() {
+    const sm = this.renderer && this.renderer.shadowMap
+    if (sm && sm.__wcsProfWrapped) {
+      sm.render = sm.__wcsProfOrig
+      delete sm.__wcsProfOrig
+      delete sm.__wcsProfWrapped
+    }
+    const c = this._composer
+    if (c && c.passes) {
+      for (const p of c.passes) {
+        if (!p || !p.__wcsProfWrapped) continue
+        p.render = p.__wcsProfOrig
+        delete p.__wcsProfOrig
+        delete p.__wcsProfWrapped
+        delete p.__wcsProfName
+      }
+    }
+  }
+
+  // Called from _endFrameInfo so a frame's split is closed exactly where its
+  // totals are read — the two can never disagree.
+  _closeDrawProf() {
+    const P = this._drawProf
+    if (!P) return
+    const cur = P.cur
+    // Each pass's raw delta INCLUDES any shadow map it triggered, so subtract
+    // that pass's own shadow charge — not the frame total, which would zero out
+    // both of the passes that submit geometry.
+    const passes = {}
+    let post = 0
+    let geometry = 0
+    for (const [k, raw] of Object.entries(cur.passes)) {
+      const v = Math.max(0, raw - (cur.byPassShadow[k] || 0))
+      passes[k] = v
+      if (k === 'render' || k === 'gtao' || k === 'bokeh') geometry += v
+      else post += v
+    }
+    P.last = {
+      shadow: cur.shadow,
+      shadowRuns: cur.shadowRuns,
+      // WHICH pass paid for each shadow render. More than one entry here means
+      // the shadow map is being rebuilt more than once for the same frame.
+      shadowBy: { ...cur.byPassShadow },
+      beauty: passes.render || 0,
+      // Passes that re-submit scene geometry. GTAO's normal prepass and
+      // BokehPass's depth prepass both call renderer.render(scene, camera).
+      geometry,
+      post,
+      total: cur.shadow + geometry + post,
+      passes,
+      order: cur.order.slice(),
+    }
+    P.frames++
+    P.hist.push(P.last.total)
+    if (P.hist.length > 120) P.hist.shift()
+    cur.shadow = 0
+    cur.shadowRuns = 0
+    cur.inPass = null
+    cur.order.length = 0
+    for (const k of Object.keys(cur.passes)) cur.passes[k] = 0
+    for (const k of Object.keys(cur.byPassShadow)) delete cur.byPassShadow[k]
+  }
+
+  /**
+   * The measured split for the last completed frame, or null when the profiler
+   * has never been armed. `armed:false` with a `last` means somebody disarmed
+   * it and this is the final reading.
+   */
+  drawProfile() {
+    const P = this._drawProf
+    if (!P) return { armed: false, last: null }
+    const h = P.hist.slice().sort((a, b) => a - b)
+    return {
+      armed: true,
+      frames: P.frames,
+      medianTotal: h.length ? h[Math.floor(h.length / 2)] : 0,
+      ...(P.last || {}),
+    }
   }
 
   _directRender(scene, camera) {

@@ -75,8 +75,18 @@
 // pool how hard the hit that is about to burst actually was. A 3-damage jab and
 // a 22-damage super used to fire the IDENTICAL 'impact'; now the jab gets a
 // small flash and four sparks, and the super gets the full vocabulary — flash,
-// expanding ring, sixteen stretched sparks, two long smears along the hit
-// vector, dust and a ground shockwave. Different at a glance, not just louder.
+// two expanding rings, thirteen stretched sparks, a six-streak lance straight
+// down the hit vector, two long smears, dust and a ground shockwave. Different
+// at a glance, not just louder.
+//
+// AND THE VOCABULARY IS LAID OUT AROUND THE CONTACT, NOT ON IT (v3.6). The
+// feel critic's finding was that the flash covered the seam it existed to
+// sell, which also cancels the analytic body-to-body occlusion landing in the
+// render layer this round. So the flash lost ~10x of its area, what it lost
+// went into the rings and the new lance, and everything hot or opaque now
+// spawns 17-38 cm DOWNSTREAM along the hit vector while the rings — annuli,
+// transparent in the middle — stay centred on the contact and frame it. See
+// the 'impact' case.
 //
 // Named bursts (CONTRACTS.md §6, unchanged API): 'impact','sparks' (+alias
 // 'spark'),'coins','smoke','dust','stars','confetti','explosion','peanuts',
@@ -580,6 +590,12 @@ const _v0 = new THREE.Vector3()
 const _vBias = new THREE.Vector3()
 const _vCam = new THREE.Vector3()
 const _vHit = new THREE.Vector3()
+// The DOWNSTREAM spawn point of an 'impact' burst: _vHit slid along the hit
+// vector. Separate from _vHit because both are live across the same switch
+// case — _vHit is the seam, _vOff is where the hot quads go so they stop
+// sitting on it. Safe to mutate between spawns: _soft()/_solid() copy the
+// position into the slot immediately (see _jitter()).
+const _vOff = new THREE.Vector3()
 const _col = new THREE.Color()
 const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0)
 const _e = new THREE.Euler()
@@ -591,14 +607,39 @@ const HIT_POWER_TTL = 0.05
 // Ground contact below this speed stops the bounce and starts the settle.
 const SETTLE_SPEED = 1.45
 
-/** Tri-modal droplet size multiplier — see the sizeVar block in _solid().
- *  62% fine mist (0.28-0.66), 28% mid droplets (0.82-1.48), 10% fat gibs
- *  (1.85-2.95). Ratio 10.5:1, with real gaps between the populations. */
+/**
+ * Tri-modal droplet size multiplier — see the sizeVar block in _solid().
+ *
+ * v3.6 RE-BANDING. The v3.5 bands were 0.28-0.66 / 0.82-1.48 / 1.85-2.95, a
+ * 10.5:1 ratio on paper. On paper is the problem: at the 0.055-0.078 m bases
+ * this feeds, the bottom band is 1.5-5.1 cm, and below ~2.5 cm a droplet is
+ * two or three pixels at gameplay framing — it does not read as SMALL, it does
+ * not read at all. So 62% of the population was invisible and the spread the
+ * player actually saw was the top two bands only: about 3.6:1, which is the
+ * "large and near-uniform" the critic keeps measuring. The nominal ratio was
+ * being spent on droplets nobody can see.
+ *
+ * The fix is to move the whole distribution into the legible range and keep
+ * the DISCRETE gaps, which are what makes a spread read as a spread. Shown at
+ * the 0.068 m 'blood' base:
+ *   58% fine    0.38-0.72  ->  2.6-4.9 cm   (small, but resolvable)
+ *   30% mid     0.95-1.55  ->  6.5-10.5 cm
+ *   12% fat     1.75-2.35  -> 11.9-16.0 cm  (was up to 20 cm — a gib, not a drop)
+ * 6.2:1 end to end with every band above the visibility floor, gaps at 0.72 ->
+ * 0.95 and 1.55 -> 1.75 so the populations stay separable, and a fat droplet
+ * common enough (12% of ~10) to actually appear on a normal hit.
+ *
+ * Measured over 200k draws: mean multiplier 0.854 -> 0.939, mean AREA (the
+ * thing "large" actually refers to) 1.115 -> 1.164, i.e. +4.4%, because the
+ * fat tail came down as far as the fine band came up. Share of droplets above
+ * the ~2.5 cm legibility floor: 85.8% -> 100%. So the visible spread widens
+ * from ~3.6:1 to 6.2:1 for essentially no extra red on screen.
+ */
 function sizeBand() {
   const r = Math.random()
-  if (r < 0.62) return 0.28 + Math.random() * 0.38
-  if (r < 0.90) return 0.82 + Math.random() * 0.66
-  return 1.85 + Math.random() * 1.10
+  if (r < 0.58) return 0.38 + Math.random() * 0.34
+  if (r < 0.88) return 0.95 + Math.random() * 0.60
+  return 1.75 + Math.random() * 0.60
 }
 // Fraction of its target opacity a quad is born at. See _primeQuad().
 const BIRTH_ALPHA = 0.42
@@ -1217,8 +1258,11 @@ export class ParticleSystem {
     // Three DISCRETE bands fix both halves. Discrete because separation is
     // what reads: fine mist, mid droplets and a couple of fat gibs, with
     // visible gaps between the populations rather than a smooth continuum.
-    // 11x end to end, and the bases that feed it came down ~35% so the mid
-    // band lands where a droplet is legible instead of chunky.
+    //
+    // v3.6 narrowed the nominal ratio from 11x to 6.2x on purpose — see
+    // sizeBand(). The old bottom band was below the pixel threshold, so the
+    // extra range was invisible and the VISIBLE spread was only ~3.6x; lifting
+    // the floor into legibility trades paper range for range you can see.
     p.size = cfg.size * (cfg.exactSize ? 1
       : cfg.sizeVar ? sizeBand()
         : 0.7 + Math.random() * 0.7)
@@ -1436,9 +1480,10 @@ export class ParticleSystem {
       case 'impact': {
         // THE CORE HIT LANGUAGE, scaled end to end by weight so a jab and a
         // super are different EVENTS, not the same event at two volumes:
-        //   flash -> ring -> stretched sparks -> smear -> dust -> ground wave.
-        // Only the flash and the sparks fire on the lightest pokes; the ring,
-        // the second smear and the floor wave are earned.
+        //   flash -> ring -> stretched sparks -> lance -> smear -> dust ->
+        //   ground wave.
+        // Only the flash and the fan sparks fire on the lightest pokes; the
+        // ring, the lance, the second smear and the floor wave are earned.
         const heavy = pw >= 0.5
         // ---- THE CONTACT POINT, MOVED IN FRONT OF THE VICTIM --------------
         // See setCamera(). Everything camera-facing in this burst spawns at
@@ -1448,28 +1493,80 @@ export class ParticleSystem {
         // grows with weight: a super's cluster is bigger and needs more room
         // to clear the torso than a jab's does.
         const cp = _vHit.copy(this._camward(pos, 0.34 + 0.24 * pw))
-        // The wide, tinted flash. Peak opacity is deliberately held under 1:
-        // an ADDITIVE soft disc that saturates loses its falloff — the visible
-        // boundary becomes the radius where the sum clips, which is a hard
-        // circle. That is what put "a hard-edged bright cyan/white disc on
-        // marble" in the gore shot. The core below supplies the punch instead.
-        this._soft('add', cp, {
+        // ---- ...AND THEN SLID DOWNSTREAM ALONG THE HIT VECTOR -------------
+        // v3.6, feel critic verbatim: "stop the impact flash from covering the
+        // contact it is supposed to sell — shrink the flash core, push the
+        // energy into the ring and the directional sparks, and offset it along
+        // the hit vector so the seam stays visible behind it."
+        //
+        // `cp` IS THE SEAM: the fist meeting the body, and — as of the analytic
+        // body-to-body occlusion landing this round — the one place in the
+        // frame where two fighters actually darken each other. A hot additive
+        // quad centred there erases the exact pixels it exists to announce.
+        //
+        // So the burst is split by JOB, not by brightness. `hitOff` is one
+        // hop down the punch — 17 cm on a jab, 38 cm on a super — and each
+        // element gets the multiple of it that clears the seam given its own
+        // radius:
+        //   * flash + hot core -> 1x (`hp`). Both are compact enough that one
+        //     hop puts the seam entirely outside the quad: at full weight the
+        //     flash is 36 cm across, so cp sits 2.1 radii from its centre.
+        //   * smear -> 1.6x, dust -> 1.8x. Both are long or opaque and need
+        //     the extra room; see their own notes.
+        //   * `hp` aliases the _vOff scratch and is re-pointed in place for
+        //     each of those hops — legal because _soft() copies the position
+        //     into the slot on the spot.
+        //   * rings -> stay on `cp` on purpose. A ring is an annulus with a
+        //     hole in the middle, so a ring centred on the contact FRAMES the
+        //     seam. It is the cheapest way in the medium to point at something
+        //     and it costs nothing.
+        //   * sparks -> also from `cp`, because they must radiate FROM the
+        //     contact to read as its consequence, and a 1 cm stretched streak
+        //     occludes nothing.
+        //
+        // dirX 0 (a burst with no hit axis — OTG scatter, item procs) collapses
+        // the offset to zero and the pre-v3.6 geometry returns unchanged.
+        const hitOff = (dirX || 0) * (0.17 + 0.21 * pw)
+        const hp = _vOff.set(cp.x + hitOff, cp.y, cp.z)
+        // ---- THE FLASH, SHRUNK ~3x AND DIMMED ------------------------------
+        // Was size 0.42+0.72*pw — 1.14 m at full weight, growing 3x — at up to
+        // 0.72 opacity: a hot sphere wider than the victim's torso, parked on
+        // the contact. That is the "engulfs the seam" finding.
+        //
+        // It is 0.18+0.18*pw now: 0.36 m at full weight (a 3.2x linear shrink,
+        // 10x in area) with a gentle 1.5-2x grow. The slope is flatter than the
+        // old one on purpose — the headline problem was the HEAVY flash, and a
+        // jab that loses two thirds of its only quad just stops registering.
+        //
+        // Peak opacity is still deliberately held well under 1: an ADDITIVE
+        // soft disc that saturates loses its falloff — the visible boundary
+        // becomes the radius where the sum clips, which is a hard circle. That
+        // is what put "a hard-edged bright cyan/white disc on marble" in the
+        // gore shot. The core below supplies the punch instead.
+        this._soft('add', hp, {
           tile: 'flash', color: pw > 0.7 ? COLORS.white : COLORS.sparkHot,
-          speed: 0.4, ttl: 0.07 + 0.06 * pw, size: 0.42 + 0.72 * pw,
-          grow: 1.2 + 0.8 * pw, opacity: 0.40 + 0.32 * pw,
-          exactTtl: true, exactSize: true, jitter: 0.05, fadeIn: 0.02, spin: 0,
+          speed: 0.4, ttl: 0.06 + 0.05 * pw, size: 0.18 + 0.18 * pw,
+          grow: 0.5 + 0.5 * pw, opacity: 0.26 + 0.20 * pw,
+          exactTtl: true, exactSize: true, jitter: 0.04, fadeIn: 0.02, spin: 0,
         })
-        // ---- HOT WHITE CORE ------------------------------------------------
-        // Small, near-opaque, pure white, no jitter, dead on the contact point
-        // and gone in three frames. This is the thing the eye actually fixes
-        // on, and it is the half of the contact read that got lost when the
-        // victim's own white flash was pulled back to 0.49% of his bbox. A
-        // tight core costs no silhouette — unlike lighting the victim up, it
-        // cannot turn him into a cutout, because it is 20 cm across.
-        this._soft('add', cp, {
+        // ---- HOT WHITE CORE: A HIGHLIGHT NOW, NOT A DISC -------------------
+        // Same job, same clipped value. An additive white quad at alpha ~1
+        // saturates at its centre no matter how big it is, so the measured hot
+        // core colour (rgb 255,251,243) is a property of the OPACITY, which is
+        // untouched — shrinking the quad cannot move it.
+        //
+        // The SIZE is what had to go, and it is also the answer to the
+        // long-standing hard-disc report. The spark tile's alpha is ~1 out to
+        // 44% of the quad's half-width, so the clipped plateau scales with the
+        // quad: at the old 0.23 m base growing 3.9x, that plateau reached ~39 cm
+        // across — a decal, not a highlight, and on pale marble a clipped white
+        // plateau that size is exactly the cyan/white disc that keeps getting
+        // flagged. 0.13 m base at 1.9x grow puts the plateau at 5.7 cm on the
+        // contact frame and 11 cm as it dies. That is a specular hit.
+        this._soft('add', hp, {
           tile: 'spark', color: 0xffffff, speed: 0,
-          ttl: 0.045 + 0.035 * pw, size: 0.10 + 0.13 * pw,
-          grow: 1.5 + 1.4 * pw, opacity: 0.85 + 0.15 * pw,
+          ttl: 0.04 + 0.03 * pw, size: 0.055 + 0.075 * pw,
+          grow: 0.7 + 0.9 * pw, opacity: 0.85 + 0.15 * pw,
           exactTtl: true, exactSize: true, jitter: 0, fadeIn: 0.01, spin: 0,
         })
         if (pw > 0.24) {
@@ -1478,9 +1575,17 @@ export class ParticleSystem {
           // never got born, which is why the round-2 contact frame showed a
           // bloom and no ring. It is born on the contact frame now, and
           // _primeQuad() gives it a visible birth pose immediately.
+          //
+          // v3.6: THIS IS WHERE HALF THE FLASH'S ENERGY WENT. Reach 3.4+4.4*pw
+          // -> 4.4+5.6*pw, peak opacity 0.76 -> 0.86, life ~15% longer, and the
+          // birth radius comes DOWN slightly so the hole opens from tight on
+          // the seam rather than starting already clear of it. An annulus
+          // sweeping outward past the contact reads as force released, and it
+          // is structurally incapable of covering the contact, because its
+          // middle is transparent.
           this._soft('add', cp, {
-            tile: 'ring', color: COLORS.blast, speed: 0, ttl: 0.16 + 0.12 * pw,
-            size: 0.22 + 0.16 * pw, grow: 3.4 + 4.4 * pw, opacity: 0.34 + 0.42 * pw,
+            tile: 'ring', color: COLORS.blast, speed: 0, ttl: 0.18 + 0.14 * pw,
+            size: 0.18 + 0.14 * pw, grow: 4.4 + 5.6 * pw, opacity: 0.46 + 0.40 * pw,
             exactTtl: true, exactSize: true, jitter: 0.02, fadeIn: 0.02, spin: 0,
           })
         }
@@ -1490,33 +1595,81 @@ export class ParticleSystem {
         // difference between a jab and a launcher is structural, not volume.
         if (pw >= 0.62) {
           this._soft('add', cp, {
-            tile: 'ring', color: COLORS.white, speed: 0, ttl: 0.3,
-            size: 0.16, grow: 11 + 6 * pw, opacity: 0.16 + 0.16 * pw,
+            tile: 'ring', color: COLORS.white, speed: 0, ttl: 0.34,
+            size: 0.14, grow: 12 + 8 * pw, opacity: 0.24 + 0.22 * pw,
             exactTtl: true, exactSize: true, jitter: 0.01, fadeIn: 0.05,
             spin: 0, delay: 0.045,
           })
         }
-        const sparks = Math.round(3 + 13 * pw)
+        // The isotropic fan. Count comes DOWN a little (3+13*pw -> 3+10*pw)
+        // because the lance below now carries the directional read and two
+        // overlapping spark populations at full count is just pool churn; speed
+        // and stretch go UP, which is the half of "energy" that costs no fill.
+        const sparks = Math.round(3 + 10 * pw)
         for (let i = 0; i < n(sparks, true); i++) {
           this._soft('add', cp, {
             tile: 'spark', color: i % 3 ? COLORS.yellow : COLORS.sparkHot,
-            speed: 4.2 + 4.4 * pw, ttl: 0.22 + 0.16 * pw, grav: -16,
+            speed: 5.6 + 6.0 * pw, ttl: 0.22 + 0.16 * pw, grav: -16,
             size: 0.075 + 0.045 * pw, opacity: 1,
-            stretch: 0.085, dirX, up: 0.5, jitter: 0.14 + 0.1 * pw, drag: 1.4,
+            stretch: 0.10, dirX, up: 0.5, jitter: 0.14 + 0.1 * pw, drag: 1.3,
           })
+        }
+        // ---- THE LANCE: DIRECTIONAL SPARKS DOWN THE HIT VECTOR -------------
+        // v3.6, the other half of the flash's energy. A tight 0.16 rad cone
+        // instead of the fan's full sphere, fired fast enough that the stretch
+        // term saturates (aspect x4.2), so each one is a ~30 cm streak pointing
+        // exactly where the fist went. This is force made visible with almost
+        // no fill cost: a streak 1-2 cm wide cannot hide a seam the way a 1 m
+        // disc could, and it is the same instanced pool, so the same draw call.
+        //
+        // Deliberately short-lived (0.13-0.23 s vs the fan's 0.22-0.38 s): the
+        // lance is the leading edge of the hit, not its tail. Paid for by the
+        // fan count coming down — a full-weight impact now claims 25 additive
+        // slots instead of 22, and 7.52 pool-seconds instead of 7.23, i.e. +4%
+        // occupancy in a 64-slot pool. FILL goes sharply the other way: the
+        // flash alone gave up ~22x its screen area.
+        if (pw > 0.2 && dirX) {
+          const lance = { x: dirX, y: 0.18, z: 0 }
+          for (let i = 0, ln = ns(Math.round(2 + 4 * pw), true); i < ln; i++) {
+            this._soft('add', cp, {
+              tile: 'spark', color: i & 1 ? COLORS.sparkHot : COLORS.white,
+              speed: 11 + 9 * pw, ttl: 0.13 + 0.10 * pw, grav: -9,
+              size: 0.05 + 0.03 * pw, opacity: 0.95,
+              stretch: 0.13, dir: lance, spread: 0.16, jitter: 0.07, drag: 2.6,
+            })
+          }
         }
         // Radial smear ALONG the hit vector: the wedge is what reads as "the
         // fist went that way", so it is oriented, not randomly rolled.
+        //
+        // v3.6 GEOMETRY. The smear is the one element the downstream offset
+        // does not automatically fix, because it is LONG: at the old 0.96 m
+        // base x 1.9 aspect it reached 91 cm back from its own centre, so
+        // sliding it 38 cm still left its body lying across the seam. Three
+        // changes, in order of how much they buy: it is thrown 1.6x the hot
+        // offset (61 cm at full weight) instead of 1x; the base comes down
+        // 0.96 -> 0.72 m while the aspect goes UP, so it is longer-looking and
+        // thinner rather than bigger; and the peak opacity stays where it was
+        // instead of following the rings up. Net additive contribution at the
+        // seam: ~0.12 against the old ~0.49, a 4x cut, and the wedge still
+        // starts near the contact and points down the punch.
+        _vOff.x = cp.x + hitOff * 1.6
         for (let i = 0, sm = heavy ? 2 : 1; i < sm; i++) {
-          this._soft('add', cp, {
+          this._soft('add', _vOff, {
             tile: 'smear', color: COLORS.blast, speed: 1.2, ttl: 0.1 + 0.08 * pw,
-            size: 0.34 + 0.62 * pw, grow: 1.6 + 1.3 * pw, opacity: 0.24 + 0.34 * pw,
-            aspect: 1 + 0.9 * pw, dirX, up: 0.2, jitter: 0.1, fadeIn: 0.02,
+            size: 0.30 + 0.42 * pw, grow: 1.6 + 1.3 * pw, opacity: 0.26 + 0.34 * pw,
+            aspect: 1.15 + 1.05 * pw, dirX, up: 0.2, jitter: 0.1, fadeIn: 0.02,
             angle: (dirX ? 0 : Math.random() * TAU) + (Math.random() - 0.5) * 0.4, spin: 0,
           })
         }
+        // Dust is pushed FURTHER downstream than the hot quads (1.8x the
+        // offset). It is NormalBlending, i.e. the only thing in this burst that
+        // genuinely occludes what is behind it, so it is the last thing that
+        // may sit near the contact — the round-2 "haze behind his torso" and
+        // the round-5 mist fog were both this pool spawned on the hit point.
+        _vOff.x = cp.x + hitOff * 1.8
         for (let i = 0, du = heavy ? 2 : 1; i < du; i++) {
-          this._soft('alpha', cp, {
+          this._soft('alpha', _vOff, {
             tile: PUFFS[i % PUFFS.length], color: COLORS.smokeLit, speed: 1.1,
             ttl: 0.34 + 0.18 * pw, grav: 0.7, size: 0.24 + 0.18 * pw,
             grow: 1.6 + 0.9 * pw, opacity: 0.18 + 0.12 * pw,
@@ -1628,14 +1781,25 @@ export class ParticleSystem {
         // marble floor reads as a hard-edged bright cyan/white disc. 0.62 keeps
         // the falloff inside the displayable range; the small core below is
         // what actually clips, and a 40 cm clipped core is a highlight.
+        //
+        // v3.6: 0.62 was still not enough on a PALE floor, which is why the
+        // disc report keeps coming back. The clip test is (background +
+        // contribution) > 1; marble reads ~0.5, and 0.62 x the flash tile's
+        // ~0.85 central plateau clears white across a metre-wide disc. 0.46
+        // lands the plateau at ~0.39 over a 0.5 floor and keeps the entire
+        // falloff — i.e. the soft edge — inside the displayable range.
         this._soft('add', pos, {
           tile: 'flash', color: 0xfff3d6, speed: 0.4, ttl: 0.15, size: 1.7,
-          grow: 2.2, opacity: 0.62, exactTtl: true, exactSize: true, jitter: 0.05,
+          grow: 2.2, opacity: 0.46, exactTtl: true, exactSize: true, jitter: 0.05,
           fadeIn: 0.02, spin: 0,
         })
+        // Same plateau arithmetic as the impact core below: the spark tile is
+        // opaque out to 44% of the quad's half-width, so this clipped a 30 cm
+        // disc at birth that grew to 1.05 m. 0.24 m at 1.8x tops out at 19 cm,
+        // which is a highlight rather than a shape.
         this._soft('add', pos, {
-          tile: 'spark', color: 0xffffff, speed: 0, ttl: 0.09, size: 0.34,
-          grow: 2.6, opacity: 1, exactTtl: true, exactSize: true, jitter: 0,
+          tile: 'spark', color: 0xffffff, speed: 0, ttl: 0.09, size: 0.24,
+          grow: 1.8, opacity: 1, exactTtl: true, exactSize: true, jitter: 0,
           fadeIn: 0.01, spin: 0,
         })
         // a real wave across the floor, not just a halo around the camera axis
@@ -1748,9 +1912,17 @@ export class ParticleSystem {
         // further on light pokes. Opacity 0.5 -> 0.34 for the same reason: the
         // mist is a hint of atomised blood, not a smoke screen in front of the
         // thing the player is trying to read.
+        //
+        // v3.6: and it is spawned 30 cm DOWNSTREAM of the wound, for the same
+        // reason the impact burst's hot quads are. GoreSystem hands this case a
+        // `wound` already backed 12 cm toward the attacker, i.e. sitting on the
+        // seam; three 26 cm NormalBlending puffs growing to 65 cm there are the
+        // only genuinely opaque thing in the hit and they land on the contact.
+        // Downstream is also where atomised blood physically goes.
         const mist = Number.isFinite(opts.mist) ? Math.max(0, Math.min(1, opts.mist)) : 1
+        const mistAt = _vOff.set((pos.x || 0) + (dirX || 0) * 0.30, pos.y || 0, pos.z || 0)
         for (let i = 0, mn = Math.round(ns(3) * mist); i < mn; i++) {
-          this._soft('alpha', pos, {
+          this._soft('alpha', mistAt, {
             tile: PUFFS[i % PUFFS.length], color: COLORS.bloodMist, speed: 2.4,
             ttl: 0.34, grav: -4, size: 0.26, grow: 1.5, opacity: 0.34,
             drag: 4, dirX, up: 0.4, jitter: 0.18,

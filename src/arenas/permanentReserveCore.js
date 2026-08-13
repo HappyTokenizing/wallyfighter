@@ -113,7 +113,7 @@
 import * as THREE from 'three'
 import {
   ArenaBase, makeRng, flatMat, canvasTexture, makeLightRig,
-  makeSign,
+  makeSign, buildCrowd, crowdDetailFor,
 } from './ArenaBase.js'
 import {
   roundedBox, chamferBox, chamferedCylinder, frustum,
@@ -1900,67 +1900,36 @@ function makeDrone(glowTex, mark, rng) {
 // would expect to be watching two idiots destroy the reserve — auditors who
 // have given up, security who are off shift, and clerks holding clipboards.
 //
-// The bowling-pin problem, addressed directly:
-//   * THREE BODY MASSES, not one. The auditor is tall and narrow with a
-//     brimmed hat; the guard is broad, square-shouldered and helmeted; the
-//     clerk is short and hunched over a clipboard. At 25 m the three read as
-//     three different blobs, which is the entire point of a crowd silhouette.
-//   * TWO POSES per mass, baked in (arms down / one arm raised), so the row is
-//     not a picket fence of identical outlines.
-//   * VALUE VARIATION via per-instance colour: the crowd spans roughly 0.55x to
-//     1.25x of its base albedo, so the row has darks and lights in it instead
-//     of being one flat band.
-//   * They are lit by the scene (MeshStandardMaterial through flatMat, on the
-//     'suit' preset) and they are inside the fog, so the far end of each
-//     gallery desaturates into the haze on its own.
-// Six geometries, ONE material, so the whole crowd is 6 draw calls.
+// ROUND 15 — THE HAND-ROLLED FIGURE BUILDER IS GONE. `galleryFigureGeometry`
+// lived here for five rounds: three body masses x two baked poses, six
+// InstancedMeshes named `galleryCrowd`, one material, its own slot table and
+// its own sway updater. Every line of it was a re-implementation of something
+// ArenaBase.buildCrowd already does better, and keeping it is what left this
+// arena as the game's only crowd with no `_crowds`, no `_segments` and no
+// audit() — see the migration note in _buildGallery for the two live defects
+// that hid behind the missing audit.
+//
+// What the shared actor brings that the bespoke one could not: per-seat build,
+// girth, lean, yaw and skin, clustered (not evenly spaced) seating, the v3.6
+// ambient-bounce term that keeps a dark stand off the floor of the histogram,
+// a real 3-tier LOD, cheer()/knockOver() for Unhinged mode, and audit().
+//
+// The one thing the old builder had that the shared one does not is period
+// silhouette — the brimmed auditor, the helmeted guard, the hunched clerk.
+// buildCrowd's own headwear layer covers ~42 % of seats with varying crown
+// height and width, which is the same read at 16 m through fog, so this is not
+// a loss worth 200 lines and an un-auditable stand.
+//
+// The gallery palette stays: this is a vault, and its audience is dressed for
+// a compliance visit, not a stadium. Values are low and hues are near-neutral
+// with two warm high-vis exceptions (the guards), so the row reads as a dark
+// mass with a couple of accents rather than as a bag of sweets.
 // ---------------------------------------------------------------------------
-function galleryFigureGeometry(kind, pose) {
-  const g = new THREE.Group()
-  const m = new THREE.MeshBasicMaterial()     // placeholder; bakeParts keys on it
-  const add = (geo, x, y, z, rz = 0) => {
-    const mesh = new THREE.Mesh(geo, m)
-    mesh.position.set(x, y, z)
-    mesh.rotation.z = rz
-    g.add(mesh)
-    return mesh
-  }
-  // ROUND 10 (defect 7). Six figures at ~360 tris x 8 instances was 16,768
-  // triangles, THIRTY PER CENT of the whole arena, for an audience standing
-  // 16 m away behind a railing inside fog that has already taken a third of
-  // its contrast. A background crowd is carried by its silhouette, and a
-  // silhouette cannot tell a hexagonal torso from a pentagonal one. Body
-  // rims are kept (they are what catches the gallery rail light along the
-  // shoulders); limb rims come off, because a 1.5 cm fillet on a 5 cm arm at
-  // 16 m is well under a pixel.
-  if (kind === 0) {
-    // auditor: tall, narrow, brimmed hat, long coat
-    add(frustum(0.15, 0.20, 0.86, 5, 0.03), 0, 0.55, 0)
-    add(superellipsoid(0.115, 0.13, 0.115, 2.6, 2.6, 5), 0, 1.10, 0)
-    add(chamferedCylinder(0.24, 0.03, 0.012, 6), 0, 1.19, 0)   // brim
-    add(chamferedCylinder(0.13, 0.16, 0.02, 6), 0, 1.27, 0)    // crown
-    add(frustum(0.05, 0.04, 0.44, 4, 0), -0.19, 0.72, 0, pose ? 0.9 : 0.12)
-    add(frustum(0.05, 0.04, 0.44, 4, 0), 0.19, 0.72, 0, pose ? -0.25 : -0.12)
-  } else if (kind === 1) {
-    // guard: broad, square shoulders, helmet, chest rig
-    add(roundedBox(0.44, 0.62, 0.28, 0.05, 1), 0, 0.72, 0)
-    add(roundedBox(0.52, 0.14, 0.30, 0.05, 1), 0, 1.02, 0)      // pauldron bar
-    add(frustum(0.16, 0.13, 0.42, 5, 0.03), 0, 0.24, 0)         // legs block
-    add(superellipsoid(0.125, 0.135, 0.125, 3.0, 2.8, 5), 0, 1.20, 0)
-    add(chamferBox(0.26, 0.06, 0.20, 0.02), 0, 1.16, 0.09)      // visor
-    add(frustum(0.055, 0.05, 0.40, 4, 0), -0.28, 0.82, 0, pose ? 1.15 : 0.18)
-    add(frustum(0.055, 0.05, 0.40, 4, 0), 0.28, 0.82, 0, -0.18)
-  } else {
-    // clerk: short, hunched, clipboard
-    add(frustum(0.17, 0.19, 0.58, 5, 0.03), 0, 0.42, 0.03, 0.12)
-    add(superellipsoid(0.11, 0.115, 0.11, 2.4, 2.4, 5), 0.05, 0.82, 0.06)
-    add(frustum(0.16, 0.14, 0.34, 4, 0.02), 0, 0.15, 0)
-    add(chamferBox(0.20, 0.26, 0.02, 0.008), 0.02, 0.58, 0.22, 0.25)  // clipboard
-    add(frustum(0.05, 0.045, 0.34, 4, 0), -0.17, 0.56, 0.10, pose ? 0.7 : 0.55)
-    add(frustum(0.05, 0.045, 0.34, 4, 0), 0.17, 0.56, 0.10, -0.55)
-  }
-  return bakeParts(g)[0].geometry
-}
+const GALLERY_PALETTE = [
+  '#3b4250', '#2f3742', '#4a5260', '#565f6d', '#39414c',
+  '#6b6f78', '#454b57', '#2c333d', '#5a6270', '#3f4856',
+  '#c8922d', '#b8763a',   // the two high-vis vests, ~17 % of seats
+]
 
 // ---------------------------------------------------------------------------
 // The arena
@@ -1988,6 +1957,10 @@ class PermanentReserveCoreArena extends ArenaBase {
     this._beamV = new THREE.Vector3()
     this._pillars = []
     this._bolts = []
+    // ROUND 15: the game-wide crowd handle. _wireEvents runs before
+    // _buildGallery in some teardown orders and every listener touches it, so
+    // it exists from construction rather than from the build that fills it.
+    this._crowds = []
     this._conduitHandles = new Set()
     this._surge = {
       phase: 'idle',
@@ -2476,71 +2449,103 @@ class PermanentReserveCoreArena extends ArenaBase {
     }
 
     // --- the population ---------------------------------------------------
+    // ROUND 15 — MIGRATED ONTO ArenaBase.buildCrowd. THIS ARENA WAS THE ONE
+    // CROWD HOLE IN THE GAME.
+    //
+    // What was here: six hand-rolled InstancedMeshes named `galleryCrowd`,
+    // eight instances each, driven by a private `_gallery` slot table and a
+    // private sway updater. Nine of the other nine arenas publish `_crowds`
+    // with a working `audit()`; this one published nothing, so the harness had
+    // no way to ask whether its 48 spectators were standing on the deck, and
+    // three separate crowd fixes that landed in buildCrowd (the v3.6 floating-
+    // row P0, the 3-tier LOD, the ambient bounce that keeps a stand off the
+    // floor of the histogram) never reached this arena at all.
+    //
+    // TWO REAL DEFECTS THE MIGRATION FIXES, both of which the missing audit()
+    // is exactly why nobody caught:
+    //
+    //   1. BOTH GALLERIES FACED THE WALL. The old slot table set
+    //      `ry = side * PI/2`. Three's Ry maps local +Z to (sin, 0, cos), so
+    //      +PI/2 points a figure at +X and -PI/2 at -X — i.e. the deck at
+    //      x = +16.2 faced +X (outward, into the vault liner) and the deck at
+    //      x = -16.2 faced -X (outward again). Every spectator in the room had
+    //      its back to the fight. The stand's yaw is now `-side * PI/2` on the
+    //      GROUP, which is the seam buildCrowd documents ("position/rotate the
+    //      returned group so +Z points at the arena") and therefore the seam
+    //      that cannot silently invert again.
+    //   2. NO GROUNDING PROOF. The figures were pinned to `GY + 0.16`, a hand-
+    //      computed constant that happened to match the deck top. buildCrowd's
+    //      audit() walks the matrices against the stand's own support set, so
+    //      the deck top is asserted rather than assumed.
+    //
+    // GEOMETRY OF THE STAND. The deck is 3.6 m wide in X and spans z GZ0..GZ1
+    // (14 m), top face at GY + 0.16. The crowd's local X therefore runs along
+    // WORLD Z (the deck's length) and its rows step back in local -Z, i.e.
+    // outboard, away from the rail at x = side * (GX - 1.6). Origin sits at
+    // side * (GX - 1.15): row 0 lands 45 cm behind the rail and row 1 at
+    // 40 cm outboard of that, both comfortably inside the deck's outer edge at
+    // side * (GX + 1.8).
+    //
+    // `risers: false` because a mezzanine deck is flat — and per the v3.6 P0
+    // that also pins rowRise to 0, so nothing in this stand can float. No
+    // banners and no backdrop: this is a railed inspection walkway 5 m up
+    // inside a vault, not a bleacher.
     const budget = Math.max(0, Math.floor(this.quality.crowd ?? 60))
-    // 6 buckets x 2 galleries x perBucket. At the default crowd budget of 60
-    // that is 24 figures for 6 draw calls and ~5.5k triangles — an audience
-    // read for a fraction of what the 44-bank deposit wall was costing.
-    const perBucket = Math.max(1, Math.min(4, Math.round(budget / 30)))
-    const bodyM = flatMat(0x555f6b, { surface: 'suit', mapOpts: MAP_PAINT })
-    this._gallery = []
-    const m4 = new THREE.Matrix4()
-    const q = new THREE.Quaternion()
-    const e = new THREE.Euler()
-    const pv = new THREE.Vector3()
-    const sv = new THREE.Vector3()
-    const col = new THREE.Color()
-    for (let kind = 0; kind < 3; kind++) {
-      for (let pose = 0; pose < 2; pose++) {
-        const geo = galleryFigureGeometry(kind, pose)
-        const inst = new THREE.InstancedMesh(geo, bodyM, perBucket * 2)
-        inst.name = 'galleryCrowd'
-        inst.castShadow = false
-        inst.receiveShadow = false
-        inst.frustumCulled = false
-        inst.userData.noMerge = true
-        inst.userData.noUpgrade = true
-        inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-        const slots = []
-        let n = 0
-        for (const side of [-1, 1]) {
-          for (let i = 0; i < perBucket; i++) {
-            const z = GZ0 + 0.9 + rng() * (len - 1.8)
-            const x = side * (GX - 0.35 - rng() * 1.0)
-            // value variation: the row spans 0.55x to 1.25x its base albedo,
-            // so no two neighbours sit at the same brightness
-            const v = 0.55 + rng() * 0.7
-            const warm = rng() < 0.3
-            inst.setColorAt(n, col.setRGB(v * (warm ? 1.15 : 0.92), v, v * (warm ? 0.82 : 1.06)))
-            slots.push({
-              x, z, y: GY + 0.16,
-              ry: side * Math.PI / 2 + (rng() - 0.5) * 0.7,
-              s: 0.92 + rng() * 0.28,
-              ph: rng() * Math.PI * 2, sp: 0.6 + rng() * 0.7,
-            })
-            n++
-          }
-        }
-        inst.count = n
-        if (inst.instanceColor) inst.instanceColor.needsUpdate = true
-        this.group.add(inst)
-        this._gallery.push({ inst, slots })
-      }
+    // Was 6 buckets x 2 galleries x perBucket(<=4) = up to 48 figures. Two
+    // stands of the same total, and buildCrowd's actor is a fixed draw-call
+    // cost per stand rather than one per silhouette variant, so the six
+    // `galleryCrowd` draws become two stands' worth.
+    const perDeck = THREE.MathUtils.clamp(Math.round(budget * 0.2), 6, 24)
+    this._crowds = []
+    for (const side of [-1, 1]) {
+      const at = [side * (GX - 1.15), GY + 0.16, cz]
+      const crowd = buildCrowd({
+        count: perDeck,
+        area: { w: len - 1.6, d: 1.3 },       // 12.4 m of deck, two rows deep
+        rng,
+        risers: false,                         // flat deck => rowRise 0 (v3.6 P0)
+        banners: false, backdrop: false,
+        bounce: 0.14,                          // a railed walkway, not a terrace
+        seatPitch: 0.62,
+        // A near-black vault: the stand needs the ambient-bounce term at full
+        // strength or it is a silhouette hole, and the value trim comes DOWN
+        // because there is no sky here to justify a bright mass.
+        value: 0.9, fill: 1.35,
+        // LOD is the knob this arena never had, and it is the one that pays for
+        // the migration. The stand centre is 15.9 m from the fight floor, which
+        // lands on `medium` under crowdDetailFor's stock 10/18 m thresholds; the
+        // bands are pulled in to 8/14 m here so it resolves to `low`, and the
+        // justification is round 10's own finding about this exact audience:
+        // "16 m away behind a railing inside fog that has already taken a third
+        // of its contrast... a silhouette cannot tell a hexagonal torso from a
+        // pentagonal one." Measured headless at quality.crowd 120:
+        //     bespoke stand (round 10, after its own strip)  16,768 tri / 6 draws
+        //     buildCrowd @ medium                            17,624 tri / 10 draws
+        //     buildCrowd @ low (this)                         9,280 tri / 10 draws
+        // i.e. 44 % fewer triangles than the thing it replaces, for four extra
+        // draws — and defect C says this arena is draw-submission bound, so the
+        // four are named and deliberate rather than incidental.
+        detail: crowdDetailFor(at, [0, 0, 0], { near: 8, far: 14 }),
+        palette: GALLERY_PALETTE,
+      })
+      crowd.group.name = 'galleryStand'
+      crowd.group.position.set(at[0], at[1], at[2])
+      crowd.group.rotation.y = -side * Math.PI / 2   // local +Z -> the fight floor
+      // Off the shadow pass and out of the merge buckets, exactly as the old
+      // instanced figures were: they are 16 m away behind a rail, inside fog.
+      crowd.group.traverse((o) => {
+        if (!o.isMesh) return
+        o.castShadow = false
+        o.receiveShadow = false
+        o.userData.noMerge = true
+      })
+      this.group.add(crowd.group)
+      this._crowds.push(crowd)
     }
-    this.addUpdater(() => {
-      const t = this._time
-      const excite = 1 + this._pulseBoost * 1.4
-      for (const g of this._gallery) {
-        for (let i = 0; i < g.slots.length; i++) {
-          const s = g.slots[i]
-          pv.set(s.x, s.y + Math.sin(t * s.sp + s.ph) * 0.035 * excite, s.z)
-          e.set(0, s.ry + Math.sin(t * s.sp * 0.6 + s.ph) * 0.06, 0)
-          q.setFromEuler(e)
-          sv.setScalar(s.s)
-          g.inst.setMatrixAt(i, m4.compose(pv, q, sv))
-        }
-        g.inst.instanceMatrix.needsUpdate = true
-      }
-    })
+    // Same wiring as the other nine: ArenaBase's teardown walk owns the meshes
+    // (buildCrowd's own dispose() is shared-geometry aware and is reached
+    // through it), so all this file adds is the per-frame tick.
+    for (const c of this._crowds) this.addUpdater((dt) => c.update(dt))
   }
 
   // Hazard chevrons ringing the core zone. This is the ONE thing that stayed a
@@ -3646,19 +3651,31 @@ class PermanentReserveCoreArena extends ArenaBase {
         const p = e?.pos || e?.point || null
         if (p) this._impactSparks(p, 0.5 + dmg * 0.045 + (e.counter ? 0.4 : 0))
       }
+      // ROUND 15: the gallery reacts. The bespoke stand had no cheer channel at
+      // all — its only animation was a 3.5 cm idle sway scaled by _pulseBoost,
+      // so the audience was the one thing in this room that never responded to
+      // a hit. Restrained on purpose: these are auditors on a walkway, so a
+      // heavy hit is a flinch and a KO is the only thing that gets them up.
+      const cheer = 0.16 + Math.min(0.5, dmg * 0.03) + (e?.counter ? 0.28 : 0)
+      for (const c of this._crowds) c.cheer(cheer)
     })
     this.listen('combo', (e) => {
-      if ((e?.hits || 0) >= 5) for (const bolt of this._bolts) this._strikeBolt(bolt)
+      if ((e?.hits || 0) >= 5) {
+        for (const bolt of this._bolts) this._strikeBolt(bolt)
+        for (const c of this._crowds) c.cheer(0.9)
+      }
     })
     this.listen('fighter:ko', () => {
       this._instability += 5
       this._pulseBoost = 2
       this._alertDrones(3, 0)
       for (const p of this._pillars) p.forceCollapse()
+      for (const c of this._crowds) c.cheer(2.4)
     })
     this.listen('round:end', () => {
       this._instability += 4
       this._alertDrones(2, 0)
+      for (const c of this._crowds) c.cheer(1.8)
     })
   }
 

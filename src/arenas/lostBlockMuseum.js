@@ -186,13 +186,45 @@ const RGB = [0xff2244, 0x22ff88, 0x2266ff]
 // the cyan/magenta strictly in the emitters — that separation is what stops
 // the frame becoming the purple soup the previous pass shipped.
 // ---------------------------------------------------------------------------
-const VOID = 0x1c1826         // [28] the black anchor. arch interiors, coffers.
-const MARBLE_PALE = 0x8c8496  // [140] gallery floor field
-const MARBLE_DEEP = 0x5a5268  // [90]  border tiles, plinth shafts
-const STONE_MID = 0x6e6678    // [110] columns
-const STONE_DARK = 0x3e3850   // [62]  bases, capitals, kerbs
-const PLASTER = 0x4a4360      // [74]  gallery walls
-const PLASTER_DEEP = 0x322c46 // [50]  wainscot, recesses
+// ---------------------------------------------------------------------------
+// ROUND 15 — THE WHOLE STONE PALETTE MOVED UP ONE BAND. THIS IS THE MEDIAN FIX.
+//
+// frameReport() fails this arena on MEDIAN (outside 115-168 for mood
+// 'museum-gallery') with below8 at 0.369 % against a 6 % ceiling: nothing is
+// crushed, the room is simply a stop and a half under what its own mood says it
+// is. And "its own mood says" is literal — env.js MOODS['museum-gallery'] is a
+// DAYLIT gallery: sky 0xdad3c6, horizon 0xe8e2d6, ground 0xbdb5a6, with two
+// 0.9/0.7 softbox panels overhead. The IBL every material in this file samples
+// describes a bright room. The albedos described a crypt.
+//
+// Measured headless (CPU raster of the built arena through a mirror of the
+// grade), before this change — the arena's own named surfaces, in frame order:
+//     crowdRisers 55 | wallBack 35 | merged plaster 35 | colShaft 78
+//     plinth 55 | pilaster 20 | wainscot 17 | inlayGrout 79
+// The band starts at 115. Not one architectural surface in the room was inside
+// it, and the only things that were are the brass frames and the spot pools.
+//
+// So the fix is the albedo ladder, not the exposure and not the spots. Every
+// value below goes up roughly one band, the ORDER of the ladder is preserved
+// exactly (void < wainscot < stone-dark < deep marble < plaster < stone-mid <
+// pale marble < brass), and the hue is preserved on every entry — this is still
+// a cold violet-grey gallery, it is just no longer a dark one. The pinpoint
+// gallery spots keep their job because a spot's authority is its RATIO to the
+// surround, and the surround light is untouched here; only what it lands on
+// changed.
+//
+// VOID 0x1c1826 was ALSO out of contract, the same way bullMarketColosseum's
+// was: (28, 24, 38) has a red channel under the 30 sRGB albedo floor
+// GRAPHICS_CONTRACT §0 sets, so pbr()'s guard was clamping it and the authored
+// value never reached the screen. 0x282232 is (40, 34, 50) — legal, and still
+// by a wide margin the darkest surface in the room.
+const VOID = 0x282232         // [40] the black anchor. arch interiors, coffers.
+const MARBLE_PALE = 0xa49cb0  // [164] gallery floor field
+const MARBLE_DEEP = 0x726a82  // [114] border tiles, plinth shafts
+const STONE_MID = 0x877f92    // [135] columns
+const STONE_DARK = 0x554e68   // [85]  bases, capitals, kerbs
+const PLASTER = 0x7c748e      // [124] gallery walls
+const PLASTER_DEEP = 0x5a5370 // [90]  wainscot, recesses
 const BRASS = 0xb08a4a        // [176] inlay, frames, picture lights
 const BRASS_DARK = 0x6d5326   // [109] fixture bodies
 const IRON = 0x4c4a56         // [76]  stanchions, truss
@@ -248,10 +280,29 @@ function glowMat(color, intensity = 1.8, opts = {}) {
 // horizon. Sits behind the skylight lattice and above the gallery walls.
 // ---------------------------------------------------------------------------
 function makeVoidSkyTexture(rng) {
+  // ROUND 15 — THE VOID IS 40-50 % OF A GAMEPLAY FRAME AND IT WAS THE OTHER
+  // HALF OF THE MEDIAN FAILURE.
+  //
+  // The back wall is built in three pieces (see _buildRoom): two 17.4 m panels
+  // at x = +/-11.3 and a 5.2 m lintel at y 8.3, which leaves a 5.2 m opening
+  // dead centre of frame from the floor to y 5.6 — the hero opening the lost
+  // block went through. Behind it is this dome, and from the match camera the
+  // dome plus that opening measured HALF the frame on a headless raster. The
+  // ramp below peaked at sRGB 38 and bottomed at 6, so half of every museum
+  // frame was painted between 6 and 38 counts. No wall albedo, no spot and no
+  // exposure can move a median that a 50 % region pins to ~11.
+  //
+  // Every stop goes up ~1.7x, the SHAPE of the ramp is unchanged (same nine
+  // stops, same violet, same nebula wash and same Bayer dither on top), and the
+  // brightest stop lands at 58/36/88 — still darker than every architectural
+  // surface in the room, so the opening still reads as a void and not as a
+  // window onto something. This is the settlement-express lesson applied to the
+  // one arena that had not had it: a void that shows a gradient is a void; a
+  // void at 6 counts is a hole in the render.
   const STOPS = [
-    [0.00, 6, 4, 14], [0.14, 12, 8, 26], [0.28, 20, 12, 40],
-    [0.42, 30, 16, 54], [0.56, 38, 20, 62], [0.68, 30, 18, 52],
-    [0.80, 20, 14, 38], [0.92, 12, 9, 24], [1.00, 7, 5, 15],
+    [0.00, 14, 10, 26], [0.14, 22, 16, 42], [0.28, 34, 22, 60],
+    [0.42, 48, 30, 78], [0.56, 58, 36, 88], [0.68, 48, 32, 76],
+    [0.80, 34, 24, 58], [0.92, 22, 17, 40], [1.00, 15, 12, 28],
   ]
   const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
   return canvasTexture(160, 160, (c, W, H) => {
@@ -1879,10 +1930,23 @@ class LostBlockMuseumArena extends ArenaBase {
     //             saturation as the near kiosk". At near=9/far=44 they take
     //             49 % and 80 %, which is real atmospheric perspective.
     const rig = makeLightRig(this.scene, this.quality, {
-      hemiSky: 0x6a6280, hemiGround: 0x241e30, hemiIntensity: 0.3,
-      ambientColor: 0x8a7fa8, ambientFloor: 0.03,
-      sunColor: 0xffdcae, sunIntensity: 1.02, sunPos: [8, 15, 7],
-      fillColor: 0x6f88d8, fillIntensity: 0.26, fillPos: [-10, 6, 11],
+      // ROUND 15 — THE ROOM LIGHT, AGAINST THE MOOD'S OWN ENVIRONMENT.
+      // env.js MOODS['museum-gallery'] is a daylit gallery (sky 0xdad3c6,
+      // horizon 0xe8e2d6, two overhead softboxes at 0.9 and 0.7), and every
+      // material in this file samples that PMREM. The rig underneath it was
+      // running hemi 0.30 / ambientFloor 0.03 / fill 0.26 — the ambient budget
+      // of a night arena — so the room contradicted its own IBL and landed
+      // every architectural surface 30-80 counts under the 115-168 band.
+      // hemiGround comes up hardest (0x241e30 -> 0x3a3348): it is the only term
+      // a downward-facing facet in a room with no sky ever sees, and a polished
+      // marble gallery floor does not bounce a value that dark.
+      // The spots are UNTOUCHED. A pinpoint spot's authority is its ratio to
+      // the surround, and at these levels a 9-intensity marble-bounce point
+      // light and the gallery spots are still one to two stops clear.
+      hemiSky: 0x6a6280, hemiGround: 0x3a3348, hemiIntensity: 0.44,
+      ambientColor: 0x8a7fa8, ambientFloor: 0.052,
+      sunColor: 0xffdcae, sunIntensity: 1.34, sunPos: [8, 15, 7],
+      fillColor: 0x6f88d8, fillIntensity: 0.38, fillPos: [-10, 6, 11],
       rimColor: 0x4fe6ff, rimIntensity: 3.4,
       // the fresnel rim shader on top of the directional rim: this is what
       // carries the edge when a fighter turns away from the rim's world
@@ -2306,7 +2370,12 @@ class LostBlockMuseumArena extends ArenaBase {
     for (const d of defs) {
       const crowd = buildCrowd({
         count: d.count, area: d.area, palette: SHADOW_PALETTE, rng,
-        bounce: 0.14, riserColor: 0x2a2438,
+        // ROUND 15: riserColor 0x2a2438 -> 0x4c4560. The risers are the single
+        // largest crowd surface in frame here (measured at 15.9 % of a gameplay
+        // raster, mean 55 counts against a band that starts at 115) because the
+        // niches are shot from below and you see more step than spectator. Same
+        // one-band lift as the stone palette above, same hue.
+        bounce: 0.14, riserColor: 0x4c4560,
       })
       crowd.group.position.set(d.pos[0], d.pos[1], d.pos[2])
       crowd.group.rotation.y = d.ry
