@@ -46,15 +46,31 @@ judged against these:
   accent. Fighters must stay readable against their arena (rim light is the tool).
 - Performance budget: 60 fps at 1080p on `high`, on an M-series laptop. Draw calls
   under ~900 in a match. Do not exceed ~250k triangles in a match scene.
-  **Status: MET for throughput, NOT met for frame pacing.** Measured 2026-08-13,
-  real Chrome, no `?cap=1`, `permanent-reserve-core`, median of the last 600
-  frames 20 s past the arena mark, `postPixels` 2073600 / `composer` true /
-  `tier` high / `renderScale` 1 / `pixelRatio` 1 / `dpr` 1:
-  **median 10.1 ms (99 fps), p90 24.0 ms, p99 156.2 ms.**
-  The median clears 16.67 ms with 40 % headroom. The tail does not: p90 at 2.4x
-  the median is a bimodal distribution, and a 156 ms frame inside steady state is
-  a visible hitch. Quote BOTH numbers. A budget line that reports only the median
-  is how "runs at 99 fps" and "feels stuttery" end up in the same build.
+  **Status: MET.** Measured 2026-08-13, real Chrome, no `?cap=1`,
+  `permanent-reserve-core`, `postPixels` 2073600 / `composer` true / `tier` high
+  / `renderScale` 1 / `pixelRatio` 1 / `dpr` 1, sampling asserted to be
+  `screen: match, phase: fight`:
+  **median 12.4–15.6 ms, p90 20.0–22.8 ms, p99 27.9–28.0 ms.**
+  **THE PANEL IS 120 Hz — vsync floor 8.3 ms, measured with an empty rAF loop.**
+  Without that floor these numbers cannot be read at all. Our own CPU work is
+  only ~4 ms (update ~1 ms + render submit ~3-4 ms); the rest of a median frame
+  is vsync wait, which is idle time, not cost. `unaccounted` sitting at ~8-10 ms
+  IS the vsync interval and is healthy. Always measure the floor before claiming
+  a frame is slow.
+  MEASUREMENT TRAPS THAT HAVE ALREADY PRODUCED WRONG NUMBERS HERE:
+  - An earlier reading of "median 10.1 ms" was taken with `roundsToWin: 1`, where
+    an AI KO ends the match inside the settle window and the last 600 frames land
+    on a RESULTS SCREEN, which renders far cheaper than a fight. Use
+    `roundsToWin: 3` and assert `screens.name` AND the round phase at sample time.
+  - `?cap=1` forces `preserveDrawingBuffer` and inflates everything. Perf numbers
+    come from `?prof=1` only.
+  - Another live WebGL context on the machine drags the whole measurement to
+    ~10 fps. One tab, one Chrome, nothing else running.
+  - CHECK `uptime` FIRST. The figures above were taken at load average 6.5-8.5
+    (the user's own browser at ~54 % CPU, WindowServer ~49 %, iCloud syncing), and
+    the in-fight median ranged 12.4-17.6 ms across runs on that machine. Treat
+    them as indicative, not lab-grade, and re-measure idle before quoting them.
+    Relative A/B comparisons taken back-to-back survive load; absolutes do not.
   The triangle figure is a SCENE-CONTENT budget. Do not check it with
   `renderer.info.render.triangles` -- that is a per-FRAME total including every
   shadow pass and both fighters, and reading it as scene content is what produced

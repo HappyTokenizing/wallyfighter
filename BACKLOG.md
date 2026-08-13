@@ -1,5 +1,78 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 18 — frame pacing located and fixed, by instrumenting instead of guessing
+
+The P1 from round 17. Round 17 said "instrument first, do NOT start by guessing", and that
+is what found it — the cause was in neither of the two files previously suspected.
+
+### The measurement that made everything else readable: THE PANEL IS 120 Hz
+
+Vsync floor, measured with an EMPTY rAF loop: **8.3 ms (120.5 Hz)**. Without this number the
+in-game figures are uninterpretable. Our own CPU work in a live fight is ~4 ms
+(update ~1 + render submit ~3-4); the remaining ~8-10 ms of a median frame is vsync wait,
+which is idle, not cost. `unaccounted` sitting at ~8-10 ms is HEALTHY. Measure the floor
+before ever calling a frame slow.
+
+### The actual defect: the fixed-step accumulator amplified every stall
+
+Profiling a live fight (`screen: match, phase: fight` asserted) showed every one of the 12
+worst frames running the full `steps: 5` catch-up budget, several spending 100-148 ms inside
+update — 5 sim steps at ~29 ms each. One stalled frame became a RUN of stalled frames:
+stall -> 5 catch-up steps -> another long frame -> 5 more. The `steps === 5` guard only fired
+after paying for all five.
+
+FIX (`Game.js`, one line): `if (gap > 100) acc = Math.min(acc, STEP)` — past ~100 ms, drop the
+missed time instead of simulating it. Simulating 83 ms of catch-up serves nobody: the fight
+lurches forward and then stalls again.
+
+INTERLEAVED A/B (A B, back to back, same session — order chosen so thermal drift cannot
+masquerade as an effect):
+
+    A clamp OFF   median 25.0   p90 33.3   p99 67.2   steps5 3   2nd/3rd worst 108.7 / 87.6
+    B clamp ON    median 17.6   p90 25.9   p99 41.5   steps5 1   2nd/3rd worst  85.9 / 73.7
+
+Better on every metric, median included. NOTE FOR WHOEVER READS THIS NEXT: my first instinct
+was that the clamp "cannot affect the median because it only fires above 100 ms", and that
+was WRONG — preventing the cascade shortens the frames AFTER the stall too. The effect
+propagates. Do not re-derive that from the code; it was measured.
+
+Tail across three earlier runs, before -> after: ranks 2-12 went from 162-470 ms to 41-65 ms,
+and update max from 49.6 ms to 4.6 ms.
+
+### STILL OPEN — P1: one ~500 ms stall per run, and it is NOT our JS
+
+Every run retains a single 498-657 ms frame with `u` under 1 ms and `r` around 12-39 ms, i.e.
+~460-644 ms UNACCOUNTED. That is GC, a synchronous driver texture upload, or a shader
+compile/link — three causes with three different fixes. `?prof=1` now records `dProgs` and
+`dTex` per frame precisely to tell them apart:
+    dProgs jumped -> shader compile/link on first use of a material  -> pre-warm it
+    dTex   jumped -> texture upload the driver did synchronously     -> upload earlier/smaller
+    neither       -> GC                                              -> fix allocation churn
+That measurement did not complete this round (see the load caveat below). It is the next
+thing to do, and the tool for it is already in the build.
+
+### LOAD CAVEAT — READ BEFORE TRUSTING ANY ABSOLUTE NUMBER HERE
+
+These runs were taken on a machine at load average 6.5-8.5, with the user's own browser at
+~54 % CPU, WindowServer at ~49 %, and iCloud (`bird`, `cloudd`, `fileproviderd`) syncing.
+Consequences:
+- The A/B above is still sound: A and B ran back to back under the same conditions, which is
+  exactly what interleaving protects against.
+- The ABSOLUTE millisecond figures are indicative, not lab-grade. Median in a live fight
+  measured 12.4, 15.6, 15.8, 16.4 and 17.6 ms across runs — a real spread driven by load.
+- Under that load the game needed >20 s just to clear the LOADING screen (39 frames in 20 s),
+  which is what made two A/B passes and one diagnostic come back empty. If a run returns
+  nothing, check `uptime` before suspecting the code.
+Re-measure absolutes on an idle machine before quoting them anywhere that matters.
+
+### Method addition
+`?prof=1` now records a per-frame phase split: `window.__prof.split(n)` returns update /
+render-submit / unaccounted quantiles plus the 12 worst frames, and carries `screen`, round
+`phase` and `steps5` WITH the numbers so a sample taken on the wrong screen cannot pass
+unnoticed. `window.__prof.reset()` clears both the ring and the worst list — clearing only
+`ph` leaves stale arena-entry frames in `worst`, which then read as if they happened in-fight.
+
+
 ## ROUND 17 — 1080p budget MET on throughput. Round 13's ladder is now moot.
 
 Measured under round 13's own admissibility protocol (below), 2026-08-13. Both free wins

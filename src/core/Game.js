@@ -129,6 +129,81 @@ export class Game {
         msO100: +over100.reduce((t, x) => t + x, 0).toFixed(0),
       }
     }
+    // ---------------------------------------------------------------------
+    // PHASE SPLIT. An rAF delta says a frame cost 156 ms; it cannot say WHERE.
+    // Both previous perf rounds were spent on the wrong lever because the
+    // symptom was assumed instead of located, so record the split directly.
+    //
+    // The decisive comparison is `u + r` against the rAF gap for the SAME frame:
+    //   u + r ~= gap   -> the time is in our JS (update or render submission)
+    //   u + r << gap   -> the time is OUTSIDE our code entirely: GC, driver
+    //                     texture upload, shader compile/link, or compositor.
+    // Those two have completely different fixes, and guessing between them is
+    // exactly what wasted the last two rounds.
+    //
+    // renderer.render() is CPU-side submission only -- GPU work is async and is
+    // NOT captured here. A frame that is slow on the GPU shows a small `r`.
+    // ---------------------------------------------------------------------
+    P.ph = []            // bounded ring of [update, renderSubmit, steps, gap]
+    P.worst = []         // the worst frames retained with their split
+    // Clears BOTH. Zeroing P.ph alone leaves stale arena-entry frames sitting in
+    // P.worst, which then get read as if they happened during the fight.
+    P.reset = () => { P.ph.length = 0; P.worst.length = 0 }
+    // A stall that is neither update nor render submit is one of three things,
+    // and these two counters tell them apart without a native profiler:
+    //   programs jumped  -> shader compile/link on first use of a material
+    //   textures jumped  -> a texture upload the driver did synchronously
+    //   neither jumped   -> GC or compositor, and the fix is allocation-side
+    // Guessing between those three is how a whole round gets spent on the wrong
+    // one. `info` is a live object, so read the numbers, not the reference.
+    let lastProgs = 0, lastTex = 0
+    P.phase = (u, r, steps, gap) => {
+      const info = this.renderer?.info
+      const progs = info?.programs?.length || 0
+      const tex = info?.memory?.textures || 0
+      const dProgs = progs - lastProgs, dTex = tex - lastTex
+      lastProgs = progs; lastTex = tex
+      if (P.ph.length >= 4000) P.ph.shift()
+      // Store the gap ALONGSIDE the split, from the same frame of the same loop.
+      // P.f is filled by the profiler's own rAF loop, which is a DIFFERENT loop
+      // from the game's -- pairing the two by index silently compares frames
+      // that are not the same frame.
+      P.ph.push([+u.toFixed(2), +r.toFixed(2), steps, +gap.toFixed(2)])
+      P.worst.push({
+        i: P.f.length, t: +(performance.now() - P.t0).toFixed(0),
+        u: +u.toFixed(1), r: +r.toFixed(1), steps,
+        gap: +gap.toFixed(1), unaccounted: +(gap - u - r).toFixed(1),
+        dProgs, dTex,
+      })
+      if (P.worst.length > 240) { P.worst.sort((a, b) => b.gap - a.gap); P.worst.length = 24 }
+    }
+    /** Median/p90/p99 for each phase, plus the worst frames by rAF gap. */
+    P.split = (tailN = 600) => {
+      const tail = P.ph.slice(-tailN)
+      if (!tail.length) return { err: 'no phase data' }
+      const q = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return +(s[Math.min(s.length - 1, Math.floor(s.length * p))]).toFixed(2) }
+      const U = tail.map((x) => x[0]), R = tail.map((x) => x[1])
+      const gaps = tail.map((x) => x[3])
+      const un = tail.map((x) => x[3] - x[0] - x[1])
+      const worst = [...P.worst].sort((a, b) => b.gap - a.gap).slice(0, 12)
+      return {
+        n: tail.length,
+        // Sampling a results screen instead of a live fight flatters every
+        // number here, so the screen and round phase travel WITH the numbers.
+        screen: this.screens?.name || null,
+        phase: this.screens?.current?.phase || null,
+        // Frames that ran the full catch-up budget. Every one of the 12 worst
+        // frames in the first profiled run had steps 5, which is the signature
+        // of the accumulator making a bad frame worse.
+        steps5: tail.filter((x) => x[2] >= 5).length,
+        update: { med: q(U, 0.5), p90: q(U, 0.9), p99: q(U, 0.99), max: +Math.max(...U).toFixed(1) },
+        render: { med: q(R, 0.5), p90: q(R, 0.9), p99: q(R, 0.99), max: +Math.max(...R).toFixed(1) },
+        unaccounted: { med: q(un, 0.5), p90: q(un, 0.9), p99: q(un, 0.99), max: +Math.max(...un).toFixed(1) },
+        gap: { med: q(gaps, 0.5), p90: q(gaps, 0.9), p99: q(gaps, 0.99) },
+        worst,
+      }
+    }
+
     const tick = () => {
       const now = performance.now()
       P.f.push(now - last)
@@ -396,10 +471,27 @@ export class Game {
     const STEP = this.config.fixedStep
     let last = performance.now()
     let acc = 0
+    // Captured once, not per frame. Null unless ?prof=1 armed the profiler in
+    // the constructor, so a shipping frame pays one dead branch and nothing else.
+    const PROF = (typeof window !== 'undefined' && window.__prof) || null
     const tick = (now) => {
       requestAnimationFrame(tick)
+      const gap = now - last
       acc += Math.min((now - last) / 1000, 0.25)
       last = now
+      // CATCH-UP IS NOT FREE, AND AFTER A STALL IT IS ACTIVELY HARMFUL.
+      // Profiling a live fight at 1080p, every one of the 12 worst frames ran
+      // the full steps:5 budget, several with 100-148 ms spent inside update --
+      // 5 sim steps at ~29 ms each. The accumulator was turning ONE stalled
+      // frame into a run of them: stall -> 5 catch-up steps -> another long
+      // frame -> 5 more. The `steps === 5` guard below only fires after paying
+      // for all five.
+      // Past ~100 ms the honest move is to drop the missed time. Simulating
+      // 83 ms of catch-up serves nobody visually -- the fight lurches forward
+      // and then stalls again -- whereas dropping it costs a little sim
+      // fidelity during a hitch nobody can act through anyway.
+      if (gap > 100) acc = Math.min(acc, STEP)
+      const tU = PROF ? performance.now() : 0
       let steps = 0
       while (acc >= STEP && steps < 5) {
         this.frame++
@@ -409,12 +501,14 @@ export class Game {
         steps++
       }
       if (steps === 5) acc = 0 // spiral-of-death guard
+      const tR = PROF ? performance.now() : 0
       // The post stack runs on the REAL frame delta, not the fixed step: grain,
       // impact decay and DoF easing are presentation, and must look identical
       // at 60, 120 and 144 Hz.
       const frameDt = Math.min(Math.max(steps, 1) * STEP, 0.1)
       this._syncPipelineIdle()
       try { this.screens.render(this.renderer, frameDt) } catch (e) { console.error('[game] render threw', e) }
+      if (PROF && PROF.phase) PROF.phase(tR - tU, performance.now() - tR, steps, gap)
       this._fpsFrames++
     }
     requestAnimationFrame(tick)
