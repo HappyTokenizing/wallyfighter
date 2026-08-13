@@ -157,11 +157,30 @@ export class Game {
     // Guessing between those three is how a whole round gets spent on the wrong
     // one. `info` is a live object, so read the numbers, not the reference.
     let lastProgs = 0, lastTex = 0
+    // Which materials compiled, not just how many. three sets
+    // `WebGLProgram.name = parameters.shaderName` (the material type), so the
+    // program list names the culprit directly. Recorded with a timestamp so a
+    // mid-fight compile can be separated from arena build.
+    P.newProgs = []
+    const seenProgs = new Set()
     P.phase = (u, r, steps, gap) => {
       const info = this.renderer?.info
-      const progs = info?.programs?.length || 0
+      const list = info?.programs || null
+      const progs = list?.length || 0
       const tex = info?.memory?.textures || 0
       const dProgs = progs - lastProgs, dTex = tex - lastTex
+      if (dProgs > 0 && list) {
+        const fresh = []
+        for (let i = 0; i < list.length; i++) {
+          const k = list[i].cacheKey || String(i)
+          if (seenProgs.has(k)) continue
+          seenProgs.add(k)
+          fresh.push(list[i].name || '?')
+        }
+        if (fresh.length && P.newProgs.length < 200) {
+          P.newProgs.push({ t: +(performance.now() - P.t0).toFixed(0), gap: +gap.toFixed(0), names: fresh })
+        }
+      }
       lastProgs = progs; lastTex = tex
       if (P.ph.length >= 4000) P.ph.shift()
       // Store the gap ALONGSIDE the split, from the same frame of the same loop.

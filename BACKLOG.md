@@ -1,5 +1,71 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 19 — the ~500 ms stall is NAMED. Diagnosis complete, fix NOT applied.
+
+Round 18 left "one ~500 ms stall per run, and it is NOT our JS" with three candidate causes
+and the instrumentation to tell them apart. Ran it. The answer is unambiguous, and it is not
+what "pre-warm the VFX materials" would have fixed.
+
+### The evidence
+
+Worst frame of the run: `gap 641.6, u 1.2, r 42.2, unaccounted 598.2, dProgs 4, dTex 0`.
+Every other worst frame: `dProgs 0, dTex 0`. So: SHADER COMPILE/LINK. Not GC, not texture upload.
+
+Then `?prof=1` was extended to record WHICH materials compile (three sets
+`WebGLProgram.name = material type`), and the timeline settles it:
+
+    t=   927   52 programs   denim:ffffff, crowdAccent, paper:ffffff, metal:4c5764#upgrade ...
+    t=  1458   23 programs   wallyBody, wallyFrameRim, wallyFrame, wallyGlyph, coat, mask ...
+    t= 10476   45 programs   denim:ffffff, crowdAccent, paper:ffffff, metal:4c5764#upgrade,
+                             wallyBody, wallyFrameRim ...          <-- THE SAME MATERIALS
+    t= 10516    1 frame      gap 751 ms
+
+THE MATERIALS AT t=10476 ARE THE ONES ALREADY COMPILED AT t=927 AND t=1458. The dedup key in
+the profiler is the PROGRAM CACHE KEY, not the name, so these are genuinely new program keys
+for materials that already had one. The chunked warm in `_warmStep()` does its job and then
+the result is thrown away.
+
+### The mechanism
+
+Read the names: `metal:4c5764#upgrade`, `concrete:2c333d#upgrade`, `wood-rough:6e4a26#upgrade#own`.
+These are materials being UPGRADED from placeholder to generated surfaces. Under the
+copy-on-write material design an upgrade yields a new material variant, hence a new program
+key, hence a recompile the next time it draws. `dTex 0` fits: no new texture OBJECTS are
+created, so the texture counter never moves — which is exactly why this was invisible until
+programs were counted separately.
+
+Why it lands mid-fight: `_pumpSurfaces()` runs ONLY while `phase === 'intro'`
+(MatchScreen.js:1344). After the bell, textures.js keeps generating on its own schedule with
+no warm following it, so the upgrade batch recompiles whenever those materials next render.
+The existing mitigation at MatchScreen.js:821 re-queues a chunked warm, but only when the
+surface queue FULLY drains — if it drains after FIGHT!, nothing re-warms.
+
+### Fix direction (NOT applied — see why)
+
+The upgrade path must not hand the fight a new program key without a chunked warm behind it.
+Options, cheapest first:
+1. Keep pumping surfaces after the bell at a small budget and re-queue `_queueWarmChunks()`
+   after each batch that upgraded anything, not only at full drain. The chunked warm is
+   already budgeted and adaptive, so it cannot produce a 751 ms frame.
+2. Make the upgrade preserve the program key where possible (allocate the map slots on the
+   placeholder so gaining real content does not add defines).
+3. Force all surface generation to complete before FIGHT!, as `_flushBuild()` already does
+   for build steps. Simplest, but moves cost into the intro and may lengthen it.
+
+NOT APPLIED THIS ROUND, DELIBERATELY. This is a subtle, heavily-commented system (warm(),
+the chunker, copy-on-write materials) and the correct fix depends on the upgrade path in
+textures.js/materials.js. The machine is at load average 8 with the user's browser at ~54 %
+CPU; perf runs are currently freezing outright (one probe sat in `phase: intro` for 33 s with
+zero scene change). A change to the warm path that cannot be A/B'd is exactly the kind that
+regresses silently — and this round already caught one wrong conclusion of mine by measuring.
+Do it when the machine is idle, and A/B it interleaved.
+
+### Method note
+`window.__prof.newProgs` now records `{t, gap, names[]}` for every frame that compiled a
+program. That list is what turned "something outside our JS costs 500 ms" into a named cause
+in one run. It is NOT cleared by `reset()`, on purpose: seeing the build-time compiles next
+to the mid-fight ones is what exposed the duplication.
+
 ## ROUND 18 — frame pacing located and fixed, by instrumenting instead of guessing
 
 The P1 from round 17. Round 17 said "instrument first, do NOT start by guessing", and that
