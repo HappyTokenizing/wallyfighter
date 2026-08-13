@@ -1749,6 +1749,11 @@ export function buildPenguinCrowd(opts = {}) { // exported for headless §27 che
   // pushed out of the riser's front face instead of being cut off at the ribs.
   // With `risers: false` there is nothing but the ground and every seat snaps
   // to y = 0, which is exactly right for a stand with no structure.
+  //
+  // Read HERE, before the arena positions the group: crowdSupportsFromGroup()
+  // returns world-space boxes, the instance matrices are group-local, and the
+  // two only coincide while the group is still at the origin. The set is
+  // captured once and audit() reuses it.
   const supports = crowdSupportsFromGroup(group, { width: areaW, groundTop: 0 })
   for (let i = 0; i < count; i++) {
     const snapped = snapCrowdSeat(supports, baseX[i], baseZ[i], baseY[i], { lift: 0.30, nose: 0.18 })
@@ -1848,7 +1853,13 @@ export function buildPenguinCrowd(opts = {}) { // exported for headless §27 che
         tolerance: o.tolerance ?? 0.05,
         lift: bounceH * 1.6,   // the cheer hop, which is a bird's own doing
         sink: 0.20,
-        zPad: 0.30,
+        // MEASURED: at the shared default (0.30) a hopping bird on step 1 is
+        // inside the PADDED footprint of step 2 and, being airborne, clears
+        // the height test for it too — so it is judged against a tread it is
+        // nowhere near and reported buried by 0.33. The seats here are snapped
+        // to real treads, so the query does not need that slack: 0.12 is the
+        // row jitter's own overhang and nothing more.
+        zPad: 0.12,
         skip: (i) => tipped.has(i),   // mid-tumble is not mid-air
         extra: { species: 'penguin', rows, perRow, detail, hats: wantHats },
       })
@@ -3153,21 +3164,31 @@ class FrozenTokenLabArena extends ArenaBase {
     // Each stand declares WHERE IT IS and lets lodSegments() pick the count.
     // See penguinGeometry(): at 16 m the side stands were carrying the near
     // tessellation for no visible return.
+    // v3.8 (item 4): the tier comes from the SAME distance the geometry's own
+    // pixel gates use — the stand's position against the shipped LOD eye
+    // [0, 2.4, 9.5] — rather than from its distance to the fight, because the
+    // camera watches this fight from +Z and every stand here is behind or
+    // beside it. Measured: back 17.0 m, flanks 16.0 m, all three inside
+    // ArenaBase's 10-18 m 'medium' band. The back stand keeps the cheaper
+    // silhouette it already had (no hats at 56 px — see wantHats).
+    const EYE = [0, 2.4, 9.5]
+    const tierAt = (p) => crowdDetailForDistance(
+      Math.hypot(p[0] - EYE[0], p[1] - EYE[1], p[2] - EYE[2]))
     const back = buildPenguinCrowd({
-      count: nBack, area: { w: 22, d: 2.6 }, rng, detail: 'far', at: [0, 0.5, -7.4],
+      count: nBack, area: { w: 22, d: 2.6 }, rng, detail: tierAt([0, 0.5, -7.4]), at: [0, 0.5, -7.4],
     })
     back.group.position.set(0, 0, -7.4)
     this.group.add(back.group)
 
     const left = buildPenguinCrowd({
-      count: nSide, area: { w: 12, d: 2.2 }, rng, at: [-12.4, 0.5, -0.5],
+      count: nSide, area: { w: 12, d: 2.2 }, rng, detail: tierAt([-12.4, 0.5, -0.5]), at: [-12.4, 0.5, -0.5],
     })
     left.group.position.set(-12.4, 0, -0.5)
     left.group.rotation.y = Math.PI / 2 // beaks toward the science
     this.group.add(left.group)
 
     const right = buildPenguinCrowd({
-      count: nSide, area: { w: 12, d: 2.2 }, rng, at: [12.4, 0.5, -0.5],
+      count: nSide, area: { w: 12, d: 2.2 }, rng, detail: tierAt([12.4, 0.5, -0.5]), at: [12.4, 0.5, -0.5],
     })
     right.group.position.set(12.4, 0, -0.5)
     right.group.rotation.y = -Math.PI / 2

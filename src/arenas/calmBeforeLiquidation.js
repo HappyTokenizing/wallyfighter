@@ -221,7 +221,11 @@ const PAL = {
   // stone
   stone: 0x878a8e, stoneDark: 0x6a6d72, stoneWet: 0x5e6166,
   // wood / paint
-  benchWood: 0x6e8a80, benchIron: 0x3f4a4a, post: 0x7a5c38,
+  // ROUND 14 — benchIron 0x3f4a4a -> 0x4a5658. Measured at 8 final counts on a
+  // camera-FACING normal (see the metalness note in M.steel below for the
+  // instrument). This set is backlit by design, so a camera-facing facet never
+  // sees the key at all and its whole budget is fill + hemi + ambient + probe.
+  benchWood: 0x6e8a80, benchIron: 0x4a5658, post: 0x7a5c38,
   bark: 0x5a4636, wicker: 0x9a7a48, torii: 0x9c3a2e, toriiDark: 0x772c23,
   // life
   blossom: 0xc98fa6, blossomPale: 0xd8a3b8, leaf: 0x4c7040,
@@ -231,7 +235,11 @@ const PAL = {
   water: 0x3f7e93, lily: 0x44743f,
   cloudTop: 0xb4b6c6, cloudBase: 0x6d6a7c,
   // hardware
-  steel: 0x585d63, steelDark: 0x33383f, char: 0x2f2724,
+  // steelDark 0x33383f -> 0x41474f: measured at 5 counts, same reason.
+  // char 0x2f2724 -> 0x3d332e: 0.026 linear could not clear 4 counts even at
+  // metalness 0.12, because the camera-facing budget in a backlit set is ~0.52
+  // irradiance and 0.52 x 0.026 / PI = 0.0043 linear. Still charred.
+  steel: 0x585d63, steelDark: 0x41474f, char: 0x3d332e,
   // fabrics
   cloth: 0xb04a46, clothPale: 0xc9c2b2, umbrellaA: 0xb0554e, umbrellaB: 0x4a6a78,
   umbrellaC: 0xa8934e, umbrellaD: 0x6a5470,
@@ -867,7 +875,17 @@ const M = {
   terrace: () => flatMat(PAL.terrace, { surface: 'foliage', roughness: 0.7, envMapIntensity: 1.1, mapOpts: { scale: 2.2, wear: 0.55 } }),
   soil: () => flatMat(PAL.soil, { surface: 'mud', mapOpts: { scale: 1.6, wear: 0.7 } }),
   subsoil: () => flatMat(PAL.subsoil, { surface: 'mud', mapOpts: { scale: 1.1, wear: 0.85 } }),
-  grime: () => flatMat(PAL.grime, { surface: 'mud', mapOpts: { scale: 3.0, wear: 0.9 } }),
+  // ROUND 14 — `grime` is by its own comment "used everywhere", and the frame
+  // estimate makes it the single largest sub-20 mass in the picture (22.6 m2 of
+  // it in one merged mesh across the whole crowd bank, median 9-24 counts). The
+  // albedo is not lifted again — round 11 already did that and the round-3
+  // fighter-separation work depends on where it landed. What it gets instead is
+  // the multiple-scattering floor every other file in this set now uses: a
+  // contact seam between two lit surfaces is lit by light that bounced off both
+  // of them, and a rasteriser with one PMREM probe has no term for that. 0.064
+  // albedo x 0.55 = 0.035 linear against a 1.18 bloom threshold, i.e. it cannot
+  // bloom and it cannot clip; it just stops the seams being holes.
+  grime: () => flatMat(PAL.grime, { surface: 'mud', mapOpts: { scale: 3.0, wear: 0.9 }, emissive: 0x1b2016, emissiveIntensity: 0.55 }),
   sand: () => flatMat(PAL.sand, { surface: 'sand', mapOpts: { scale: 2.6, repeat: [3, 2] } }),
   // stone — 'stone' resolves to the granite kind, 'marble' for the polished cap
   stone: () => flatMat(PAL.stone, { surface: 'stone', roughness: 0.55, envMapIntensity: 1.3, mapOpts: { scale: 1.9, wear: 0.45 } }),
@@ -886,10 +904,30 @@ const M = {
   toriiDark: () => flatMat(PAL.toriiDark, { surface: 'wood', roughness: 0.5, envMapIntensity: 1.4, mapOpts: { scale: 1.5, wear: 0.75 } }),
   wicker: () => flatMat(PAL.wicker, { surface: 'cloth', mapOpts: { scale: 5.0, wear: 0.5 } }),
   // metal — 'metal' is metal-brushed, 'metal-rough' is metal-rusted
-  iron: () => flatMat(PAL.benchIron, { surface: 'metal-painted', roughness: 0.5, envMapIntensity: 1.5, mapOpts: { wear: 0.6 } }),
-  steel: () => flatMat(PAL.steel, { surface: 'metal-rough', roughness: 0.72, envMapIntensity: 1.4, mapOpts: { wear: 0.8 } }),
-  steelDark: () => flatMat(PAL.steelDark, { surface: 'metal-painted', roughness: 0.45, envMapIntensity: 1.55, mapOpts: { wear: 0.7 } }),
-  char: () => flatMat(PAL.char, { surface: 'metal-rough', mapOpts: { wear: 0.95 } }),
+  // ROUND 14 — THE METAL PRESETS HAD NO LIGHT SOURCE, AND THE ENV LIFT COULD NOT
+  // GIVE THEM ONE. A headless frame estimate (raycast grid from a gameplay
+  // camera, shaded off this arena's OWN rig plus the mood's IBL probe, run
+  // through a CPU mirror of the Pipeline grade) puts every `metal-rough`
+  // surface in this file at 4 FINAL COUNTS — the klaxon poles at x = +/-13 and
+  // the charred debris, all of them 1-1.5 m2 of near-black standing at the
+  // edges of the fight plane.
+  //
+  // `metal-rough` is metalness 0.85, so 85 % of those surfaces are lit by
+  // scene.environment ALONE, and MOODS['liquidation-storm'] measures sky lum
+  // 0.0405 — even at the 1.45 environmentIntensity this file already sets (see
+  // _buildSkyAndLights), the probe delivers ~0.0065 linear off a 0.11 albedo.
+  // The round-3 note above got the diagnosis right ("no specular lobe anywhere
+  // ... under a near-black IBL") and then reached for the only knob that scales
+  // a near-black probe, which is still near-black. The knob that works is the
+  // DIFFUSE lobe: metalness down hands these surfaces back to the analytic rig
+  // (fill 0.9 + hemi 0.72 + ambient 0.135), which is the light that actually
+  // exists here. Painted steel and charred wreckage are not mirrors; the
+  // roughness, the envMapIntensity and the wear maps are all untouched, so the
+  // specular story the round-3 pass built is exactly where it was.
+  iron: () => flatMat(PAL.benchIron, { surface: 'metal-painted', roughness: 0.5, envMapIntensity: 1.5, metalness: 0.18, mapOpts: { wear: 0.6 } }),
+  steel: () => flatMat(PAL.steel, { surface: 'metal-rough', roughness: 0.72, envMapIntensity: 1.4, metalness: 0.28, mapOpts: { wear: 0.8 } }),
+  steelDark: () => flatMat(PAL.steelDark, { surface: 'metal-painted', roughness: 0.45, envMapIntensity: 1.55, metalness: 0.16, mapOpts: { wear: 0.7 } }),
+  char: () => flatMat(PAL.char, { surface: 'metal-rough', metalness: 0.12, mapOpts: { wear: 0.95 } }),
   // life
   blossom: () => flatMat(PAL.blossom, { surface: 'foliage', mapOpts: { scale: 3.4 } }),
   leaf: () => flatMat(PAL.leaf, { surface: 'foliage', mapOpts: { scale: 3.0 } }),

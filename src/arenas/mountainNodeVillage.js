@@ -17,6 +17,8 @@ import * as THREE from 'three'
 import {
   ArenaBase, makeRng, flatMat, canvasTexture, makeLightRig,
   makeSign, resolveTeamColors,
+  auditCrowdInstances, crowdSupportsFromGroup, snapCrowdSeat,
+  crowdDetailForDistance, crowdDetailTier,
 } from './ArenaBase.js'
 import {
   emissive, mergeStatic, dedupeGeometry,
@@ -1799,10 +1801,36 @@ const DOG_PALETTE = ['#e8a15a', '#d98b3f', '#f0c48a', '#c9773a', '#f4e3c8', '#8a
 // static merge below pays for many times over.
 const DOG_VARIANTS = 5
 
-function dogGeometry(variant = 0) {
+// v3.8 (defect 3, item 4): the LOD knob, spent in the shibas' own currency.
+// ArenaBase grades its human actor by triangle count and gives the tier three
+// steps; a shiba is six small superellipsoids and two cones, so the tier buys
+// SEGMENTS — 5 / 4 / 4 on the solids, with the cheapest tier also dropping the
+// ear cones to a triangular prism. Tier 2 ('high') is byte-for-byte the
+// geometry this arena shipped. What does NOT change with the tier: the dog's
+// height, its footprint, and every anchor the grounding pass below reads.
+function dogGeometry(variant = 0, detail = 'high') {
+  const lod = crowdDetailTier(detail)
+  // MEASURED, and it changes what the tier can buy: superellipsoid() clamps to
+  // `Math.max(6, segments)` columns and 4 latitude rows, and this actor was
+  // authored at 5 — so every solid on a shiba is ALREADY sitting on the
+  // generator's floor and no segment number can take it lower. The tier
+  // therefore buys PART COUNT, which is the only lever left:
+  //   high    as shipped
+  //   medium  the two parts that are pure interior volume go (the plume tip
+  //           sits inside the plume base; the banner grip inside the flank)
+  //   low     the muzzle goes too — it is 4 px at the 18 m the tier means, and
+  //           it is the one part that reads as a bump on the skull rather than
+  //           as an outline — and the ear cones drop to a triangular prism.
+  // Nothing that carries the outline (ruff, skull, ears, curled tail, banner,
+  // raised paw) is ever spent: the standing complaint about these stands is
+  // that they read as identical pins, and silhouette is the cure for that.
+  const segOf = (n) => Math.max(4, Math.round(n * [0.78, 0.86, 1][lod]))
+  const earSeg = [3, 4, 4][lod]
+  const face = lod >= 1        // muzzles
+  const interior = lod >= 2    // parts wholly inside another solid
   const parts = []
   const S = (rx, ry, rz, e, seg, x, y, z, ry2 = 0) => {
-    const g = superellipsoid(rx, ry, rz, e, e, seg, U)
+    const g = superellipsoid(rx, ry, rz, e, e, segOf(seg), U)
     if (ry2) g.rotateY(ry2)
     g.translate(x, y, z)
     parts.push(g)
@@ -1813,15 +1841,15 @@ function dogGeometry(variant = 0) {
     S(0.33, 0.29, 0.44, 3.0, 5, 0, 0.44, -0.06)
     S(0.30, 0.30, 0.24, 2.6, 4, 0, 0.62, 0.16)          // ruff
     S(0.20, 0.21, 0.21, 2.8, 5, 0, 0.90, 0.12)          // skull
-    S(0.115, 0.10, 0.17, 2.4, 5, 0, 0.845, 0.31)        // blocky muzzle
+    if (face) S(0.115, 0.10, 0.17, 2.4, 5, 0, 0.845, 0.31)  // blocky muzzle
     for (const sx of [-1, 1]) {
-      const ear = roundedCone(0.085, 0.02, 0.2, 0.02, 4, 1, U)
+      const ear = roundedCone(0.085, 0.02, 0.2, 0.02, earSeg, 1, U)
       ear.rotateZ(sx * 0.42); ear.rotateX(-0.2)
       ear.translate(sx * 0.145, 1.03, 0.09)
       parts.push(ear)
     }
     S(0.115, 0.16, 0.12, 2.6, 5, 0, 0.66, -0.34)        // plume base
-    S(0.10, 0.15, 0.10, 2.6, 5, 0, 0.86, -0.40)         // plume tip
+    if (interior) S(0.10, 0.15, 0.10, 2.6, 5, 0, 0.86, -0.40)  // plume tip
     if (variant === 4) {
       // a raised foreleg — the outline break. Two segments, so the elbow reads.
       const upper = capsule(0.055, 0.20, 2, 6, U)
@@ -1838,9 +1866,9 @@ function dogGeometry(variant = 0) {
     // pup
     S(0.25, 0.23, 0.32, 3.0, 5, 0, 0.30, -0.03)
     S(0.19, 0.19, 0.18, 2.6, 5, 0, 0.60, 0.09)          // big round skull
-    S(0.085, 0.075, 0.11, 2.6, 4, 0, 0.565, 0.23)
+    if (face) S(0.085, 0.075, 0.11, 2.6, 4, 0, 0.565, 0.23)   // snout
     for (const sx of [-1, 1]) {
-      const ear = roundedCone(0.07, 0.018, 0.13, 0.018, 4, 1, U)
+      const ear = roundedCone(0.07, 0.018, 0.13, 0.018, earSeg, 1, U)
       ear.rotateZ(sx * 0.5)
       ear.translate(sx * 0.115, 0.72, 0.06)
       parts.push(ear)
@@ -1851,9 +1879,9 @@ function dogGeometry(variant = 0) {
     S(0.31, 0.27, 0.42, 3.0, 5, 0, 0.38, -0.04)
     S(0.235, 0.23, 0.20, 2.7, 5, 0, 0.55, 0.16)         // chest
     S(0.20, 0.20, 0.20, 2.7, 5, 0, 0.83, 0.11)          // skull
-    S(0.10, 0.09, 0.155, 2.5, 5, 0, 0.785, 0.30)        // muzzle
+    if (face) S(0.10, 0.09, 0.155, 2.5, 5, 0, 0.785, 0.30)  // muzzle
     for (const sx of [-1, 1]) {
-      const ear = roundedCone(0.08, 0.018, 0.22, 0.02, 4, 1, U)
+      const ear = roundedCone(0.08, 0.018, 0.22, 0.02, earSeg, 1, U)
       ear.rotateZ(sx * 0.3)
       ear.translate(sx * 0.135, 0.99, 0.06)
       parts.push(ear)
@@ -1873,9 +1901,11 @@ function dogGeometry(variant = 0) {
       const pen = superellipsoid(0.15, 0.115, 0.014, 2.2, 2.2, 5, U)
       pen.rotateZ(0.16); pen.translate(-0.31, 1.42, 0.115)
       parts.push(pen)
-      const grip = capsule(0.05, 0.13, 2, 5, U)
-      grip.rotateZ(0.9); grip.translate(0.10, 0.80, 0.20)
-      parts.push(grip)
+      if (interior) {
+        const grip = capsule(0.05, 0.13, 2, 5, U)
+        grip.rotateZ(0.9); grip.translate(0.10, 0.80, 0.20)
+        parts.push(grip)
+      }
     }
   }
   const geo = mergeGeoms(parts, parts.map(() => 1))
@@ -1893,12 +1923,24 @@ function dogGeometry(variant = 0) {
 
 // Same public surface as ArenaBase.buildCrowd, but the spectators are shibas
 // who bow toward the fight in a slow synchronized wave (+Z is "toward").
+//
+// v3.8 — WHY THIS IS NOT ArenaBase.buildCrowd, and what it adopted instead
+// (defect 3, item 1). buildCrowd seats bipeds: its actor is a lofted human
+// torso on legs, its rows are a seat pitch, and its poses are arms. The
+// congregation at this shrine is shibas that BOW in a wave — the species is
+// the arena (the gong, the prayer wheels and the bow-wave audio are all built
+// around it), and swapping it for humans would be a bigger regression than the
+// bug. So this stand adopts the SPINE that ArenaBase v3.7 split out for
+// exactly this case: crowdSupportsFromGroup + snapCrowdSeat ground it against
+// the terrace it actually builds, auditCrowdInstances proves it, and
+// crowdDetailTier grades it — the same three functions buildCrowd itself runs.
 export function buildDogCrowd(opts = {}) { // exported for headless §27 checks
   const count = Math.max(1, Math.floor(opts.count ?? 20))
   const areaW = opts.area?.w ?? 10
   const areaD = opts.area?.d ?? 2.2
   const rng = opts.rng || makeRng(0xd06)
   const teamColors = resolveTeamColors(opts) // v2.1 §27 team-color shibas
+  const detail = opts.detail ?? 'high'
 
   const group = new THREE.Group()
   group.name = 'dogCrowd'
@@ -1933,7 +1975,7 @@ export function buildDogCrowd(opts = {}) { // exported for headless §27 checks
   const meshes = []
   for (let v = 0; v < DOG_VARIANTS; v++) {
     if (!vCount[v]) { geos.push(null); meshes.push(null); continue }
-    const g = dogGeometry(v)
+    const g = dogGeometry(v, detail)
     const im = new THREE.InstancedMesh(g, mat, vCount[v])
     im.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     im.name = `dogs${v}`
@@ -1985,7 +2027,26 @@ export function buildDogCrowd(opts = {}) { // exported for headless §27 checks
     const row = rng() < 0.18 ? 1 : 0            // the second riser row
     baseX[i] = cCenter[c] + lx
     const bow = (1 - (lx / Math.max(0.001, cHalf[c])) ** 2) * areaD * 0.22
-    baseZ[i] = -row * 0.85 + bow - areaD * 0.18 + (rng() - 0.5) * 0.36
+    // v3.8 THE BURIED RANK (defect 3, item 2). The old line was
+    //   baseZ = -row * 0.85 + bow - areaD * 0.18 + jitter(+-0.18)
+    // which put the GROUND row anywhere in [-0.58, +0.27] — while the terrace
+    // this stand builds three lines below reaches forward to z = -0.25 (the
+    // riser is at -0.85 x 0.85 deep, and the snow lip overhangs it by 0.07 on
+    // a 1.06 m box). Every ground-row dog behind -0.25 was therefore standing
+    // INSIDE the terrace, cut off at mid-thigh by a step it was in: 82.8 % of
+    // the rank, buried up to 0.455 m, and the single worst crowd read in the
+    // game. The back row had the mirror bug — its own jitter carried it off
+    // the back of the lip it was raised onto, so it floated.
+    //
+    // The rows are now laid out against the terrace's REAL footprint rather
+    // than against the arithmetic that drew it: the ground row lives clear in
+    // front of the nose, the raised row lives inside the lip with a margin at
+    // both edges. The snap below then proves it instead of trusting it — and
+    // if anyone moves the terrace, the snap catches the drift and the audit
+    // reports it.
+    baseZ[i] = row === 1
+      ? -1.02 + bow * 0.42 + (rng() - 0.5) * 0.30    // on the lip, clear of both edges
+      : -0.02 + bow * 0.55 + (rng() - 0.5) * 0.26    // in front of the terrace nose
     baseY[i] = row * 0.42
     // bow wave rolls across the row — devotion, sequenced like a blockchain
     phase[i] = (baseX[i] + areaW / 2) * 0.35 + rng() * 0.25
@@ -2003,6 +2064,11 @@ export function buildDogCrowd(opts = {}) { // exported for headless §27 checks
     meshes[vOf[i]].setColorAt(vSlot[i], color)
   }
   for (const m of meshes) if (m && m.instanceColor) m.instanceColor.needsUpdate = true
+
+  // (variant mesh, instance slot) -> congregation index. The audit walks the
+  // instance buffers, which are per-variant, and needs to get back to the dog.
+  const revIdx = meshes.map((m) => new Int32Array(m ? m.count : 0).fill(-1))
+  for (let i = 0; i < count; i++) revIdx[vOf[i]][vSlot[i]] = i
 
   // Snowy risers — stepped, with a real lip that overhangs the step below it,
   // so the terrace throws a shadow line instead of reading as one grey slab.
@@ -2048,6 +2114,25 @@ export function buildDogCrowd(opts = {}) { // exported for headless §27 checks
     group.add(shade)
   }
 
+  // -- v3.8 GROUND AND DE-TRUNCATE EVERY INSTANCE (defect 3, item 2) --------
+  // The support set is read off the boxes this stand ACTUALLY BUILT, so the
+  // snow LIP is what the raised row stands on (its top is 0.455, not the
+  // riser's 0.42 — that 35 mm is the difference between a dog resting on the
+  // snow and a dog with its paws inside it), and the contact decal, the block
+  // course and the end drifts are correctly not treaded (they are skipped by
+  // name and by the minimum-span test — you cannot stand on a 0.55 m drift).
+  //
+  // Read HERE, before the arena positions the group: crowdSupportsFromGroup()
+  // returns world-space boxes and the instance matrices are group-local, so
+  // the two only coincide while the group is still at the origin. Captured
+  // once; audit() reuses the same set.
+  const supports = crowdSupportsFromGroup(group, { width: areaW, groundTop: 0 })
+  for (let i = 0; i < count; i++) {
+    const snapped = snapCrowdSeat(supports, baseX[i], baseZ[i], baseY[i], { lift: 0.30, nose: 0.18 })
+    baseY[i] = snapped.y
+    baseZ[i] = snapped.z
+  }
+
   const tipped = new Map() // i -> { phase, t, timer, ztilt }
   let time = rng() * 10
   let hype = 0
@@ -2084,11 +2169,57 @@ export function buildDogCrowd(opts = {}) { // exported for headless §27 checks
     setMat(i, _m)
   }
 
+  // v3.8 COMPOSE AT BUILD, NOT ON THE FIRST UPDATE (defect 3, item 2).
+  // FOUND BY THE NEW AUDIT, and it is what the independent matrix walk was
+  // seeing: every shiba in this congregation sat on the IDENTITY MATRIX until
+  // the first update() tick — unit-scale, unrotated, all of them stacked at
+  // the group origin, which for the back stand is a metre off the ground in
+  // the middle of the terrace. Anything that renders before the first tick
+  // drew that. Composing here costs one pass at build and nothing per frame.
+  for (let i = 0; i < count; i++) composeBowing(i)
+  for (const m of meshes) if (m) m.instanceMatrix.needsUpdate = true
+
   return {
     group,
     mesh,
     meshes,
+    detail,
     count,
+
+    /**
+     * v3.8 — THE SHARED CROWD AUDIT (defect 3, item 3). Same walk, same return
+     * shape as ArenaBase.buildCrowd().audit(), over this stand's own terrace.
+     *   -> { ok, count, checked, worstGap, bad, unwritten, species, ... }
+     * `bad: []` means no shiba is in mid-air, none is standing inside the
+     * riser it is supposed to be standing ON, and no instance in any of the
+     * five variant meshes was left at the identity matrix. Read-only, no
+     * per-instance allocation, safe to call mid-match.
+     */
+    audit(o = {}) {
+      return auditCrowdInstances({
+        bodies: meshes.filter(Boolean),
+        count,
+        supports,
+        tolerance: o.tolerance ?? 0.05,
+        // A bowing dog dips; the cheer hop lifts it 0.1. Past this it is not
+        // on the terrace at all.
+        lift: 0.22,
+        sink: 0.20,
+        zPad: 0.30,
+        // A tipped-over shiba is a physics event, not a placement bug: it is
+        // composed at its own base position and pitched, so it never leaves
+        // its tread — but during Unhinged mode the rise/fall arc is checked
+        // against the same tolerance as a standing dog, and that is noise.
+        skip: (i, name) => {
+          const v = meshes.findIndex((m) => m && m.name === name)
+          if (v < 0) return false
+          const k = revIdx[v][i]
+          return k >= 0 && tipped.has(k)
+        },
+        extra: { species: 'shiba', rows, detail },
+      })
+    },
+
     update(dt) {
       time += dt
       hype = Math.max(0, hype - dt * 1.2)
@@ -2821,16 +2952,26 @@ class MountainNodeVillageArena extends ArenaBase {
     const rng = this._rng
 
     const S = this._static
-    const back = buildDogCrowd({ count: nBack, area: { w: 22, d: 2.6 }, rng })
+    // v3.8 (defect 3, item 4): the LOD knob, passed for the first time. The
+    // tier is measured against the shipped LOD eye [0, 2.4, 9.5] rather than
+    // against the fight, because the camera watches this fight from +Z and all
+    // three stands are behind or beside it — a stand 7.4 m from the origin is
+    // 17 m from the viewer. Measured: back 17.0 m, flanks 16.1 m, all three
+    // inside ArenaBase's 10-18 m 'medium' band, which is ~15 % of the
+    // congregation's triangles for no visible change at 56-60 px per dog.
+    const EYE = [0, 2.4, 9.5]
+    const tierAt = (p) => crowdDetailForDistance(
+      Math.hypot(p[0] - EYE[0], p[1] - EYE[1], p[2] - EYE[2]))
+    const back = buildDogCrowd({ count: nBack, area: { w: 22, d: 2.6 }, rng, detail: tierAt([0, 0.5, -7.4]) })
     back.group.position.set(0, 0, -7.4)
     S.add(back.group)
 
-    const left = buildDogCrowd({ count: nSide, area: { w: 12, d: 2.2 }, rng })
+    const left = buildDogCrowd({ count: nSide, area: { w: 12, d: 2.2 }, rng, detail: tierAt([-12.4, 0.5, -0.6]) })
     left.group.position.set(-12.4, 0, -0.6)
     left.group.rotation.y = Math.PI / 2 // bow toward +X, the fight
     S.add(left.group)
 
-    const right = buildDogCrowd({ count: nSide, area: { w: 12, d: 2.2 }, rng })
+    const right = buildDogCrowd({ count: nSide, area: { w: 12, d: 2.2 }, rng, detail: tierAt([12.4, 0.5, -0.6]) })
     right.group.position.set(12.4, 0, -0.6)
     right.group.rotation.y = -Math.PI / 2
     S.add(right.group)

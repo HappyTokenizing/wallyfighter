@@ -308,6 +308,7 @@ export class MatchScreen {
     // next arena refills the queue.
     this._surfacesDone = false
     this._surfacePumps = 0
+    this._surfaceBudget = null
     // Deferred build queue (defect 8). Per-match, and reset BEFORE anything is
     // queued: a match that was left mid-build (a player quitting out during the
     // banner) must not hand its leftovers to the next one.
@@ -447,6 +448,49 @@ export class MatchScreen {
       this.physics.floorY = this.arena.floorY ?? 0
     } catch { /* physics bounds are optional */ }
     if (arenaDef?.stub || !this.arena.group) this._buildFallbackFloor()
+
+    // -----------------------------------------------------------------------
+    // THE OTHER HALF OF DEFECT 8, AND THE HALF THAT DOES NOT LIVE IN THIS FILE.
+    //
+    // MEASURED (node, three r166, canvas 2D shimmed to no-ops so procedural
+    // painting is FREE and PMREM never runs — i.e. a hard lower bound on the
+    // browser cost), second build of each venue in a warm process:
+    //
+    //   frozen-token-lab            951 ms      permanent-reserve-core    63 ms
+    //   meme-market                 333 ms      institutional-…-tower     47 ms
+    //   bull-market-colosseum       280 ms      calm-before-liquidation   43 ms
+    //   settlement-express          143 ms      lost-block-museum         39 ms
+    //   mountain-node-village       138 ms
+    //   liquidity-swamp              78 ms
+    //
+    // `arenaDef.build()` is ONE synchronous call. Nothing this file can do
+    // splits it, so "enter() under 100 ms" is not reachable on five of the ten
+    // venues from here — it needs the arena to hand its work over in pieces.
+    // This is the consumer side of that protocol, so opting in is a local
+    // change inside one arena file and nothing here has to move again:
+    //
+    //   build(ctx) {                       // in src/arenas/<venue>.js
+    //     const a = new MyArena(ctx)
+    //     a.buildEssentials()              // floor, bounds, spawns, light rig
+    //     a.pendingBuild = [               // iterable of thunks, or a generator
+    //       () => a.buildStands(),         // one frame's worth each
+    //       () => a.buildCrowd(),
+    //       () => a.buildDressing(),
+    //     ]
+    //     return a
+    //   }
+    //
+    // Rules for a thunk: it must be idempotent-safe to skip (the match can be
+    // abandoned mid-drain), it must parent everything under `arena.group` (the
+    // adoptSceneStrays reconciliation above has already run), and it should aim
+    // under ~30 ms. The drain finishes before "FIGHT!" either way.
+    //
+    // A no-op today: no arena sets pendingBuild, so this queues nothing.
+    // -----------------------------------------------------------------------
+    this._arenaSteps = null
+    if (this.arena.pendingBuild) {
+      this._queueBuild('arena:pending', () => this._stepArenaBuild())
+    }
 
     // See the "bright arcade lighting" note above: only light the scene
     // ourselves when the arena did not.
@@ -717,17 +761,64 @@ export class MatchScreen {
    * never pays a call. One throw disables it for the match — a surface that
    * generates late is a soft picture, not a broken one.
    */
+  // ---------------------------------------------------------------------------
+  // ADAPTIVE BUDGET (defect 8, and this is where the >100 ms frames actually
+  // live — not in the arena build).
+  //
+  // MEASURED headless, 260 intro frames, canvas 2D shimmed to no-ops so the
+  // painting is FREE (a hard lower bound on the browser):
+  //
+  //   permanent-reserve-core   surface pump 5557 ms of a 6043 ms intro,
+  //                            worst frame 70 ms of which 68 was the pump
+  //   frozen-token-lab         surface pump 7137 ms of a 7766 ms intro,
+  //                            worst frame 170 ms of which 103 was the pump
+  //
+  // textures.js drains with `while (queue) { stepEntry(entry, deadline) }` — it
+  // checks the deadline BETWEEN steps and cannot preempt one, so a frame costs
+  // `budget + whatever step it last decided to start`. Its steps are wildly
+  // non-uniform (a 1024² normal field against a 128² roughness one), so a
+  // generous budget does not buy throughput evenly; it buys the right to start
+  // one more unbounded step late in the frame.
+  //
+  // The only lever on this side of the wall is how much room we leave for that
+  // decision. So: start at the full 16 ms, and the first time a pump blows
+  // past it by 3x, stop stacking — 3 ms of room means at most one step per
+  // frame and the worst frame becomes the worst STEP, which is textures.js's
+  // number to improve, honestly attributed. The tail costs a few more intro
+  // frames and the intro has 215 of them.
+  // ---------------------------------------------------------------------------
   _pumpSurfaces(budgetMs = INTRO_TEXTURE_BUDGET_MS) {
+    const t0 = _now()
+    const budget = Math.min(budgetMs, this._surfaceBudget ?? budgetMs)
     try {
-      const left = pumpTextureQueue(budgetMs)
+      const left = pumpTextureQueue(budget)
+      const took = _now() - t0
+      if (took > budget * 3) {
+        // A step this size must never have a second one started behind it.
+        if (this._surfaceBudget == null) {
+          console.debug(`[combat] surface step overran its ${budget} ms slice by ${took.toFixed(0)} ms — ` +
+            'throttling the intro budget so a long step is never stacked on a full one')
+        }
+        this._surfaceBudget = 3
+      } else if (this._surfaceBudget != null) {
+        // Recover a millisecond per well-behaved frame. A venue whose steps are
+        // uniformly small is back at the full slice in a dozen frames — the
+        // throttle must not turn "one huge normal field" into a drain that
+        // spills out of the banner and into the fight, which is the whole thing
+        // INTRO_TEXTURE_BUDGET_MS exists to prevent.
+        this._surfaceBudget = Math.min(budgetMs, this._surfaceBudget + 1)
+      }
       if (!left) {
         this._surfacesDone = true
         if (this._surfacePumps) {
           console.debug(`[combat] surface queue drained during the round intro (${this._surfacePumps} frames)`)
-          // Those fields were placeholders when enter() warmed them; textures.js
-          // has just flipped needsUpdate on every one. Re-upload them now, in
-          // the banner, instead of on the frame each surface first appears.
-          this._warmArena('surfaces-ready')
+          // Those fields were placeholders when the chunked warm walked them;
+          // textures.js has just flipped needsUpdate on every one. Re-upload
+          // them in the banner instead of on the frame each surface first
+          // appears — but CHUNKED, like the first pass. This used to be one
+          // atomic _warmArena() that re-uploaded every map an arena owns in a
+          // single frame, which is one of the >100 ms frames defect 8 counts.
+          this._queueWarmChunks()
         }
       } else {
         this._surfacePumps = (this._surfacePumps || 0) + 1
@@ -806,18 +897,22 @@ export class MatchScreen {
       }
       const ms = _now() - t0
       ran++
-      if (ms >= 4) this._buildLog.push(`${step.key} ${ms.toFixed(0)}`)
+      // Capped: the warm step is re-entered once per chunk and would otherwise
+      // turn a diagnostic into an unbounded array.
+      if (ms >= 4 && this._buildLog.length < 24) this._buildLog.push(`${step.key} ${ms.toFixed(0)}`)
       if (!more) q.shift()
     }
-    this._buildDone = true
     // A final full-scene pass: the chunked warm patches scene.traverse to visit
     // one batch at a time, which by construction never visits the Scene NODE
     // itself, so scene.background / scene.environment are the two textures it
     // cannot reach. Everything else is already resident, so this costs a cache
     // walk and those two uploads.
     this._warmArena('build-complete')
-    console.debug(`[combat] deferred build finished over ${this._buildFrames} intro frames` +
-      (this._buildLog.length ? ` — steps over 4 ms: ${this._buildLog.join(', ')}` : ''))
+    if (!this._buildDone) {
+      this._buildDone = true
+      console.debug(`[combat] deferred build finished over ${this._buildFrames} intro frames` +
+        (this._buildLog.length ? ` — steps over 4 ms: ${this._buildLog.join(', ')}` : ''))
+    }
     return true
   }
 
@@ -836,6 +931,34 @@ export class MatchScreen {
     if (ms >= 8) {
       console.debug(`[combat] deferred build flushed at ${reason}: ${n} step(s) left, ${ms.toFixed(0)} ms`)
     }
+  }
+
+  /**
+   * Pull one thunk off `arena.pendingBuild` per call. Accepts an array, any
+   * iterable, a generator, or a function returning one of those — an arena
+   * should be able to express "the rest of the venue" in whichever shape its
+   * build already has. Returns false while there is more to do.
+   */
+  _stepArenaBuild() {
+    if (!this._arenaSteps) {
+      let src = this.arena?.pendingBuild
+      try {
+        if (typeof src === 'function') src = src()
+        this._arenaSteps = src && typeof src[Symbol.iterator] === 'function'
+          ? src[Symbol.iterator]()
+          : (src && typeof src.next === 'function' ? src : null)
+      } catch (e) {
+        console.warn('[combat] arena.pendingBuild is not iterable — the venue is whatever build() already made', e)
+        this._arenaSteps = null
+      }
+      // Drop the handle so a re-entered match cannot drain a spent iterator.
+      try { if (this.arena) this.arena.pendingBuild = null } catch { /* frozen arena */ }
+      if (!this._arenaSteps) return true
+    }
+    const n = this._arenaSteps.next()
+    if (n.done) return true
+    if (typeof n.value === 'function') n.value()
+    return false
   }
 
   // ---------------------------------------------------------------------------
@@ -868,6 +991,11 @@ export class MatchScreen {
   // is either too slow for the former or too coarse for the latter.
   // ---------------------------------------------------------------------------
   _queueWarmChunks() {
+    // A warm already in the queue covers whatever the caller wanted warmed:
+    // the walk is lazy (the object list is collected when the step first runs)
+    // and the maps are read at upload time, so re-queueing would only reset a
+    // half-finished pass and redo it.
+    if (this._buildSteps && this._buildSteps.some((s) => s.key === 'warm')) return
     this._warmObjs = null
     this._warmI = 0
     this._warmGroup = WARM_CHUNK_OBJECTS
@@ -916,6 +1044,7 @@ export class MatchScreen {
     // these steps would build into.
     this._buildSteps = []
     this._warmObjs = null
+    this._arenaSteps = null
     if (this.replayActive) this._abortInstantReplay(false)
     try { this._flushFx() } catch { /* teardown */ }
     this._offPause?.()
@@ -1211,8 +1340,13 @@ export class MatchScreen {
     // picture, a ragdoll that builds late is a crash risk. So the build goes
     // first, and while it is still running the surfaces take the smaller slice.
     if (this.phase === 'intro') {
-      const built = this._buildDone || this._pumpBuild()
+      const built = this._pumpBuild(BUILD_BUDGET_MS)
       if (!this._surfacesDone) this._pumpSurfaces(built ? INTRO_TEXTURE_BUDGET_MS : BUILD_BUDGET_MS)
+    } else if (this._buildSteps && this._buildSteps.length) {
+      // The only thing that can still be queued after FIGHT! is the re-warm the
+      // surface queue asks for when it finally drains (see _pumpSurfaces).
+      // 3 ms a frame of budgeted uploads instead of one unbounded flush.
+      this._pumpBuild(3)
     }
     try { this.cam.update(dt) } catch { /* stub */ }
     // Post + lighting follow the camera, so they run right after it and before

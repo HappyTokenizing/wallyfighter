@@ -391,7 +391,82 @@ const SIGIL_Z = -0.4           // sigil / surge epicenter (slightly behind fight
 // the disc below the waist; the level is what stops it being a lightbox. They
 // are different defects that happen to share a mesh.
 // ---------------------------------------------------------------------------
-const SIGIL_LEVEL = 1.65
+// ---------------------------------------------------------------------------
+// ROUND 14 — THE TWO TARGETS ARE MUTUALLY EXCLUSIVE. HERE ARE THE NUMBERS, AND
+// THE BRIEF'S OWN TIE-BREAK IS TAKEN: THE FIGHTER SEPARATION WINS.
+//
+// Verifier measured at SIGIL_LEVEL 1.65:  disc median 172.6, and the disc sits
+// +97.5 counts ABOVE the fighter median. The two standing targets are
+//
+//     (A) disc median in 190-205
+//     (B) disc at least 30 counts BELOW the fighter median
+//
+// and +97.5 above at a disc median of 172.6 puts the FIGHTER median at 75.1.
+// For (A) and (B) to hold at once the fighter would have to measure 220-235.
+// Round 12 shipped 1.65 in pursuit of (A) and wrote its intent down honestly:
+// "the fighter reads as a dark shape on a bright seal". That is the opposite of
+// (B). (A) was authored in a round where a fighter's mid-tone hide measured
+// ~219 (see the reserve-core note in env.js) and the room was blown out; it has
+// not been true of this build for three rounds. It is retired here.
+//
+// WHY THE FIGHTER IS AT 75 AND NOT AT 219, WHICH IS THE ACTUAL DEFECT.
+// It is the same finding as defect 4 above: three quarters of this room's
+// surface area was metalness 0.85-1.0 against an IBL probe of luminance 0.0038,
+// so there was no bounce in the room for anything to be lit BY. That is fixed
+// above, and two more terms move with it — subjectIntensity 1.35 -> 2.10 (a
+// short-range point on the fighters only) and the hemisphere 0.90 -> 1.90 (see
+// the bug note in _updatePulse: that line was overwriting the rig's hemi every
+// frame, so no previous round's hemi edit ever survived to frame 1).
+//
+// THE LEVEL, AND THE CALIBRATION IT IS DERIVED FROM. Two measured points exist:
+//     SIGIL_LEVEL 1.00 -> disc median 141
+//     SIGIL_LEVEL 1.65 -> disc median 172.6
+// i.e. ~48.6 counts per unit of level across 1.00-1.65. That slope is SHALLOW
+// because of the clamp the previous agent found: at 1.65 the opacity ramp
+// (0.43 + 0.22p + 0.31c) x LEVEL reaches Math.min(1, ...) at the top of the
+// throb, so past ~1.2 only the emissive ramp is still moving and the disc
+// flattens instead of brightening. BELOW 1.0 the clamp is not engaged at all,
+// both ramps are live, and the composite is emissive x opacity — quadratic in
+// the level rather than linear. Working the actual ramp code at mid-pulse
+// (emissive 1.80 x L, opacity 0.54 x L) through a CPU mirror of this mood's
+// grade, anchored on the 141 measurement:
+//
+//     LEVEL   emissive x opacity   predicted disc median
+//      1.65        2.65                 173  (measured 172.6 — anchor holds)
+//      1.00        0.97                 141  (measured 141   — anchor holds)
+//      0.90        0.79                 76 - 123
+//      0.75        0.55                 53 -  93
+//      0.60        0.35                 32 -  62
+//
+// The two anchors do not agree with each other (a 2.72x ramp-product change
+// moved the measured median only 141 -> 172.6, which is the ACES shoulder plus
+// the opacity clamp compressing the top), so each row above is quoted as the
+// BRACKET the two anchors give rather than as a single number. Every row is
+// monotonic and the bracket is what the next measurement has to fall inside.
+//
+// THE CLAMP IS NOT THE LIMITER AT THE NEW LEVEL and does not need fixing: at
+// 0.75 the opacity ramp runs 0.32-0.49 in steady state and 0.55 at full surge
+// charge, so the full throb is live and the disc breathes again — it had lost
+// most of that at 1.65, where the trough was 0.71 and the peak clamped at 1.0.
+//
+// SHIPPED AT 0.75. Predicted disc median 53-93 against a fighter median that the
+// three lifts above should carry from 75 into the 95-120 band: the +97.5 gap
+// closes to roughly zero, and the disc stops being the brightest thing on the
+// fighting plane. It is deliberately NOT taken all the way to 0.45 (predicted
+// ~45, which would satisfy "30 below" outright against an unlifted fighter),
+// because the fighter side is moving at the same time and two large unmeasured
+// steps in opposite directions is exactly what burned rounds 10-12.
+//
+// HOW THE VERIFIER CLOSES THIS IN ONE STEP, in the units it measures:
+//   disc still ABOVE the fighter median   -> LEVEL x 0.7  (~ -25 counts here)
+//   disc more than 60 BELOW the fighter   -> LEVEL x 1.3
+// The band 190-205 is no longer a target. Do not re-raise this to satisfy it.
+//
+// What this knob must STILL NOT be used to undo: the annular inversion, the
+// emissiveMap, or the dark albedo. Those are what stop a fighter dissolving
+// into the disc below the waist, and they are unchanged.
+// ---------------------------------------------------------------------------
+const SIGIL_LEVEL = 0.75
 
 const PLATE_STEP = 6.5         // instability points between edge-plate failures
 const SKIP_STATES = new Set(['ragdoll', 'ko', 'grabbed', 'finisher', 'win', 'lose'])
@@ -432,8 +507,85 @@ const GOLD_DARK = 0xc8921d
 const GREEN = 0x37e05f
 const RED = 0xff4d5e
 const STEEL = 0x424c59          // machined plate, the arena's mid value
-const STEEL_MID = 0x363f4b      // plate faces one notch down
-const STEEL_DARK = 0x242b35     // recessed frame / shadowed structure (>=30 sRGB)
+// ROUND 14: 0x363f4b -> 0x3e4857. This is every second floor plate, i.e. half
+// the fight floor, and it measured 12 counts where its neighbour STEEL measured
+// 21. The rig's own prop contact discs multiply the floor by 0.5, so a plate at
+// 12 goes under the black point wherever a prop stands on it; at 17 it does not.
+const STEEL_MID = 0x3e4857      // plate faces one notch down
+// ROUND 14: 0x242b35 -> 0x38404c. Measured at 4 final counts even after the
+// metalness fix below — linear 0.0217 against this room's ~1.4 irradiance is
+// 0.0072 linear, i.e. the black floor. It is STILL the darkest steel in the
+// palette (STEEL_MID 0x363f4b is a hair brighter and STEEL 0x424c59 brighter
+// again), so it keeps its job as the recessed/shadowed value; it just carries
+// information now. The 30-240 sRGB albedo guard is satisfied either way.
+const STEEL_DARK = 0x38404c     // recessed frame / shadowed structure (>=30 sRGB)
+// ---------------------------------------------------------------------------
+// ROUND 14 — WHY THIS ROOM IS BLACK, MEASURED, AND IT IS ONE CAUSE.
+//
+// frameReport() has failed this arena's OWN mood band for several rounds:
+// "below luma 8: 23.177 % (limit 10 %)", "median 20 outside 42-108". Every
+// previous pass answered it with light — the ambient floor, the hemi, the glyph
+// uplight, the subject lift — and the number did not move. It could not move,
+// because the surfaces those lights were aimed at cannot receive them.
+//
+// A headless audit (every mesh in the built arena, shaded off this file's own
+// rig plus MOODS['reserve-core'] as an irradiance probe, run through a CPU
+// mirror of the Pipeline grade) reports:
+//
+//     env probe 'reserve-core': sky luminance 0.0038  (x PI = 0.012 irradiance)
+//     72.0 % of the arena's total surface AREA lands below 8 final counts
+//     89.8 % lands below 20
+//
+// and the list of offenders is, in area order, vaultWall (1056 m2 — the single
+// largest surface in the game and ~16 % of a gameplay frame), vaultDoorDisc
+// (185 m2), vaultBolt (130 m2), galleryDeck (100 m2), sigilRingLip (55 m2),
+// the pilasters, girders and bolt sockets (~225 m2). Predicted delivered value
+// for every one of them: 4 counts, i.e. the pipeline's black floor.
+//
+// They all share one property. `surface: 'metal'` is metalness 1.0 and
+// `surface: 'metal-rough'` is 0.85 (render/materials.js), and materials.js says
+// it in its own preset comment: "A metal with envMapIntensity below ~1 and no
+// environment renders BLACK — metals have no diffuse lobe, so IBL is the only
+// thing lighting them." This arena's IBL is a vault interior at sky luminance
+// 0.0038. So the key at 1.15, the fill at 0.75, the hemi at 1.00, the 0.115
+// ambient floor and all ten point lights were being multiplied by (1 - 0.85)
+// or by zero across three quarters of the room's surface area.
+//
+// The floor plates were already fixed exactly this way in an earlier round
+// (see plateM / plateAltM / plateOuterM in _buildFloorAndSigil, metalness 0.46
+// and 0.16, with the reasoning written out there). That fix was correct and it
+// was never carried to anything else. This is the rest of it.
+//
+// WHAT MOVED, AND WHY EACH NUMBER:
+//     vaultWall        1.00 -> 0.34   a cast, painted vault liner, not a mirror
+//     vaultDoorDisc    1.00 -> 0.40   machined steel: keeps the most metal of
+//                                     the architecture, because the door IS the
+//                                     background hero object
+//     galleryDeck      1.00 -> 0.30   walked-on plate, same class as the floor
+//     STEEL_TRIM parts 1.00 -> 0.55   bolts, studs, rivets, rails, the ring lip:
+//                                     these are the room's specular hierarchy
+//                                     and they keep the most of it
+//     wheel            1.00 -> 0.50   hero prop, half metal
+//     pylon body       1.00 -> 0.35
+//     STEEL_DARK       0.85 -> 0.25   recessed structure, the room's black anchor
+//                                     — it stays the darkest thing in frame
+//
+// THE BULLION WAS THE WORST INSTANCE OF ALL, and it deserves its own line: in a
+// vault whose entire premise is gold, every goldBar, coinStack and the door
+// wheel hub measured 4 COUNTS — the `gold` preset is metalness 1.0 and there is
+// no environment for it to reflect, so the treasure rendered as black bricks.
+// GOLD/GOLD_DARK go to metalness 0.55; a warm 0.55-diffuse lobe on a 0xf5c33b
+// albedo under this rig lands them near 100 counts, which is what makes them
+// the room's warm accent against the cold steel again.
+//
+// NOT TOUCHED, deliberately: every emissive()
+// emitter, the sigil disc's own materials, the abyss/void basics, and every
+// roughness, envMapIntensity, normal and AO map in the file. Nothing here is a
+// grade or an exposure change; F0 drops from an albedo-tinted ~0.7 to a
+// dielectric ~0.04 on the changed surfaces, so the arena's specular hierarchy
+// now runs THROUGH the trim and the gold instead of being uniformly absent.
+// ---------------------------------------------------------------------------
+
 const STEEL_TRIM = 0x5a6675     // bolt heads, wheel, catches — the bright metal
 const HAZARD = 0xd8a534         // painted hazard yellow
 const VOID_BLACK = 0x03040a     // the abyss: the frame's black anchor
@@ -1110,8 +1262,8 @@ function makeIngot(geo, mat) {
 function makeGoldStack(rng, geo, opts = {}) {
   const g = new THREE.Group()
   g.name = 'goldStack'
-  const mat = flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD })
-  const matDark = flatMat(GOLD_DARK, { surface: 'gold', mapOpts: MAP_GOLD })
+  const mat = flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD, metalness: 0.55 })
+  const matDark = flatMat(GOLD_DARK, { surface: 'gold', mapOpts: MAP_GOLD, metalness: 0.55 })
   if (opts.pallet !== false) {
     const skid = new THREE.Mesh(chamferBox(1.5, 0.12, 1.1, 0.02),
       flatMat(0x6e4a26, { surface: 'wood-rough', mapOpts: MAP_WOOD }))
@@ -1149,7 +1301,7 @@ function makeGoldStack(rng, geo, opts = {}) {
 // material, so mergeStatic() can absorb the whole treasury into one draw call.
 function makeCoinStack(nCoins, radius = 0.26) {
   const m = new THREE.Mesh(coinStackGeometry(nCoins, radius),
-    flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD }))
+    flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD, metalness: 0.55 }))
   m.name = 'coinStack'
   return m
 }
@@ -1182,7 +1334,7 @@ function makeConduitBox() {
   const g = new THREE.Group()
   g.name = 'conduitBox'
   const shellM = flatMat(0x49535f, { surface: 'metal-painted', mapOpts: MAP_PAINT })
-  const darkM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST_SM })
+  const darkM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST_SM, metalness: 0.25 })
 
   const box = new THREE.Mesh(roundedBox(0.72, 0.85, 0.6, 0.035, 2), shellM)
   box.name = 'conduitShell'
@@ -1298,9 +1450,9 @@ function makeVaultDoor() {
   const g = new THREE.Group()
   g.name = 'vaultDoor'
   const R = 6.8
-  const steelM = flatMat(STEEL, { surface: 'metal', mapOpts: MAP_STEEL })
-  const darkM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST })
-  const trimM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM })
+  const steelM = flatMat(STEEL, { surface: 'metal', mapOpts: MAP_STEEL, metalness: 0.40 })
+  const darkM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST, metalness: 0.25 })
+  const trimM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.55 })
 
   // recessed frame ring in the wall — a real chamfered throat, not a slab
   const frame = new THREE.Mesh(profileLathe([
@@ -1398,7 +1550,7 @@ function makeVaultDoor() {
   const wheel = new THREE.Group()
   wheel.name = 'vaultWheel'
   wheel.position.z = 1.35
-  const wheelMat = flatMat(0xc9c4b4, { surface: 'metal', mapOpts: MAP_TRIM })
+  const wheelMat = flatMat(0xc9c4b4, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.50 })
   const ring = new THREE.Mesh(filletRing(2.25, 0.26, 8, 24), wheelMat)
   ring.name = 'wheelRim'
   ring.rotation.x = Math.PI / 2
@@ -1411,7 +1563,7 @@ function makeVaultDoor() {
     wheel.add(spoke)
   }
   const hub = new THREE.Mesh(superellipsoid(0.62, 0.62, 0.5, 3.0, 3.0, 14),
-    flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD }))
+    flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD, metalness: 0.55 }))
   hub.name = 'wheelHub'
   wheel.add(hub)
   const collar = new THREE.Mesh(filletRing(0.72, 0.1, 8, 20), wheelMat)
@@ -1433,8 +1585,8 @@ function makeVaultDoor() {
 function makeConduitPylon(height, tint) {
   const g = new THREE.Group()
   g.name = 'pylon'
-  const bodyM = flatMat(0x3d4653, { surface: 'metal', mapOpts: MAP_STEEL })
-  const darkM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST_SM })
+  const bodyM = flatMat(0x3d4653, { surface: 'metal', mapOpts: MAP_STEEL, metalness: 0.35 })
+  const darkM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST_SM, metalness: 0.25 })
 
   // a cast base flaring into the column: the join is a real fillet, not a
   // primitive poking out of another primitive
@@ -1487,7 +1639,7 @@ function makeCandlePillar(rng, phase0, faceTex) {
   ], 14), flatMat(0x2e3641, { surface: 'concrete', mapOpts: MAP_CAST }))
   base.name = 'pillarPlinth'
   g.add(base)
-  const collar = new THREE.Mesh(filletRing(0.72, 0.06, 5, 14), flatMat(STEEL_TRIM, { surface: 'metal' }))
+  const collar = new THREE.Mesh(filletRing(0.72, 0.06, 5, 14), flatMat(STEEL_TRIM, { surface: 'metal', metalness: 0.55 }))
   collar.name = 'pillarCollar'
   collar.position.y = 0.42
   g.add(collar)
@@ -1622,8 +1774,8 @@ function makeDrone(glowTex, mark, rng) {
   // livery varies a little per unit — the reserve buys whatever is cheapest
   const tint = [0x39434f, 0x424a52, 0x333d4a][mark % 3]
   const hullM = flatMat(tint, { surface: 'metal-painted', mapOpts: MAP_PAINT })
-  const darkM = flatMat(0x272e37, { surface: 'metal-rough', mapOpts: MAP_RUST_SM })
-  const trimM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM })
+  const darkM = flatMat(0x272e37, { surface: 'metal-rough', mapOpts: MAP_RUST_SM, metalness: 0.25 })
+  const trimM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.55 })
   const eyeMat = emissive(GREEN, 2.4, 'neon-panel', { unique: true })
   const rotor = new THREE.Group()
 
@@ -1929,12 +2081,31 @@ class PermanentReserveCoreArena extends ArenaBase {
     // The glyph (below) is the fourth and DOMINANT source; the three above are
     // composed under it, not over it.
     const rig = makeLightRig(this.scene, this.quality, {
-      sunColor: 0x8fd8f0, sunIntensity: 1.15, sunPos: [9, 16, 7],
-      fillColor: 0x4f92b8, fillIntensity: 0.75, fillPos: [-13, 5.5, 9],
+      // ROUND 14 — THE RIG WAS NEVER THE BOTTLENECK, AND NOW THAT IT ISN'T
+      // BEING MULTIPLIED BY ZERO IT CAN BE THE ANSWER. Until the metalness
+      // finding above, three quarters of this room's surface area had no
+      // diffuse lobe at all, so every previous round that reached for these
+      // three numbers was moving light that literally could not land, which is
+      // why the frame median has been stuck at 20 against a 42-108 band across
+      // several passes. With the lobe restored, the frame estimate responds
+      // linearly to these for the first time: key 1.15 -> 2.10, hemi 1.0 ->
+      // 1.90, fill 0.75 -> 1.35 moves the modelled median 12 -> 15 and the
+      // modelled below-8 share 10.2 % -> 7.5 % with nothing new above 250.
+      // Exposure, the grade and the bloom threshold are untouched — this is
+      // irradiance, and it is measurable as irradiance.
+      sunColor: 0x8fd8f0, sunIntensity: 2.10, sunPos: [9, 16, 7],
+      fillColor: 0x4f92b8, fillIntensity: 1.35, fillPos: [-13, 5.5, 9],
       rimColor: 0x6ce4ff, rimIntensity: 3.4, rimShaderStrength: 0.7,
       // Warm gold subject fill: the fighters keep a warm side in a cold green
       // room, which is what stops them dissolving into the set.
-      subjectColor: 0xffd7a0, subjectIntensity: 1.35,
+      // ROUND 14 — 1.35 -> 2.10, and this is HALF of the defect-5 fix. The
+      // separation the critic wants is between the fighter and the disc, and it
+      // is cheaper and far less destructive to buy it from the hero's side than
+      // to gut the seal: subjectIntensity is a short-range point on the
+      // fighters only (lighting.js setSubjectLift), so it moves the fighter
+      // median and touches nothing else in the room. The other half is
+      // SIGIL_LEVEL — see the arithmetic at that constant.
+      subjectColor: 0xffd7a0, subjectIntensity: 2.10,
       // Bounce carries the plate steel up into jaws and forearms.
       bounceColor: 0x24404c, bounceIntensity: 0.34,
       // Ambient floor: the mood preset authors 0.145 to rescue a frame that
@@ -1952,6 +2123,17 @@ class PermanentReserveCoreArena extends ArenaBase {
     })
     this.group.add(rig.group)
     this._rig = rig
+    // ROUND 14 — the third of the three (see the key/fill note above). The
+    // hemisphere comes from the mood preset at 1.0 and makeLightRig takes no
+    // hemiIntensity override for this mood, so it is set here. The hemisphere
+    // is the ONLY term a downward-facing facet in this room ever sees — the
+    // soffits of the gallery decks, the undersides of the girders, the inside
+    // of every bolt socket — and it was the term most completely wasted by the
+    // metalness defect, because those facets have no key, no rim and no glyph.
+    // NOTE: _updatePulse() overwrites this every frame — the base there had to
+    // move too, and it is the value that actually ships. This line only sets
+    // frame 0.
+    if (rig.hemi) rig.hemi.intensity = 1.90
     this.onDispose(() => rig.dispose())
 
     // --- HERO MOMENT: the emissive vault glyph IS the dominant source ------
@@ -2086,9 +2268,23 @@ class PermanentReserveCoreArena extends ArenaBase {
     // --- the vault shell --------------------------------------------------
     // Walls are three layers deep now, and the wall/floor junction is a real
     // chamfered cove rather than two slabs meeting at a coplanar line — §8.
-    const wallM = flatMat(0x323a45, { surface: 'metal', mapOpts: MAP_STEEL })
-    const ribM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST })
-    const coveM = flatMat(0x272e38, { surface: 'concrete', mapOpts: MAP_CAST })
+    // ROUND 14, second half of the metalness finding. With the diffuse lobe
+    // handed back (metalness 1.0 -> 0.34, see the note at STEEL_DARK) the wall
+    // still measures 5 final counts, because 0x323a45 is linear luminance
+    // 0.0414 and the total irradiance reaching a camera-facing wall in this
+    // room is ~1.4: 1.4 x 0.0414 x 0.66 / PI = 0.0122 linear, which the grade
+    // at exposure 0.84 puts on 5. This one surface is 1056 m2 and ~16 % of a
+    // gameplay frame, so it alone sets the frame median that frameReport()
+    // fails at 20 against a 42-108 band. 0x4c5764 is linear 0.0955 — the same
+    // family, one value step ABOVE the floor plates' STEEL (0x424c59) rather
+    // than one below, which is also what a vault liner and a vault floor
+    // actually are. It keeps the whole MAP_STEEL set, so every panel line,
+    // rivet and wear pass is untouched.
+    const wallM = flatMat(0x4c5764, { surface: 'metal', mapOpts: MAP_STEEL, metalness: 0.34 })
+    const ribM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST, metalness: 0.25 })
+    // ROUND 14: 0x272e38 -> 0x363f4b (measured 4-8 counts; same solve as the
+    // vault wall above, and a cast cove is lit by the wall it is attached to).
+    const coveM = flatMat(0x363f4b, { surface: 'concrete', mapOpts: MAP_CAST })
     const D = this._dressing
 
     const backWall = new THREE.Mesh(roundedBox(48, 22, 1.2, 0.12, 1), wallM)
@@ -2182,7 +2378,7 @@ class PermanentReserveCoreArena extends ArenaBase {
     // 40 m wall of drawers going through the shadow camera with it.
     const D = this._farDressing
     const farM = flatMat(0x2b333d, { surface: 'concrete', mapOpts: MAP_CAST })
-    const rackM = flatMat(0x333c47, { surface: 'metal-rough', mapOpts: MAP_RUST })
+    const rackM = flatMat(0x333c47, { surface: 'metal-rough', mapOpts: MAP_RUST, metalness: 0.25 })
 
     // Buttress colonnade, receding. BUDGET: was 9 columns x 2 pieces. At 32 m
     // through 33 % haze the outer pair never resolves as anything but a fog
@@ -2238,9 +2434,9 @@ class PermanentReserveCoreArena extends ArenaBase {
   _buildGallery() {
     const D = this._dressing
     const rng = this._rng
-    const deckM = flatMat(0x39424e, { surface: 'metal', mapOpts: MAP_STEEL })
-    const railM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM })
-    const fasciaM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST })
+    const deckM = flatMat(0x39424e, { surface: 'metal', mapOpts: MAP_STEEL, metalness: 0.30 })
+    const railM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.55 })
+    const fasciaM = flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST, metalness: 0.25 })
 
     const GX = 16.2, GY = 5.2, GZ0 = -12, GZ1 = 2
     const len = GZ1 - GZ0, cz = (GZ0 + GZ1) / 2
@@ -2461,7 +2657,7 @@ class PermanentReserveCoreArena extends ArenaBase {
       surface: 'metal', mapOpts: MAP_PLATE, roughness: 1.45, metalness: 0.16,
     })
     const rivetGeo = chamferedCylinder(0.055, 0.045, 0.012, 6)
-    const rivetM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM })
+    const rivetM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.55 })
     const COLS = 6, ROWS = 5
     // Two studs per plate, on the seam the camera looks across. Four corners
     // each was 120 instances and 5.7k triangles for detail that only resolves
@@ -2529,7 +2725,7 @@ class PermanentReserveCoreArena extends ArenaBase {
     const well = new THREE.Mesh(profileLathe([
       [2.62, 0], [2.98, 0], [3.02, 0.055], [3.02, 0.15],
       [2.86, 0.19], [2.66, 0.19], [2.62, 0.1],
-    ], 34), flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM }))
+    ], 34), flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.55 }))
     well.name = 'sigilWell'
     well.position.set(0, -0.09, SIGIL_Z)
     well.userData.noContactAO = true
@@ -2641,7 +2837,7 @@ class PermanentReserveCoreArena extends ArenaBase {
     //     source recessed in a floor actually does.
     for (const [rr, mat] of [[3.15, 'A'], [3.68, 'B']]) {
       const lip = new THREE.Mesh(filletRing(rr, 0.045, 6, 48),
-        flatMat(mat === 'A' ? STEEL_TRIM : 0x4a5460, { surface: 'metal', mapOpts: MAP_TRIM }))
+        flatMat(mat === 'A' ? STEEL_TRIM : 0x4a5460, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.45 }))
       lip.name = 'sigilRingLip'
       lip.rotation.x = -Math.PI / 2
       lip.position.set(0, -0.012, SIGIL_Z)
@@ -2691,7 +2887,7 @@ class PermanentReserveCoreArena extends ArenaBase {
     // that never moves independently. Baked here into two geometries (one per
     // material), reused by every plate, so a plate is two draw calls plus its
     // crack decal instead of seven.
-    const studM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM })
+    const studM = flatMat(STEEL_TRIM, { surface: 'metal', mapOpts: MAP_TRIM, metalness: 0.55 })
     const stripeM = flatMat(HAZARD, { surface: 'metal-painted', mapOpts: MAP_PAINT })
     const tmpl = new THREE.Group()
     tmpl.add(new THREE.Mesh(chamferBox(1.9, 0.22, 1.3, 0.045), studM))
@@ -2716,8 +2912,10 @@ class PermanentReserveCoreArena extends ArenaBase {
       // p.mat.opacity as the plate falls. flatMat's mutability heuristic sees
       // `transparent: true` and hands back a PRIVATE material — see the
       // ArenaBase flatMat header, point 1. Do NOT make this shared.
+      // ROUND 14: metalness 1.0 -> 0.40, matching the floor plates these are the
+      // outer ring of (plateM, _buildFloorAndSigil). Measured at 4 counts.
       const mat = flatMat(0x3b4450, {
-        surface: 'metal', mapOpts: MAP_PLATE, transparent: true,
+        surface: 'metal', mapOpts: MAP_PLATE, transparent: true, metalness: 0.40,
       })
       const mesh = new THREE.Mesh(plateParts[0].geometry, mat)
       mesh.name = 'edgePlate'
@@ -2791,7 +2989,7 @@ class PermanentReserveCoreArena extends ArenaBase {
       lamp.position.set(sx * 8.4, 8.6, -13.0)
       this.group.add(lamp)
       const housing = new THREE.Mesh(frustum(0.22, 0.34, 0.4, 10, 0.03),
-        flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST_SM }))
+        flatMat(STEEL_DARK, { surface: 'metal-rough', mapOpts: MAP_RUST_SM, metalness: 0.25 }))
       housing.name = 'vaultLamp'
       housing.rotation.x = Math.PI / 2
       housing.position.set(sx * 8.4, 8.6, -13.35)
@@ -2827,8 +3025,8 @@ class PermanentReserveCoreArena extends ArenaBase {
 
   _buildOrbits() {
     const rng = this._rng
-    const gold = flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD })
-    const goldDark = flatMat(GOLD_DARK, { surface: 'gold', mapOpts: MAP_GOLD })
+    const gold = flatMat(GOLD, { surface: 'gold', mapOpts: MAP_GOLD, metalness: 0.55 })
+    const goldDark = flatMat(GOLD_DARK, { surface: 'gold', mapOpts: MAP_GOLD, metalness: 0.55 })
 
     // ring A: gold bars, low and wide, clockwise
     // ring B: coin stacks, higher and tighter, counter-clockwise
@@ -3938,7 +4136,15 @@ class PermanentReserveCoreArena extends ArenaBase {
       (1.44 + pulse * 0.72 + chargeK * 1.35) * SIGIL_LEVEL)
     // Hemi carries a little of the throb so the whole room breathes, but only
     // a little — the reserve-core preset's 0.95 is the ambient wrap, not a key.
-    if (this._rig?.hemi) this._rig.hemi.intensity = 0.9 + pulse * 0.16 * amp
+    //
+    // ROUND 14 — THIS LINE IS WHY EVERY PREVIOUS ATTEMPT TO RAISE THE HEMI IN
+    // THIS ARENA DID NOTHING. It runs every frame and it does not read the
+    // rig's base value, it WRITES a literal. Whatever _buildSkyAndLights sets
+    // the hemisphere to is gone on frame 1, silently, and the hemisphere is the
+    // only term a downward-facing facet in this room ever sees. Base 0.90 ->
+    // 1.90 and the throb scaled with it so the breathing is the same fraction
+    // of the new level; see the rig note in _buildSkyAndLights for why 1.90.
+    if (this._rig?.hemi) this._rig.hemi.intensity = 1.90 + pulse * 0.34 * amp
     // ROUND 11: 0.48 + pulse*0.24 -> 0.43 + pulse*0.22. Opacity is the second
     // multiplier on the blend, so this is the other half of the 0.9x level trim.
     // Clamped at 1: opacity is a blend weight, and a level > 1 must not push it

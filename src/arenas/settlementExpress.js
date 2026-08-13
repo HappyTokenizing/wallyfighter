@@ -296,11 +296,38 @@ function contactDisc(radius = 0.7) {
 // A crevice strip: a thin, dark, RECESSED box that sits in the seam where two
 // slabs meet. Coplanar slabs give GTAO nothing to bite on; this gives it a real
 // concave corner AND paints the darkening in for the tiers with no AO at all.
-function creviceStrip(len, thick, axis = 'x', color = 0x14100c) {
+//
+// ROUND 14 — MEASURED, AND THESE WERE THE HOLES. A headless shading audit
+// (arena's own rig + the mood's IBL probe, run through a CPU mirror of the
+// grade) puts every crevice in this file at 5-8 FINAL COUNTS in BOTH arena
+// states — daylight 6, tunnel 5-8 — against a below-8 ceiling of 9 % for the
+// mood. Five of them span the full 21.6 m car at z = +/-3.0 and +/-3.2, i.e.
+// two continuous black lines the whole width of the frame along both long
+// edges of the fight deck, which is exactly the bottom-third band the critic
+// measured at 40.05 % below L=8.
+//
+// THE DEFECT IS THE ALBEDO, NOT THE IDEA. 0x14100c is linear 0.0097 and the
+// eave variant 0x0d0b09 is 0.0031 — a third of the deck's darkest texel. A
+// crevice reads as a crevice because it is RECESSED and because GTAO and the
+// baked AO bite on the real concave corner this geometry provides; the near-
+// black paint on top of that is doing nothing the shape was not already doing,
+// and it is the difference between "a seam" and "a hole with no information
+// in it". Lifted to linear 0.024 (default) / 0.017 (eaves): still the darkest
+// authored surfaces on the car, still a clear step under the 0x685a4c fascia
+// (0.108) and the 0.169 deck, and now carrying information.
+//
+// The same multiple-scattering floor the deck and the fascia already run
+// (roofTop/roofSide in _buildOurCar): a real seam between two lit slabs is lit
+// by light that bounced off both of them, and there is no term for that here.
+// 0.024 albedo x 0.5 emissive = 0.012 linear against a 1.24 bloom threshold.
+function creviceStrip(len, thick, axis = 'x', color = 0x2e2720) {
   const g = axis === 'x'
     ? new GEO.BoxGeometry(len, thick, thick)
     : new GEO.BoxGeometry(thick, thick, len)
-  const m = new THREE.Mesh(g, flatMat(color, { surface: 'concrete', shared: true, roughness: 1.15 }))
+  const m = new THREE.Mesh(g, flatMat(color, {
+    surface: 'concrete', shared: true, roughness: 1.15,
+    emissive: 0x120f0b, emissiveIntensity: 0.5,
+  }))
   m.name = 'crevice'
   return m
 }
@@ -715,8 +742,15 @@ function wheelGeometry(r, thick) {
 }
 
 function makeWheel(r = 0.5, thick = 0.12) {
+  // ROUND 14 — metalness 0.85 -> 0.22. Same defect as the crown beams and the
+  // deck: this arena's IBL probe is the near-black 'subway-tunnel' env, so a
+  // near-metal surface has essentially no light source and the wheels measured
+  // 4-5 final counts in BOTH arena states. A worn cast-iron tyre under a
+  // century of brake dust is not a mirror; 0.22 leaves it plenty of specular
+  // for the rail sparks and the sodium to catch while handing the body of it
+  // back to the analytic rig.
   const wheel = new THREE.Mesh(wheelGeometry(r, thick), flatMat(0x2a2c31, {
-    surface: 'metal-rough', shared: true, roughness: 0.95,
+    surface: 'metal-rough', shared: true, roughness: 0.95, metalness: 0.22,
   }))
   wheel.name = 'wheel'
   return wheel
@@ -1071,7 +1105,8 @@ function makeDiningCart() {
     for (let i = -H; i < W + H; i += 16) { c.beginPath(); c.moveTo(i, 0); c.lineTo(i + H, H); c.stroke() }
   })
   const cloth = flatMat(0xd8d2c4, { surface: 'leather', map: clothTex, mutable: true, roughness: 1.25 })
-  const brass = flatMat(0xb98a26, { surface: 'gold', mutable: true, roughness: 2.6, envMapIntensity: 1.1 })
+  // metalness 0.45 for the same reason as the deck railings — see the note there.
+  const brass = flatMat(0xb98a26, { surface: 'gold', mutable: true, roughness: 2.6, envMapIntensity: 1.1, metalness: 0.45 })
   const top = new THREE.Mesh(rbox(1.15, 0.09, 0.68, 0.02), cloth)
   top.position.y = 0.92
   g.add(top)
@@ -2001,7 +2036,16 @@ class SettlementExpressArena extends ArenaBase {
     // crosswise ribs + edge boards — chunky roof furniture. The ribs are half
     // SUNK into the deck rather than parked on top of it, so every one of them
     // makes two real creases for the AO pass instead of a coplanar seam.
-    const ribMat = flatMat(0x3e352d, { surface: 'wood-rough', shared: true })
+    // ROUND 14 — MEASURED AT 6-8 COUNTS, IN BOTH STATES. Eight of these run the
+    // FULL 6.5 m depth of the fight deck, 2.4 m apart, dead centre of the bottom
+    // third, so they are eight black bars laid across the one surface the eye
+    // tracks. 0x3e352d is linear 0.0376 against the deck's 0.169 — a 4.5x step,
+    // which is not what a timber rib on a steel deck looks like in any light;
+    // it is what a rib looks like when its albedo was picked to read dark in a
+    // preview that had no grade on it. 0x584c3f is linear 0.0755: still half the
+    // deck's value, so the rib still reads as the darker, softer material and
+    // the half-sunk crease each one makes still carries the form.
+    const ribMat = flatMat(0x584c3f, { surface: 'wood-rough', shared: true })
     for (let x = -9.6; x <= 9.6; x += 2.4) {
       const rib = new THREE.Mesh(rbox(0.16, 0.09, 6.5, 0.022), ribMat)
       rib.name = 'rib'
@@ -2025,7 +2069,26 @@ class SettlementExpressArena extends ArenaBase {
     // a row of decorative props on the far rail, so the eye lands on the least
     // important element"). The brass is pulled down and desaturated so it reads
     // as warm satin trim rather than as the subject of the photograph.
-    const brass = flatMat(0x8f7440, { surface: 'gold', shared: true, roughness: 2.6, envMapIntensity: 0.85 })
+    //
+    // ROUND 14 — THE BRASS WAS THE DARKEST THING ON THE DECK, AT 4 COUNTS, AND
+    // THE REASON IS NOT IN THIS FILE. The `gold` preset is metalness 1.0, so a
+    // brass post has NO diffuse lobe at all: 100 % of its light is the PMREM
+    // probe. This arena's probe is `ARENA_MOODS['settlement-express']` =
+    // 'subway-tunnel', whose sky is 0x0e1114 and ground 0x0a0c0e — linear
+    // ~0.005. For the 57 % of the round the train is in a GOLDEN-HOUR DESERT,
+    // six posts and four bars standing on the fight deck are lit by a night
+    // tunnel and by nothing else, and they land on the black floor. envMap-
+    // Intensity 0.85 was making it 15 % worse.
+    //
+    // env.js is not this agent's file and the probe is correct for the arena's
+    // hero moment, so the fix is the same one the deck took in round 12: give
+    // the surface a diffuse lobe the analytic rig can actually reach. 0.45 is
+    // deliberately not 0 — brass keys off its specular and that survives — and
+    // envMapIntensity goes to 1.0 so the tunnel sodium still finds it.
+    const brass = flatMat(0x8f7440, {
+      surface: 'gold', shared: true, roughness: 2.6, envMapIntensity: 1.0,
+      metalness: 0.45,
+    })
     // ...and the light pool that takes its place in the read order. A very wide,
     // very soft warm gradient laid ON the deck at 12 % — no edge anywhere in it
     // (the sprite's alpha is zero well inside the quad), so it is a lift on the
@@ -2076,7 +2139,7 @@ class SettlementExpressArena extends ArenaBase {
     // the eaves shadow line where the roof overhangs the body — the single
     // most valuable centimetre of darkening on the whole car
     for (const ez of [-3.0, 3.0]) {
-      const eave = creviceStrip(21.6, 0.09, 'x', 0x0d0b09)
+      const eave = creviceStrip(21.6, 0.09, 'x', 0x28221b)
       eave.position.set(0, -0.36, ez)
       this._static.add(eave)
     }
@@ -2117,7 +2180,7 @@ class SettlementExpressArena extends ArenaBase {
     bagRoof.name = 'roof'
     bagRoof.position.y = -0.2
     baggage.add(bagRoof)
-    const bagEave = creviceStrip(9.8, 0.08, 'x', 0x0d0b09)
+    const bagEave = creviceStrip(9.8, 0.08, 'x', 0x28221b)
     bagEave.position.set(0, -0.36, 2.8)
     baggage.add(bagEave)
     for (const wx of [-3.4, 3.4]) {
@@ -2224,7 +2287,7 @@ class SettlementExpressArena extends ArenaBase {
     cupolaRoof.name = 'roof'
     cupolaRoof.position.set(-3.35, 0.98, 0)
     caboose.add(cupolaRoof)
-    const cupolaCr = creviceStrip(2.5, 0.06, 'x', 0x0d0b09)
+    const cupolaCr = creviceStrip(2.5, 0.06, 'x', 0x28221b)
     cupolaCr.position.set(-3.35, 0.88, 1.7)
     caboose.add(cupolaCr)
     // observation deck facing the action
@@ -2318,7 +2381,7 @@ class SettlementExpressArena extends ArenaBase {
     partyRoof.name = 'roof'
     partyRoof.position.set(0, -0.08, 0)
     party.add(partyRoof)
-    const partyEave = creviceStrip(20.4, 0.08, 'x', 0x0d0b09)
+    const partyEave = creviceStrip(20.4, 0.08, 'x', 0x28221b)
     partyEave.position.set(0, -0.26, 2.3)
     party.add(partyEave)
     const partyUnder = new THREE.Mesh(rbox(19.4, 0.5, 3.6, 0.05), dark)
@@ -2774,9 +2837,37 @@ class SettlementExpressArena extends ArenaBase {
     // but with a small emissive floor standing in for the sodium bouncing off
     // the vault, so the beams read as SILHOUETTED OBJECTS with form rather than
     // as a hole punched in the top of the frame.
+    //
+    // ROUND 14 — THIS IS STILL THE FRAME'S BLACK MASS, AND THE ALBEDO WAS NEVER
+    // THE LIMITER. A headless frame estimate (raycast grid from a gameplay
+    // camera, shaded off the arena's OWN rig plus the mood's IBL probe, through
+    // a CPU mirror of the grade) puts the tunnel frame at 9.19 % below luma 8
+    // with 92.8 % OF THAT MASS ON THIS ONE MATERIAL, and the top third at
+    // 21.93 % — which is the round-2 "canopy band eating the top quarter"
+    // verbatim, two albedo lifts later.
+    //
+    // The reason it survived two lifts is `surface: 'metal-rough'`, i.e.
+    // metalness 0.85. A metal has no diffuse lobe, so 85 % of this surface is
+    // lit by scene.environment ALONE — and this arena's environment is
+    // ARENA_MOODS['settlement-express'] = 'subway-tunnel', whose sky is
+    // 0x0e1114 and ground 0x0a0c0e (linear ~0.005). The crown structure was
+    // being lit by a probe two and a half stops below its own albedo. Lifting
+    // 0x191512 -> 0x40382e multiplied 0.15 of a light budget that was already
+    // nothing: 0.041 albedo x 0.15 = 0.0062 effective, and the 0.55 emissive
+    // floor adds 0.0034 linear, which ACES at exposure 1.10 lands on the black
+    // floor exactly. This is the identical defect the deck took in round 12 and
+    // the fascia in round 13; the crown was simply never checked.
+    //
+    // A grimy cast-concrete-and-painted-steel tunnel crown is a DIELECTRIC.
+    // metalness 0.85 -> 0.08 hands the beams back to the collapsed rig (the
+    // 0.561 ambient floor, the 0.26 hemi, the 3 travelling sodium points), and
+    // the multiple-scattering floor goes up with it because the crown is the
+    // surface those lamps bounce off first. Nothing else moves: the albedo, the
+    // roughness and the normal relief are exactly as round 2 left them, so the
+    // beams keep reading as the darkest mass in the tunnel — with form in them.
     const beamMat = flatMat(0x40382e, {
-      surface: 'metal-rough', shared: true, roughness: 1.1,
-      emissive: 0x1a1008, emissiveIntensity: 0.55,
+      surface: 'metal-rough', shared: true, roughness: 1.1, metalness: 0.08,
+      emissive: 0x241708, emissiveIntensity: 0.9,
     })
     // one cast-concrete map set, shared by the vault and the cess walkway
     const tunSurf = makeTunnelSurface(rng)

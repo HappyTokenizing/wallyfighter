@@ -2016,7 +2016,7 @@ function crowdPadGeometry(seg = 10, notch = 0.5) {
 // boxes — one entry per pad, at the pad's own crown height — so "is this
 // spectator standing on anything?" has one answer in the codebase and this
 // stand gives it in the same words as every other.
-function buildFrogCrowd(opts = {}) {
+export function buildFrogCrowd(opts = {}) { // exported for headless §27 checks
   const count = Math.max(1, Math.floor(opts.count ?? 30))
   const rng = opts.rng || makeRng(0xf706)
   const teamColors = resolveTeamColors(opts)
@@ -2190,6 +2190,18 @@ function buildFrogCrowd(opts = {}) {
     meshes[vari[idx]].setMatrixAt(slot[idx], _m)
   }
 
+  // v3.8 COMPOSE AT BUILD, NOT ON THE FIRST UPDATE (defect 3, item 2).
+  // FOUND BY THE NEW AUDIT, and it is the whole "broken instances" report:
+  // every frog and every pad in this stand was left on the IDENTITY MATRIX
+  // until the first update() tick — 60 unit-scale frogs stacked at the group
+  // origin, in the air over the middle of the swamp. Anything that renders
+  // before the first tick (the arena preview, a capture, the loading handoff
+  // frame, a paused first frame) drew exactly that. The penguins have composed
+  // at build since round 10 for this reason; the frogs never did.
+  for (let k = 0; k < used; k++) composeFrog(k, composePad(k), 1)
+  for (const m of meshes) m.instanceMatrix.needsUpdate = true
+  pads.instanceMatrix.needsUpdate = true
+
   // park unused slots far underwater
   _m.compose(_pos.set(0, -60, 0), _quat.identity(), _scl.set(0.001, 0.001, 0.001))
   for (let k = used; k < count; k++) pads.setMatrixAt(k, _m)
@@ -2243,9 +2255,15 @@ function buildFrogCrowd(opts = {}) {
         count: used,
         supports: padSupports(),
         tolerance: o.tolerance ?? 0.05,
-        // The pad bobs +/-0.045 and the frog rides it; a hop adds a little
-        // more. Anything past this is a frog that is not on a pad at all.
-        lift: 0.14,
+        // THE TOLERANCE IS THE HOP, and the hop is bounded exactly: the pad
+        // bobs +/-0.045, and composeFrog lifts a frog by
+        // |sin| * amp(<=1.2) * hype * 0.3, i.e. at most 0.36 * hype, with
+        // hype = 1 + hypeExtra. So the bound follows the hype the same way the
+        // animation does — a frog at full cheer legitimately leaps a metre off
+        // its pad and that is not a placement bug, while at rest anything more
+        // than 0.42 m up is a frog on nothing. The X/Z containment test is the
+        // strict half: every frog must be over ITS OWN pad, always.
+        lift: 0.05 + 0.37 * (1 + hypeExtra),
         sink: 0.12,
         zPad: 0.02,
         skip: (k, name) => {

@@ -1203,7 +1203,27 @@ const PROX_BODY = /* glsl */`
 // limbs and a sole IS its own silhouette already.
 // ---------------------------------------------------------------------------
 const SIL_MAX = 10
-const SIL_FLOOR = 0.42
+// Density multiplier OUTSIDE the body's own outline. Tuned on the headless
+// grid dump: at 0.42 the plate still contrast-stretches to an oval, because the
+// silhouette's peak sits in the middle of the disc where the radial ramp peaks
+// too, so the two are correlated and the modulation is invisible. 0.28 is the
+// point where the outline becomes the dominant structure in the stretch. This
+// is a trade the critic explicitly asked for — "Scarlet/Violet beats us on
+// shadow READABILITY while losing to us on shadow depth" — and it costs
+// nothing under the FEET, which carry the highest coverage and where the
+// grounding measurement (0.319 of adjacent floor luma) is taken.
+const SIL_FLOOR = 0.28
+// Penumbra spread and distance falloff, per metre of height above the plate.
+// 0.55/0.75 was the first cut and it failed the acceptance for a reason worth
+// keeping: a head 1.5 m up produced a blob of radius 1.0 m at weight 0.32, i.e.
+// a wash covering the entire 0.82 m disc, and every other blob stacked on top
+// of it. Physically that IS what a wide ambient cone integrates to; it is also
+// exactly the featureless oval being complained about. 0.22/1.15 keeps the
+// feet and shins sharp (foot: radius 0.13 m at weight 0.93) and lets the torso
+// and head contribute as faint broad mass (torso 0.46 m at 0.30, head 0.50 m
+// at 0.18), which is a readable body rather than a stack of discs.
+const SIL_SPREAD = 0.22
+const SIL_FALLOFF = 1.15
 
 const SIL_VERT_PARS = /* glsl */`
 varying vec2 vWcsSil;
@@ -1228,7 +1248,7 @@ const SIL_FRAG_BODY = /* glsl */`
     for ( int i = 0; i < ${SIL_MAX}; i ++ ) {
       vec4 sb = uSil[ i ];
       float sd = length( vWcsSil - sb.xy );
-      wcsCov = max( wcsCov, sb.w * ( 1.0 - smoothstep( sb.z * 0.30, sb.z, sd ) ) );
+      wcsCov = max( wcsCov, sb.w * ( 1.0 - smoothstep( sb.z * 0.45, sb.z, sd ) ) );
     }
     wcsCov = clamp( wcsCov * uSilParams.y, 0.0, 1.0 );
     diffuseColor.a *= mix( uSilParams.x, 1.0, wcsCov );
@@ -4333,8 +4353,23 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
   // Cost: ~10 proxies per fighter, rebuilt only on the slow static-recheck
   // cadence; per frame it is 20 mat4 * vec3 and 100 squared distances.
   // ---------------------------------------------------------------------------
+  // WHY THE BOUNDING BOX AND NOT THE BOUNDING SPHERE. A sphere around a limb is
+  // a sphere around a BOX, and it is enormous: the roster's forearms are
+  // ~0.16 x 0.50 x 0.16, whose bounding sphere has radius 0.28 — three and a
+  // half times the limb's actual half-thickness. Measured on the headless rig,
+  // two dummies at the engine's 0.85 m hard floor reported a SURFACE GAP of
+  // -0.31 m (deep interpenetration) when their arms were physically 1 cm apart.
+  // Sphere radii would have made the contact term fire on almost every frame,
+  // which is the same defect as never firing wearing the opposite hat.
+  //
+  // So each proxy carries two radii off the geometry's BOX half-extents:
+  //   rc (contact)    = the SECOND-SMALLEST half extent — a limb's thickness,
+  //                     which is what a surface gap between two limbs is about
+  //   r  (silhouette) = the MEAN half extent — a slightly generous blob, which
+  //                     is what an ambient footprint wants
   const LIMB_MAX = 10
   const LIMB_MIN_R = 0.035
+  const _lpBox = new THREE.Box3()
   // Cap for the CONTACT test only. A torso's bounding sphere overestimates the
   // body badly (it is a sphere around a box); letting a 0.45 m proxy claim
   // contact would fire the term on two fighters merely standing at guard.
@@ -4351,18 +4386,28 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         if (n.userData?.contactShadow || n.userData?.noShadow || n.userData?.noLimbProxy) return
         const g = n.geometry
         if (!g) return
-        if (!g.boundingSphere) { try { g.computeBoundingSphere() } catch { return } }
-        const bs = g.boundingSphere
-        if (!bs || !Number.isFinite(bs.radius) || bs.radius <= 0) return
+        if (!g.boundingBox) { try { g.computeBoundingBox() } catch { return } }
+        const bb = g.boundingBox
+        if (!bb || bb.isEmpty()) return
         _lpS.setFromMatrixScale(n.matrixWorld)
-        const r = bs.radius * Math.max(_lpS.x, _lpS.y, _lpS.z)
-        if (!(r >= LIMB_MIN_R)) return
-        _lpV.copy(bs.center).applyMatrix4(n.matrixWorld)
+        const sc = Math.max(_lpS.x, _lpS.y, _lpS.z)
+        // Half extents in world units, ascending.
+        const hx = (bb.max.x - bb.min.x) * 0.5 * sc
+        const hy = (bb.max.y - bb.min.y) * 0.5 * sc
+        const hz = (bb.max.z - bb.min.z) * 0.5 * sc
+        const h = hx < hy ? (hy < hz ? [hx, hy, hz] : (hx < hz ? [hx, hz, hy] : [hz, hx, hy]))
+          : (hx < hz ? [hy, hx, hz] : (hy < hz ? [hy, hz, hx] : [hz, hy, hx]))
+        const rMean = (h[0] + h[1] + h[2]) / 3
+        if (!(rMean >= LIMB_MIN_R)) return
+        _lpBox.copy(bb)
+        _lpBox.getCenter(_lpV)
+        const local = _lpV.clone()
+        _lpV.applyMatrix4(n.matrixWorld)
         cand.push({
           node: n,
-          local: bs.center.clone(),
-          r: Math.min(0.45, r),
-          rc: Math.min(LIMB_CONTACT_MAX_R, r),
+          local,
+          r: Math.min(0.45, rMean),
+          rc: Math.min(LIMB_CONTACT_MAX_R, Math.max(0.02, h[1])),
           wx: _lpV.x, wy: _lpV.y, wz: _lpV.z,
           live: true,
         })
@@ -4444,7 +4489,7 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         if (n >= SIL_MAX) break
         if (!p.live) continue
         const hAbove = Math.max(0, p.wy - deckY)
-        const w = Math.exp(-hAbove * 0.75)
+        const w = Math.exp(-hAbove * SIL_FALLOFF)
         // Mass this far up contributes almost nothing and only smears the
         // outline it is supposed to sharpen.
         if (w < 0.06) continue
@@ -4457,7 +4502,7 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
         arr[n++].set(
           (dwx * cs - dwz * sn) * isx,
           (dwx * sn + dwz * cs) * isz,
-          Math.max(0.04, (p.r + hAbove * 0.55) * isx),
+          Math.max(0.04, (p.r + hAbove * SIL_SPREAD) * isx),
           w,
         )
       }
@@ -4483,7 +4528,6 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
   function seatLimbProxies(c) {
     if (c.prop || c.static) return 0
     c.limbs = buildLimbProxies(c.target)
-    c.limbDead = 0
     return c.limbs.length
   }
 
@@ -4525,15 +4569,28 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
   const CO_FAR = opts.contactOccludeFar ?? 0.16        // m surface gap — nothing at/above
   // Derived per contact from the two proxies that made it, clamped into this
   // band: a glove-to-jaw contact is a small crevice, a body check is a wide one.
-  const CO_RADIUS_MIN = opts.contactOccludeRadiusMin ?? 0.15  // m
-  const CO_RADIUS_MAX = opts.contactOccludeRadius ?? 0.40     // m
-  // 0.40 -> 0.55. The acceptance is "the darkest contact pixel at most 60 % of
+  const CO_RADIUS_MIN = opts.contactOccludeRadiusMin ?? 0.17  // m
+  const CO_RADIUS_MAX = opts.contactOccludeRadius ?? 0.42     // m
+  // 0.40 -> 0.62. The acceptance is "the darkest contact pixel at most 60 % of
   // the adjacent body luma", i.e. attenuation >= 0.40 at the seam. 0.40 was the
   // authored PEAK, reachable only at the exact zone centre with a perfectly
   // facing normal, so it could not clear the bar even if the ramp had fired.
-  // 0.55 leaves headroom for the facing term and still sits under the shader's
-  // 0.9 clamp, so a seam can never go to black.
-  const CO_STRENGTH = opts.contactOccludeStrength ?? 0.55
+  //
+  // The number that matters is not the peak, it is the peak seen through the
+  // ramp at the DARKEST VISIBLE PIXEL — which is a few centimetres off the zone
+  // centre, because the centre sits between (and usually inside) the two
+  // bodies. Worked through for the landed heavy the headless rig reproduces
+  // (fist half-thickness 0.09, head 0.17 -> zone radius 0.247, gap -0.03 ->
+  // ramp 0.95, strength 0.589):
+  //     5 cm off centre   pxW^2 0.908  ->  0.535 attenuation  -> ratio 0.465
+  //    10 cm off centre   pxW^2 0.535  ->  0.315 attenuation  -> ratio 0.685
+  //    25 cm off centre                ->  ~0                 -> ratio ~1.0
+  // So the seam core lands at 0.47 of the adjacent body luma against a 0.60
+  // bar, and recovers to unshaded within a quarter metre — a gradient, not a
+  // sticker. At 0.55 the same pixel measured 0.585, which passes on paper and
+  // fails the moment the facing term takes anything off it.
+  // Still well under the shader's 0.9 clamp, so a seam can never go to black.
+  const CO_STRENGTH = opts.contactOccludeStrength ?? 0.62
   const CO_FACING = opts.contactOccludeFacing ?? 0.78
   const CO_PLATEAU = opts.contactOccludePlateau ?? 0.08
   // How far apart two seams must be before they count as separate contacts.
@@ -4571,7 +4628,11 @@ export function makeCinematicRig(scene, quality = {}, opts = {}) {
     out.x = pa.wx + dx * f
     out.y = pa.wy + dy * f
     out.z = pa.wz + dz * f
-    out.r = THREE.MathUtils.clamp((pa.rc + pb.rc) * 0.72, CO_RADIUS_MIN, CO_RADIUS_MAX)
+    // 0.95, not 0.72: the zone has to be wide enough that the pixels a camera
+    // can actually see — a few centimetres OFF the centre, since the centre is
+    // usually inside one of the two bodies — still sit high on the ramp. See
+    // the worked numbers over CO_STRENGTH.
+    out.r = THREE.MathUtils.clamp((pa.rc + pb.rc) * 0.95, CO_RADIUS_MIN, CO_RADIUS_MAX)
   }
 
   function updateContactOcclusion() {
