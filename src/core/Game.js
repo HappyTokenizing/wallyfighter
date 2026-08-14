@@ -8,7 +8,7 @@ import { ScreenManager } from './ScreenManager.js'
 import { registerScreens } from '../ui/registerScreens.js'
 import {
   RenderPipeline, applyShadowSettings, setTextureQuality, setMaterialQuality,
-  resetRenderFallback, renderStats,
+  resetRenderFallback, renderStats, textureQueueStats,
 } from '../render/index.js'
 
 export class Game {
@@ -115,6 +115,10 @@ export class Game {
   _installFrameProfiler() {
     const P = { t0: performance.now(), f: [], marks: [], published: false }
     window.__prof = P
+    // The surface generator is the one thing that blocks the main thread from
+    // OUTSIDE this loop (its own setTimeout/rAF chain), so a frame profiler that
+    // cannot see it attributes multi-second freezes to "unaccounted" and stops.
+    P.tex = () => { try { return textureQueueStats() } catch { return null } }
     let last = P.t0
     const seg = (from, to) => {
       const s = P.f.slice(from, to)

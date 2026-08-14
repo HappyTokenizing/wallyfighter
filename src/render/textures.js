@@ -2324,17 +2324,33 @@ function stepEntry(entry, deadline, stopAt) {
 // pass, running EVERY pending surface's preview first gets the whole scene to
 // "real relief, slightly soft" in roughly the time one full surface used to
 // take, and the full-resolution passes then land one at a time behind it.
+// A drain costs `budget + whatever step it last decided to start`, because the
+// deadline is checked BETWEEN steps and a step cannot be preempted. That makes
+// the longest SINGLE step the floor on how smooth this can ever be, no matter
+// what budget is handed in — so it is measured, not assumed. Exposed through
+// textureQueueStats() as `maxStepMs` / `maxStepKind`.
+let _maxStepMs = 0
+let _maxStepKind = null
+let _overrunMs = 0        // total time spent past a drain's own deadline
+
 function drainQueue(budgetMs) {
-  const deadline = now() + budgetMs
+  const start = now()
+  const deadline = start + budgetMs
   for (let i = 0; i < _jobQueue.length && now() < deadline; i++) {
     const e = _jobQueue[i]
-    if (e.job && e.job.i < e.job.preview) stepEntry(e, deadline, e.job.preview)
+    if (e.job && e.job.i < e.job.preview) {
+      const t0 = now(); stepEntry(e, deadline, e.job.preview); const d = now() - t0
+      if (d > _maxStepMs) { _maxStepMs = d; _maxStepKind = (e.kind || e.job?.kind || '?') + ':preview' }
+    }
   }
   while (_jobQueue.length && now() < deadline) {
     const entry = _jobQueue[0]
-    stepEntry(entry, deadline)
+    const t0 = now(); stepEntry(entry, deadline); const d = now() - t0
+    if (d > _maxStepMs) { _maxStepMs = d; _maxStepKind = entry.kind || entry.job?.kind || '?' }
     if (entry.ready) _jobQueue.shift()
   }
+  const over = now() - deadline
+  if (over > 0) _overrunMs += over
   return _jobQueue.length
 }
 
@@ -2377,7 +2393,20 @@ function onTick() {
     // frame far more than a fight can. Shallow queue (one prop spawned
     // mid-match) stays inside a 60 fps budget.
     const depth = Math.min(3, Math.floor(_jobQueue.length / 4))
-    drainQueue(gap > 120 ? IDLE_BUDGET_MS : TICK_BUDGET_MS * (1 + depth))
+    // `gap > 120` USED TO SELECT THE IDLE BUDGET ON ITS OWN, and it is the same
+    // mistake the STARVED_MS branch above was fixed for: a long tick gap is
+    // measured in wall time and does not know WHY it was long. On a visible page
+    // mid-intro a long gap means the page is already struggling — and the old
+    // rule answered that by handing the generator 12x the budget, which made the
+    // next frame longer still. Measured on the boot path before this guard:
+    // 152 frames over 50 ms, 29 over 100 ms, ELEVEN over one second (worst
+    // 3582 ms), together 35.3 s of a 67 s boot, with update at 0.2 ms and render
+    // submit at 1.6 ms — i.e. essentially all of it was this drain, blocking the
+    // main thread outside the game's own rAF tick.
+    // A page that is presenting frames takes the frame budget, however slow the
+    // last frame looked. isPresenting() is the same load-bearing guard as above.
+    const idle = gap > 120 && !isPresenting()
+    drainQueue(idle ? IDLE_BUDGET_MS : TICK_BUDGET_MS * (1 + depth))
   }
   scheduleTick()
 }
@@ -2413,7 +2442,11 @@ export function flushTextureQueue(maxMs = Infinity) {
 export function textureQueueStats() {
   let steps = 0
   for (const e of _jobQueue) steps += e.job ? e.job.steps.length - e.job.i : 0
-  return { pending: _jobQueue.length, steps, async: ASYNC }
+  return {
+    pending: _jobQueue.length, steps, async: ASYNC,
+    maxStepMs: +_maxStepMs.toFixed(1), maxStepKind: _maxStepKind,
+    overrunMs: +_overrunMs.toFixed(0),
+  }
 }
 
 // `squeeze` is the stage-1 budget degrade (see surfaceMaps). It is deliberately

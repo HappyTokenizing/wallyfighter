@@ -1,5 +1,58 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 22 — boot freezes: a long frame was being read as "the page is idle"
+
+    wall clock to title       67.2 s  ->  43.7 / 43.3 s   (two runs)
+    worst single frame        3582 ms ->  350 ms
+    frames over 250 ms        15      ->  1
+    frames over 100 ms        29      ->  18-20
+    total time in >50 ms      35.3 s  ->  11.4 s
+    console errors            0       ->  0     (there never were any)
+
+### The bug
+
+`textures.js onTick()` chose its drain budget with
+`drainQueue(gap > 120 ? IDLE_BUDGET_MS : TICK_BUDGET_MS * (1 + depth))` — 60 ms
+versus 5-20 ms. A tick gap over 120 ms was taken as evidence the page was idle. On a
+VISIBLE page mid-intro it means the opposite: the page is already struggling. So the
+generator answered slowness by taking 12x longer, which lengthened the next frame, which
+re-qualified for the idle budget. Positive feedback, and it compounded into eleven frames
+over one second each.
+
+This is the SAME mistake the STARVED_MS branch six lines above had already been fixed for.
+That fix's own comment says it: "the tick gap is measured in wall time and does not know why
+it was long... a page that is presenting frames must always take the budgeted path below,
+however slow the last frame was." The rule was applied to one branch and not to its
+neighbour. Fix: `const idle = gap > 120 && !isPresenting()` — the same guard.
+
+### Why it read as "errors in the intro"
+
+There are none, and there never were: every boot profile captured console errors, warnings
+and uncaught exceptions and found ZERO both before and after. A 3.5 s frozen frame during a
+cinematic looks like a crash, which is what the report was describing.
+
+### It was NOT the phase profiler's fault for missing it
+
+The frame profiler showed `u=0.2, r=1.6, unaccounted=3580`. That is correct and it is the
+clue: the generator blocks the main thread from OUTSIDE the game's rAF tick (it drives itself
+on a `setTimeout(0)` chain as well as rAF), so no split of the game loop can ever contain it.
+`__prof.tex()` now surfaces `textureQueueStats()` for exactly this reason.
+
+### Step granularity is NOT the problem — measured, not assumed
+
+A drain costs `budget + whatever step it last started`, so a single huge step would put a
+floor under everything. `drainQueue` now tracks `maxStepMs` / `maxStepKind` / `overrunMs`:
+**maxStepMs 43-47.5 ms (`concrete`)**. Nothing is multi-second, so the budget was the right
+lever and splitting steps is not needed. `overrunMs` ~6.8 s over a boot is the accumulated
+past-deadline time, and it is the honest ceiling on further gains from budget alone.
+
+### Still open
+- 18-20 frames over 100 ms remain, worst 350 ms, still `unaccounted`. Cheaper than before but
+  not gone; the next lever is step granularity (`concrete` at ~45 ms is the biggest step).
+- 43 s to the title is dominated by the INTRO CINEMATIC's own runtime, not loading — the
+  loading screen hands off at ~5.5 s (was ~8 s). Shortening that is an art-direction call,
+  not a perf one.
+
 ## ROUND 20 — FIXED. One point light was recompiling the entire arena mid-fight.
 
     programs compiled after the bell:   before  59 / 58 / 55 / 57
