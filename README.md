@@ -386,7 +386,8 @@ never touches combat, combat never touches the DOM).
 ## License
 
 The project's own source code — all of it, including every procedural asset
-generator — is released under the **MIT License** (see `package.json`).
+generator — is released under the **MIT License** (full text in
+[`LICENSE`](LICENSE)).
 Dependencies: [three](https://github.com/mrdoob/three.js) (MIT),
 [cannon-es](https://github.com/pmndrs/cannon-es) (MIT), and
 [Vite](https://vitejs.dev) (MIT, dev-only). No third-party art, audio, or font
