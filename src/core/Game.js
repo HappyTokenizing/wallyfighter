@@ -170,6 +170,35 @@ export class Game {
     // one of them is the culprit; snapshot the cheap ones EVERY frame and diff
     // them across the jump rather than guessing which.
     P.globalFlips = []
+    // LIGHT-COUNT WATCHDOG. Round 20: one PointLight entering the scene on an
+    // item drop recompiled 44 materials in a single 641 ms frame, because three
+    // folds the per-type light counts into the program cache key. The rule that
+    // came out of it is that lights must be POOLED — allocated at build time and
+    // driven with intensity — and this is how a violation gets caught, instead
+    // of being rediscovered by another 600 ms stall.
+    //
+    // Sampled every 30 frames, not every frame: a traverse is far too expensive
+    // per frame, and a light-count change persists, so half a second is plenty
+    // to catch one.
+    P.lightChanges = []
+    let lightTick = 0
+    let lastCensus = ''
+    const census = () => {
+      let d = 0, p = 0, s = 0, h = 0, a = 0, r = 0, sh = 0
+      const sc = this.screens?.current?.scene
+      if (!sc) return lastCensus
+      try {
+        sc.traverse((o) => {
+          if (o.isDirectionalLight) { d++; if (o.castShadow) sh++ }
+          else if (o.isPointLight) { p++; if (o.castShadow) sh++ }
+          else if (o.isSpotLight) { s++; if (o.castShadow) sh++ }
+          else if (o.isHemisphereLight) h++
+          else if (o.isAmbientLight) a++
+          else if (o.isRectAreaLight) r++
+        })
+      } catch { return lastCensus }
+      return `${d}d/${p}p/${s}s/${h}h/${a}a/${r}r/${sh}sh`
+    }
     const cheapGlobals = () => {
       const r = this.renderer, sc = this.screens?.current?.scene, p = this.pipeline
       if (!r) return ''
@@ -222,6 +251,22 @@ export class Game {
         }
       }
       lastGlobals = cheapGlobals()
+      if ((++lightTick % 30) === 0) {
+        const c = census()
+        if (c && c !== lastCensus) {
+          // The first census has nothing to compare against — that is the build,
+          // not a violation.
+          if (lastCensus && P.lightChanges.length < 60) {
+            P.lightChanges.push({
+              t: +(performance.now() - P.t0).toFixed(0),
+              from: lastCensus, to: c,
+              screen: this.screens?.name || null,
+              phase: this.screens?.current?.phase || null,
+            })
+          }
+          lastCensus = c
+        }
+      }
       lastProgs = progs; lastTex = tex
       if (P.ph.length >= 4000) P.ph.shift()
       // Store the gap ALONGSIDE the split, from the same frame of the same loop.

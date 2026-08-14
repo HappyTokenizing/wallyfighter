@@ -54,6 +54,24 @@ allocate at build time, drive with intensity. This applies to every VFX light in
 (impact flashes, muzzle glows, finisher lights) — `?prof=1` + `__prof.globalFlips` now reports
 a light census on every bulk recompile, so a regression is one run away from being visible.
 
+### Audit: are there OTHER unpooled lights? Measured, not grepped. Answer: no.
+
+`?prof=1` now runs a light-count watchdog (`__prof.lightChanges`) — a full census every 30
+frames, recording any change with timestamp, screen and round phase. Over a 150 s fight:
+
+    LIGHT-COUNT CHANGES: 0
+    census constant at 4d/15p/1s/2sh from build onward
+    every bulk recompile at t <= 2710 ms, i.e. build and intro, none after the bell
+
+It also shows the fix behaving exactly as intended: the count steps 14p -> 15p during the
+DEFERRED BUILD (ItemSystem's constructor), and the 46-program compile at t=2588 is the warm
+paying for that count once, before the bell.
+
+Caveat on coverage: one AI-vs-AI match on one arena. Finishers, KO cinematics and the other
+nine arenas were not all exercised, and any of them could still add a light at runtime. The
+watchdog is cheap and permanent, so the honest statement is "nothing violated it in this
+scenario", not "no violations exist". Re-run it when touching VFX.
+
 ### STILL OPEN — P1: a ~520 ms stall with dProgs 0
 
 Same run, t=37069: `gap 523.4, dProgs 0`. Not a shader compile, so it is GC or the driver.
