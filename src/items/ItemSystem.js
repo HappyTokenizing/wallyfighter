@@ -419,8 +419,14 @@ export class ItemSystem {
     this._rosterCursor = 0                // §25 rotation — persists across rounds
     this._heart = null                    // max 1 live heart
     this._heartCd = 0
+    this._heartLight = null
     this._disposed = false
     this._offs = []
+    // Created HERE, not on the first heart drop. ItemSystem is built as a
+    // deferred step before MatchScreen queues its chunked warm, so putting the
+    // light in the scene now means the warm compiles against the final light
+    // count and no later frame has to. See _ensureHeartLight().
+    this._ensureHeartLight()
 
     const on = (name, fn) => { const off = this.events?.on?.(name, fn); if (off) this._offs.push(off) }
     on('round:end', () => this._flushEffects())
@@ -700,6 +706,8 @@ export class ItemSystem {
     const y = Math.max(this.floorY + 0.5, Math.min(this.floorY + 3, p.y ?? this.floorY + 0.5))
     mesh.position.set(x, y, z)
     this.scene?.add(mesh)
+    const hl = this._ensureHeartLight()
+    if (hl) { hl.position.set(x, y + 0.2, z); hl.intensity = 1.1 }
     this._heart = {
       mesh, x, y, z,
       vx: Math.cos(dir) * speed,
@@ -708,6 +716,40 @@ export class ItemSystem {
       state: 'skitter', age: 0,
     }
     try { this.game?.audio?.sfx?.('boing', { vol: 0.4, pitch: 1.4 }) } catch { /* headless */ }
+  }
+
+  // ---------------------------------------------------------------------------
+  // THE HEART'S LIGHT IS PERSISTENT, AND THAT IS THE WHOLE POINT.
+  //
+  // three folds the per-type LIGHT COUNTS into the program cache key, so adding
+  // one PointLight to the scene gives every lit material a new key and
+  // recompiles all of them. This light used to be a child of the heart group,
+  // added on spawn and removed on pickup — which meant the first heart of a
+  // match took point lights from 14 to 15 and recompiled the entire arena plus
+  // both fighters in a single frame.
+  //
+  // MEASURED (?prof=1, permanent-reserve-core, real Chrome): 44 programs rebuilt
+  // in one frame, `unaccounted` 598 ms, worst frame 641-791 ms across runs, with
+  // the material count and mapped-texture count both FLAT across the jump — the
+  // proof that nothing new was created and everything was merely re-keyed. It
+  // fired at wildly different times run to run (t=19.7 s to t=40.2 s) because it
+  // waits on a random item drop, which is why it looked like a texture-streaming
+  // problem for two rounds. It is not; the light census is what caught it.
+  //
+  // So the light lives in the scene for the life of the ItemSystem at intensity
+  // 0, and spawn/pickup only move it and change its intensity. The count never
+  // changes, the build-time warm compiles the right key once (ItemSystem is
+  // built before _queueWarmChunks() runs), and no frame ever pays for it again.
+  // ---------------------------------------------------------------------------
+  _ensureHeartLight() {
+    if (this._heartLight || !this.scene) return this._heartLight || null
+    const l = new THREE.PointLight(0xff4466, 0, 5)
+    l.visible = true          // an invisible light is NOT counted by three, which
+                              // would reintroduce exactly the flip this avoids
+    l.position.set(0, -999, 0)
+    this._heartLight = l
+    this.scene.add(l)
+    return l
   }
 
   _buildHeartMesh() {
@@ -720,10 +762,9 @@ export class ItemSystem {
     const tip = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.42, 6), mat)
     tip.rotation.z = Math.PI
     tip.position.set(0, -0.13, 0)
-    const light = new THREE.PointLight(0xff4466, 1.1, 5)
-    light.position.set(0, 0.2, 0)
-    g.add(lobeL, lobeR, tip, light)
-    g.userData.light = light
+    g.add(lobeL, lobeR, tip)
+    // Deliberately NOT g.add(light) — see _ensureHeartLight().
+    g.userData.light = null
     return g
   }
 
@@ -756,15 +797,21 @@ export class ItemSystem {
       }
       if (h.age > 240) { h.state = 'idle'; h.y = rest } // safety: settle by 4 s
       h.mesh.position.set(h.x, h.y, h.z)
+      // The light is no longer a child of the mesh, so it is moved explicitly.
+      if (this._heartLight) this._heartLight.position.set(h.x, h.y + 0.2, h.z)
       h.mesh.rotation.y += dt * 9
     } else {
       // sitting: pulse (scale + light throb), slow spin, soft bob
       const throb = 1 + Math.sin(h.age * 0.12) * 0.12
       h.mesh.scale.setScalar(throb)
       h.mesh.rotation.y += dt * 1.8
-      h.mesh.position.set(h.x, this.floorY + HEART_REST_Y + Math.sin(h.age * 0.045) * 0.07, h.z)
-      const light = h.mesh.userData.light
-      if (light) light.intensity = 0.85 + Math.sin(h.age * 0.12) * 0.45
+      const bobY = this.floorY + HEART_REST_Y + Math.sin(h.age * 0.045) * 0.07
+      h.mesh.position.set(h.x, bobY, h.z)
+      const light = this._heartLight
+      if (light) {
+        light.position.set(h.x, bobY + 0.2, h.z)
+        light.intensity = 0.85 + Math.sin(h.age * 0.12) * 0.45
+      }
     }
     // lifecycle: untouchable before 20 s, blink after 30 s, gone at ~33 s
     if (h.age >= HEART_GONE_AT) {
@@ -773,6 +820,11 @@ export class ItemSystem {
       return
     }
     h.mesh.visible = h.age < HEART_BLINK_AT || (h.age >> 3) % 2 === 0
+    // Follow the blink with intensity, NOT with `light.visible` — three does not
+    // count an invisible light, so toggling visibility would re-key every lit
+    // material twice a second, which is the exact bug this light was pulled out
+    // of the heart group to avoid.
+    if (this._heartLight && !h.mesh.visible) this._heartLight.intensity = 0
     // first-come pickup: either slot, AI included; full-HP fighters walk over
     // it harmlessly so the heal is never wasted
     for (const f of this.fighters) {
@@ -802,6 +854,9 @@ export class ItemSystem {
     const h = this._heart
     if (!h) return
     this._heart = null
+    // Dim and park it — never remove it. Removing drops the scene's point-light
+    // count and re-keys every lit material all over again.
+    if (this._heartLight) { this._heartLight.intensity = 0; this._heartLight.position.set(0, -999, 0) }
     this.scene?.remove(h.mesh)
     h.mesh.traverse?.((o) => {
       if (o.isMesh) { o.geometry?.dispose?.(); o.material?.dispose?.() }
@@ -1050,6 +1105,14 @@ export class ItemSystem {
     this._clearGround()
     this._clearThrows()
     this._removeHeart()
+    // The persistent heart light outlives every heart, so the teardown is here
+    // rather than in _removeHeart(). The whole scene is going away, so dropping
+    // the light count no longer costs a recompile.
+    if (this._heartLight) {
+      this._heartLight.parent?.remove(this._heartLight)
+      this._heartLight.dispose?.()
+      this._heartLight = null
+    }
     for (let slot = 0; slot < this.heldBySlot.length; slot++) {
       const rec = this.heldBySlot[slot]
       if (rec) { this._returnMesh(rec.def, rec.mesh); this.heldBySlot[slot] = null }

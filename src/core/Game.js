@@ -163,6 +163,28 @@ export class Game {
     // mid-fight compile can be separated from arena build.
     P.newProgs = []
     const seenProgs = new Set()
+    // A BULK RECOMPILE WITH NO NEW MATERIALS MEANS A GLOBAL MOVED. Measured:
+    // ~43 programs rebuilt in one frame while the material count and the mapped
+    // count both stayed flat, at an event-driven moment that varies by 20 s
+    // between runs. Everything below is part of three's program cache key, so
+    // one of them is the culprit; snapshot the cheap ones EVERY frame and diff
+    // them across the jump rather than guessing which.
+    P.globalFlips = []
+    const cheapGlobals = () => {
+      const r = this.renderer, sc = this.screens?.current?.scene, p = this.pipeline
+      if (!r) return ''
+      return [
+        r.shadowMap?.enabled ? 1 : 0, r.shadowMap?.type,
+        r.toneMapping, r.outputColorSpace,
+        (r.clippingPlanes?.length || 0),
+        p?.enabled ? 1 : 0, p?._features?.renderScale ?? '-',
+        p?._features?.ao ? 1 : 0, p?._features?.taa ? 1 : 0,
+        sc?.fog ? (sc.fog.isFogExp2 ? 'exp2' : 'lin') : 'none',
+        sc?.environment ? String(sc.environment.uuid).slice(0, 6) : 'none',
+        sc?.overrideMaterial ? 1 : 0,
+      ].join('|')
+    }
+    let lastGlobals = ''
     P.phase = (u, r, steps, gap) => {
       const info = this.renderer?.info
       const list = info?.programs || null
@@ -180,7 +202,26 @@ export class Game {
         if (fresh.length && P.newProgs.length < 200) {
           P.newProgs.push({ t: +(performance.now() - P.t0).toFixed(0), gap: +gap.toFixed(0), names: fresh })
         }
+        // Bulk rebuild: diff the globals across the frame and take a light
+        // census. The census traverses, so it is paid ONLY on a jump.
+        if (fresh.length >= 10 && P.globalFlips.length < 20) {
+          const after = cheapGlobals()
+          let dir = 0, pt = 0, spot = 0, shadow = 0
+          try {
+            this.screens?.current?.scene?.traverse((o) => {
+              if (o.isDirectionalLight) { dir++; if (o.castShadow) shadow++ }
+              else if (o.isPointLight) { pt++; if (o.castShadow) shadow++ }
+              else if (o.isSpotLight) { spot++; if (o.castShadow) shadow++ }
+            })
+          } catch { /* torn down */ }
+          P.globalFlips.push({
+            t: +(performance.now() - P.t0).toFixed(0), n: fresh.length,
+            before: lastGlobals, after, changed: lastGlobals !== after,
+            lights: `${dir}d/${pt}p/${spot}s/${shadow}sh`,
+          })
+        }
       }
+      lastGlobals = cheapGlobals()
       lastProgs = progs; lastTex = tex
       if (P.ph.length >= 4000) P.ph.shift()
       // Store the gap ALONGSIDE the split, from the same frame of the same loop.

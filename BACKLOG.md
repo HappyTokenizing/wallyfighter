@@ -1,5 +1,74 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 20 — FIXED. One point light was recompiling the entire arena mid-fight.
+
+    programs compiled after the bell:   before  59 / 58 / 55 / 57
+                                        after    5 / 4            (-92 %)
+    bulk recompiles (>=10 programs) after t=1.6 s, over an 85 s fight:  before 1, after 0
+
+### The cause
+
+three folds the PER-TYPE LIGHT COUNTS into the program cache key. `ItemSystem`'s heart pickup
+carried its own `PointLight` as a child of the pickup group, added to the scene on spawn. The
+first heart of a match therefore took the scene from 14 point lights to 15 — and gave EVERY
+lit material a new key. 44 programs rebuilt in a single frame, `unaccounted` 598 ms, worst
+frame 641-791 ms.
+
+### Why it took three rounds, and what actually found it
+
+The symptom pointed everywhere except the cause:
+- It fired at a different time every run (t = 19.7 s, 23.1 s, 23.4 s, 24.8 s, 40.2 s) because
+  it waits on a RANDOM ITEM DROP. That looked exactly like an async texture queue draining.
+- The recompiled materials were named `metal:4c5764#upgrade`, `wood-rough:...#upgrade#own`,
+  which reads as "these were just upgraded". They were not: `#upgrade` is assigned at BUILD
+  time by the copy-on-write split in materials.js:2524. The name was a red herring.
+- Round 19 concluded texture upgrades were attaching maps and re-keying materials, and wrote
+  that into this file. It was wrong.
+
+Two measurements killed it and neither was a timing:
+1. Material count and MAPPED-texture count sampled across the jump: `mats` 306 -> 306,
+   `mapped` 217 -> 217, `progs` 101 -> 144. Nothing was created; everything was re-keyed.
+   That excluded the whole texture-upgrade theory in one run.
+2. A light census on any frame compiling >=10 programs: `4d/14p/1s/2sh` -> `4d/15p/1s/2sh`.
+   One extra point light. That was the entire bug.
+
+A fix built on the round-19 theory (pump surfaces past the bell + a rolling re-warm) was
+implemented, A/B'd over 4 interleaved passes, showed 59/55 vs 58/57 — NO EFFECT — and was
+reverted. `_surfacesDone` is already true at the bell, so the block never even ran.
+
+### The fix (`src/items/ItemSystem.js`)
+
+The heart light is now owned by ItemSystem for its whole lifetime, created in the constructor
+(before MatchScreen queues its chunked warm, so the warm compiles the final light count once)
+and parked at intensity 0. Spawn and pickup only move it and change intensity.
+
+TWO TRAPS, BOTH DELIBERATE:
+- `light.visible = false` does NOT work. three skips invisible objects when collecting lights,
+  so hiding it drops the count and re-keys everything — the exact bug, reintroduced.
+- The heart's end-of-life BLINK must drive intensity, not visibility, for the same reason.
+
+### The rule this generalises to
+
+ANY light added to or removed from a live scene recompiles every lit material. Pool them:
+allocate at build time, drive with intensity. This applies to every VFX light in the codebase
+(impact flashes, muzzle glows, finisher lights) — `?prof=1` + `__prof.globalFlips` now reports
+a light census on every bulk recompile, so a regression is one run away from being visible.
+
+### STILL OPEN — P1: a ~520 ms stall with dProgs 0
+
+Same run, t=37069: `gap 523.4, dProgs 0`. Not a shader compile, so it is GC or the driver.
+The counters now separate the two cleanly. Next target. Note the machine was at load average
+4-8 throughout; re-measure idle before chasing it.
+
+## ROUND 19 — PARTLY WRONG. Read round 20 first; the mechanism below is not the cause.
+
+> Round 19 correctly established that the stall is a shader RECOMPILE of already-warmed
+> materials. Its explanation of WHY — texture upgrades attaching maps and re-keying
+> materials — is WRONG and was disproved in round 20 by measurement: across the jump the
+> material count and the mapped-texture count are both FLAT. The real cause is a point light
+> entering the scene. Kept in full because the reasoning chain is instructive and because the
+> evidence in it is still good; only the conclusion is bad.
+
 ## ROUND 19 — the ~500 ms stall is NAMED. Diagnosis complete, fix NOT applied.
 
 Round 18 left "one ~500 ms stall per run, and it is NOT our JS" with three candidate causes

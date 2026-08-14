@@ -1346,6 +1346,13 @@ export class MatchScreen {
       // The only thing that can still be queued after FIGHT! is the re-warm the
       // surface queue asks for when it finally drains (see _pumpSurfaces).
       // 3 ms a frame of budgeted uploads instead of one unbounded flush.
+      //
+      // TRIED AND REVERTED (round 20): also pumping surfaces here at 3 ms and
+      // keeping a rolling _queueWarmChunks() behind them, to catch the mid-fight
+      // bulk recompile. Interleaved A/B over 4 passes: programs compiled after
+      // the bell were 59/55 without it and 58/57 with it — no effect. The bulk
+      // recompile is NOT the surface queue: `_surfacesDone` is already true at
+      // the bell, so the block never even ran. See BACKLOG round 20.
       this._pumpBuild(3)
     }
     try { this.cam.update(dt) } catch { /* stub */ }
