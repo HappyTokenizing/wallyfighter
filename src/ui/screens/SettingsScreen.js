@@ -41,7 +41,16 @@ export class SettingsScreen {
     // 'finisher' row: KO executions are automatic since v2.1 (§23), there is
     // no finisher input in the engine, and inventing a binding for one would
     // put a dead control in this list.
+    //
+    // TOUCH DROPS 'jump' AND 'kick' BY THE SAME RULE. The touch cluster is five
+    // buttons and carries neither (chains cover the kick's role; jump is off on
+    // touch — see TouchControls and Fighter._jumpEnabled). A rebind row for an
+    // action the device cannot produce is a dead control by this comment's own
+    // definition, and it is worse here than the 'finisher' case because the row
+    // LOOKS live: it shows a key and highlights conflicts.
+    const dead = this.game?.isTouch ? new Set(['jump', 'kick']) : null
     this.actions = Object.keys(GameConfig.controls.p1)
+      .filter((a) => !dead || !dead.has(a))
   }
 
   enter() {
@@ -165,13 +174,20 @@ export class SettingsScreen {
       },
       (v) => (v ? 'ON' : 'OFF'))
 
-    makeCycle('JUMPING', TOGGLE_ORDER,
-      () => game.save.get('settings.jumpEnabled', true) !== false,
-      (v) => {
-        game.save.set('settings.jumpEnabled', v)
-        emitSetting('settings.jumpEnabled', v)
-      },
-      (v) => (v ? 'ON' : 'OFF'))
+    // JUMPING is a DESKTOP-ONLY option. The touch cluster is five buttons and
+    // carries no jump and no kick (see TouchControls), so on a phone this row
+    // would offer a toggle for an input the player has no button for. Offering
+    // a setting that cannot change anything visible is worse than not offering
+    // it. Fighter._jumpEnabled() forces jump off on touch to match.
+    if (!game.isTouch) {
+      makeCycle('JUMPING', TOGGLE_ORDER,
+        () => game.save.get('settings.jumpEnabled', true) !== false,
+        (v) => {
+          game.save.set('settings.jumpEnabled', v)
+          emitSetting('settings.jumpEnabled', v)
+        },
+        (v) => (v ? 'ON' : 'OFF'))
+    }
 
     // -- volume sliders
     for (const ch of VOLUME_CHANNELS) {

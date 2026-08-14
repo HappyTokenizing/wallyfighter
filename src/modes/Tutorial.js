@@ -314,13 +314,19 @@ export class TutorialDirector {
   _buildSteps() {
     const k = (a) => this._kbd(a)
     const move = this._moveKbd()
+    // TOUCH HAS NO JUMP AND NO KICK BUTTON, SO IT CANNOT HAVE THOSE STEPS.
+    // The touch cluster is five buttons and deliberately carries neither (see
+    // TouchControls: chains cover the kick's role, and jump is off on touch).
+    // Leaving these steps in on a phone is a hard softlock — the tutorial waits
+    // forever for an input the player has no way to produce.
+    const touch = !!this.game?.isTouch
     return [
       { id: 'move', title: 'TAKE A WALK', body: `ROAM THE FLOOR WITH ${move}<br>THE WHOLE STADIUM IS YOURS`, progress: true },
-      { id: 'jump', title: 'GET SOME AIR', body: `PRESS ${k('jump')} TO JUMP` },
+      ...(touch ? [] : [{ id: 'jump', title: 'GET SOME AIR', body: `PRESS ${k('jump')} TO JUMP` }]),
       { id: 'block', title: 'HODL THE LINE', body: `HOLD ${k('block')} TO BLOCK<br>DOGEY POKES ON THE CUE` },
       { id: 'chain', title: 'CHAIN REACTION', body: `LAND A 3-HIT LIGHT CHAIN<br>TAP ${k('light')} ${k('light')} ${k('light')} UP CLOSE`, progress: true },
       { id: 'heavy', title: 'HEAVY BAGS', body: `LAND A HEAVY HIT — ${k('heavy')}` },
-      { id: 'kick', title: 'LEG DAY', body: `LAND A KICK — ${k('kick')}` },
+      ...(touch ? [] : [{ id: 'kick', title: 'LEG DAY', body: `LAND A KICK — ${k('kick')}` }]),
       { id: 'grab', title: 'MARGIN CALL', body: `WALK UP CLOSE AND THROW — ${k('grab')}<br>THROWS BEAT BLOCK` },
       { id: 'special', title: 'SPECIAL DELIVERY', body: `UNLEASH A SPECIAL — ${k('special')}` },
       { id: 'super', title: 'FULL SEND', body: `METER'S ON THE HOUSE<br>HIT ${k('super')} FOR YOUR SUPER` },

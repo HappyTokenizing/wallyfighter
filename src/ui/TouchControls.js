@@ -300,9 +300,13 @@ export class TouchControls {
     setTimeout(() => node.classList.remove('super-pop'), 260)
   }
 
-  // §27: jump hidden entirely (not just disabled) when jumping is off
+  // §27: jump hidden entirely (not just disabled) when jumping is off.
+  // On touch it is ALWAYS off: the JUMPING settings row is desktop-only and
+  // Fighter._jumpEnabled() returns false here, so a visible button would do
+  // nothing. These three have to agree or the player gets a dead control.
   _applyJumpSetting() {
-    const on = this.game.save?.get?.('settings.jumpEnabled', true) !== false
+    const on = !this.game.isTouch &&
+      this.game.save?.get?.('settings.jumpEnabled', true) !== false
     if (this._jumpBtn) this._jumpBtn.style.display = on ? '' : 'none'
   }
 

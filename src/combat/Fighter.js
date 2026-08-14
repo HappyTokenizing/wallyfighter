@@ -589,6 +589,11 @@ export class Fighter {
   // §27: jump toggle — read LIVE from settings so flipping it mid-match works.
   // Applies to both humans and AI (a global rules toggle, not a handicap).
   _jumpEnabled() {
+    // Touch has no jump button and no JUMPING setting row, so jumping is off
+    // there for BOTH fighters — this is a rules toggle, not a handicap, and an
+    // AI that jumps while the human cannot would be exactly the asymmetry §27
+    // says this flag must never create.
+    try { if (this.game?.isTouch) return false } catch { /* stubs */ }
     try { return this.game.save?.get?.('settings.jumpEnabled', true) !== false } catch { return true }
   }
 
