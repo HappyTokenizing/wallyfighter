@@ -46,9 +46,35 @@ floor under everything. `drainQueue` now tracks `maxStepMs` / `maxStepKind` / `o
 lever and splitting steps is not needed. `overrunMs` ~6.8 s over a boot is the accumulated
 past-deadline time, and it is the honest ceiling on further gains from budget alone.
 
+### Round 22b — the heartbeat was a second engine
+
+`scheduleTick()` armed BOTH rAF and `setTimeout(…, 0)`, and re-armed after every drain. On a
+page whose rAF is alive that gives the generator two drivers, and the timer chain runs as fast
+as the main thread allows: many drains back to back with the game's rAF starved in between.
+One drain is bounded (budget + the one step already started, ~40-45 ms); a RUN of them is not.
+Fix: the timer delay is `isPresenting() ? 250 : 0`. It stays a 0 ms heartbeat for the case it
+exists for — hidden tab / capture rig, where rAF is frozen and it is the only driver — and
+becomes a slow watchdog whenever frames are actually being presented.
+
+    two runs, agreeing tightly:      before      after
+    frames over 50 ms                147         107 / 104
+    frames over 100 ms               18-20       15 / 16
+    total time in >50 ms             11.4 s      8.8 / 8.6 s
+    p90                              33.3        25.1 / 25.1
+    p99                              91.7        83.3 / 83.3
+
+HONEST CAVEAT: `overrunMs` went the OTHER way, 6762 -> ~7600, reproducibly. Fewer but deeper
+drains each overshoot by their in-flight step, so the accumulated past-deadline total rises
+while the number of long FRAMES falls. overrunMs measures time past a drain's own deadline,
+not jank the player sees; every frame-level metric improved 24-28 %. Recorded rather than
+dropped, because it is the one number that argues against the change.
+
 ### Still open
-- 18-20 frames over 100 ms remain, worst 350 ms, still `unaccounted`. Cheaper than before but
-  not gone; the next lever is step granularity (`concrete` at ~45 ms is the biggest step).
+- 15-16 frames over 100 ms remain, and the worst frame is 358 ms, UNCHANGED by both fixes and
+  reproducible to the millisecond across four runs. It is therefore NOT the drain: max step is
+  ~40 ms and the timer chain no longer runs free. Next step is to capture `dProgs`/`dTex` and a
+  light census on that specific frame — the boot profiler does not currently record them in the
+  worst-frame list, which is the gap to close first.
 - 43 s to the title is dominated by the INTRO CINEMATIC's own runtime, not loading — the
   loading screen hands off at ~5.5 s (was ~8 s). Shortening that is an art-direction call,
   not a perf one.

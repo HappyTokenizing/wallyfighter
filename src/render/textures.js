@@ -2360,7 +2360,23 @@ function scheduleTick() {
     _tickRaf = requestAnimationFrame(() => { _tickRaf = null; onTick() })
   }
   if (_tickTimer === null && typeof setTimeout === 'function') {
-    _tickTimer = setTimeout(() => { _tickTimer = null; onTick() }, 0)
+    // THE TIMER IS A HEARTBEAT, NOT A SECOND ENGINE.
+    //
+    // At 0 ms it re-arms immediately after every drain, so on a page whose rAF
+    // is alive the generator gets TWO drivers and the timer chain simply runs
+    // as fast as the main thread allows — many drains back to back, with the
+    // game's rAF callback starved in between. A drain is bounded (budget plus
+    // the one step it had already started, ~45 ms worst) but a RUN of them is
+    // not: measured 350 ms frames on the boot path made of roughly five
+    // consecutive drains, and ~6.8 s of accumulated past-deadline time.
+    //
+    // So: 0 ms only when nothing is presenting, which is the case this chain
+    // exists for — a hidden tab or the capture rig, where rAF is frozen and
+    // this is the ONLY heartbeat (see the STARVED_MS branch in onTick, and
+    // DRIVER.md). While frames are being presented, rAF is the driver and this
+    // is a slow watchdog that cannot starve it.
+    const delay = isPresenting() ? 250 : 0
+    _tickTimer = setTimeout(() => { _tickTimer = null; onTick() }, delay)
     // Never hold the node process (or a page unload) open for a texture.
     if (_tickTimer && typeof _tickTimer.unref === 'function') _tickTimer.unref()
   }
