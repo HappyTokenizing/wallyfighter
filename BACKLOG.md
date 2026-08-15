@@ -1,5 +1,48 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 30 — OPEN RISK: an intermittent loading-screen stall that should be impossible
+
+### What was seen
+
+Two `bootprof` runs sat on the loading screen for 62 s and never reached the title.
+`marks ['loading@2']` — the screen never handed off. A third run on the same build was
+healthy (loading 474 ms, intro 6910 ms, title 44.5 s).
+
+### Why it should be impossible
+
+`LoadingScreen` has a hard ceiling: `MAX_MS = 9000`. Past 9 s of wall clock it forces
+`warmDone = true`, logs "prewarm ceiling hit ... entering anyway", and calls `_finish()`.
+`elapsed` is `performance.now() - startedAt`, i.e. real time. So the screen cannot remain
+past ~9 s WHILE ITS render() IS BEING CALLED. A 62 s stall therefore means the screen's
+render() was not running — and Game.tick wraps `screens.render()` in try/catch that logs,
+and the profile captured ZERO console errors.
+
+### What it is not
+
+- Not `?prof=1`: a probe with the profiler armed booted healthily (loading +4 s, intro +8 s).
+- Not the profiler's own cost: same probe, plain `/`, identical timing.
+- Not the synthetic resize (that was a separate, real `fightprof` bug, already fixed).
+- Not concurrent browsers: every stalled run had `pgrep -f remote-debugging-port` == 0.
+
+### The only correlation found
+
+Stalled runs were at load average ~5.0; the healthy run at 2.45. Four direct probes
+(`stallprobe` x2, `vischeck`, `shotarena`) all booted cleanly. `bootprof` stalled 2 of 3.
+
+### Status: UNRESOLVED, and potentially user-facing
+
+A game that sometimes never leaves the loading screen is the most serious open item in the
+project — far more than any frame spike. It has been masquerading as harness flakiness all
+session (the "never reached a fighting phase" aborts). It is NOT yet proven to be a harness
+artifact: the four clean probes poll every 4 s while `bootprof` polls every 500 ms, so the
+polling rate remains a candidate alongside machine load.
+
+NEXT STEP, and do this before any more perf work: instrument `LoadingScreen.render()` with a
+frame counter and a last-tick timestamp exposed on the screen object, then run boot 10x under
+load. If render() stops being called, find what stops calling it. If it keeps being called and
+the ceiling still does not fire, the bug is in the ceiling condition itself.
+
+
 ## ROUND 29 — THE ARENA BAND GATE IS NOISE-DOMINATED AS SAMPLED. Read before trusting it.
 
 ### The measurement that invalidates the others
