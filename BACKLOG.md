@@ -1,5 +1,52 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 23 — in-fight: 120 fps steady state, and the last big hitch is ONE shader
+
+### The good result
+
+A live fight at 1080p, 40 s, 2400 frames, `permanent-reserve-core`:
+
+    gap med 8.4 ms against an 8.3 ms VSYNC FLOOR   -> vsync-locked at 120 fps
+    update med 0.6   render med 3.0   steps5 0   errors 0
+
+That is against a 12.4-17.6 ms median earlier in the session. The two textures.js
+fixes made for the BOOT path (idle-budget guard, heartbeat watchdog) were costing
+in-match frames too. A second run measured a 16.6 ms median, so the game sits on the
+120/60 fps boundary and which side it lands on depends on machine load.
+
+### PROFILER BUG FOUND AND FIXED — it had been misfiling every hitch
+
+`gap` is measured at the TOP of the tick, so it is the duration of the frame that just
+ENDED, while u / r / dProgs / dTex describe the frame being recorded. They were stored
+together, so every expensive frame was paired with the NEXT frame's causes. That is why
+boot frames of 142-225 ms reported `dProgs 0` with a compile event 3 ms away, and why a
+233 ms frame reported `r=3.8` in a run whose `render.max` was 164.9 ms. Fixed: the gap is
+attached to the previous record and a frame only enters `worst` once the next tick reports
+its duration. Every "unaccounted, no cause" reading before this commit is suspect.
+
+### What it revealed: the worst in-fight frame is a SINGLE shader compile
+
+    gap=258  u=1.4  r=254.3  unacc=3    dProgs=1  dTex=0
+    gap=67   u=1.9  r=61.7   unacc=3    dProgs=1  dTex=0
+One program compiling and linking costs 254 ms inside render submit. Five programs
+compile after the bell in a 40 s fight. Their `WebGLProgram.name` is '?', i.e. they are
+ShaderMaterial-based (no shaderName) — post/VFX shaders, not the arena or fighter
+materials, which the chunked match warm already covers.
+
+NEXT STEP: find what creates a ShaderMaterial after the bell and warm it at match build.
+MatchScreen's `_warmStep()` walks `scene.traverse`, so it cannot see a pipeline pass that
+is constructed lazily or a VFX material built on first use.
+
+### A HYPOTHESIS THAT WAS TESTED AND WAS WRONG — do not retry it
+
+Reasoning that a 236 ms render submit with `dProgs 0, dTex 0` had to be a texture RE-upload
+(same texture object, new data, so the count never moves), I gave textures.js a
+`setTextureUploader(renderer)` and called `initTexture()` on each field as it finished, to
+move the upload into the budgeted drain. Measured: `render.max` unchanged at 254 ms,
+`tex.overrunMs` 2587 vs 2604/2658 before — i.e. nothing moved into the drain, so uploads
+were never the cost. REVERTED. The corrected attribution then showed the same frame
+carrying `dProgs 1`: it was a compile all along.
+
 ## ROUND 22 — boot freezes: a long frame was being read as "the page is idle"
 
     wall clock to title       67.2 s  ->  43.7 / 43.3 s   (two runs)
