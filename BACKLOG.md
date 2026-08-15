@@ -1,5 +1,60 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 24 — two spike fixes attempted, both MEASURED, both REVERTED. Read before retrying.
+
+Target was the rare in-fight spikes left after round 23 (a 254 ms render submit carrying
+`dProgs 1`, plus a few unaccounted frames of 120-210 ms). Nothing shipped. Recorded so the
+next attempt does not repeat either of these.
+
+### 1. In-drain texture upload — NO EFFECT, reverted
+
+Theory: a 236 ms render submit with `dProgs 0, dTex 0` had to be a texture RE-upload (same
+texture object, new data, so the count never moves). Gave textures.js a
+`setTextureUploader(renderer)` and called `initTexture()` on each field as it finished, to move
+the upload into the budgeted drain.
+Measured: `render.max` unchanged at 254 ms; `tex.overrunMs` 2587 vs 2604/2658 before — nothing
+moved into the drain, so uploads were never the cost. The corrected attribution then showed the
+same frame carrying `dProgs 1`: a compile all along.
+
+### 2. Pipeline.warmPasses() — HUNG THE GAME, reverted
+
+The post chain is genuinely un-warmed: pass materials live on the pass objects, not in any
+scene, so neither `Pipeline.warm()` nor MatchScreen's chunked warm can reach them, and the
+unnamed programs compiling after the bell are almost certainly theirs. So warming them is
+still the right idea. The implementation was not: collecting every pass material onto a
+temporary quad scene and calling `r.compile()` from inside `_buildChain()` left the game
+stuck on the loading screen — frames frozen, zero errors.
+
+**`npm run build` PASSED and `harness --level 3` PASSED.** The harness is headless and never
+constructs a RenderPipeline, so it structurally cannot catch a hang in the render path. Only
+booting a real browser found it. Any future change to Pipeline construction needs a browser
+boot check, not just the harness.
+
+If retrying: warm the passes somewhere other than chain construction (the chain is not fully
+wired yet at that point), and verify with a browser boot before anything else.
+
+### 3. The "intermittent freeze" was a MEASUREMENT ARTIFACT
+
+While verifying the revert, a poll script reported the game frozen in the intro (frame counter
+static for 30 s) — and it reproduced at `6c63d9c`, i.e. before any of the day's changes, which
+is what made it look like a real pre-existing bug worth chasing.
+
+It is not. An independent probe that counts rAF callbacks directly:
+
+    +12s rafPerSec 129 visible gameFrame 370 screen intro
+    +15s rafPerSec  93 visible gameFrame 533
+    +18s rafPerSec 129 visible gameFrame 714
+    +24s rafPerSec  95 visible gameFrame 968
+
+The game runs normally. The frozen readings came from runs with several Chrome instances alive
+at once. LESSON, and it is the second instrumentation bug of the day: when a measurement says
+something impossible, suspect the instrument first — especially after already finding one.
+
+### Boot-time variance is load, not regression
+Same build measured 43.0 / 42.9 / 43.7 s earlier and 54.4 / 61.6 s later the same day, tracking
+machine load average. Quote boot times only with an `uptime` alongside.
+
+
 ## ROUND 23 — in-fight: 120 fps steady state, and the last big hitch is ONE shader
 
 ### The good result
