@@ -439,9 +439,20 @@ const MOOD_FRAME_TARGETS = {
   'noon-stadium': { medianLo: 118, medianHi: 172 },
   'arctic-day': { medianLo: 120, medianHi: 178 },
   'museum-gallery': { medianLo: 115, medianHi: 168 },
-  'sunset-stadium': { medianLo: 100, medianHi: 158 },
   'overcast-swamp': { medianLo: 98, medianHi: 155 },
   // Dusk and lit interiors: darker by design, still readable.
+  // 'sunset-stadium' sits here and not with the daylight moods above, and this
+  // one was decided on a SCREENSHOT, not on the histogram — moving a threshold
+  // because it is the file you happen to have open is metric-gaming, and the
+  // numbers alone were merely suggestive.
+  // What the frame shows: a low sun raking across the floor from one side,
+  // long shadows, warm amber columns against a pink-lavender sky, both fighters
+  // and the whole crowd legible, and graded detail in the shadowed floor. It is
+  // an intentional sunset that happens to put most of the frame in warm shadow,
+  // which is what a low sun DOES. Measured across four runs: median 69-75 with
+  // below8 0.7-3.9 %, clipped 0.000 %, pureBlack 0.000 % — nothing crushed and
+  // nothing blown, i.e. a correctly exposed dark scene failing a band copied
+  // from noon. Same diagnosis and same fix as 'mountain-dawn'.
   // 'mountain-dawn' sits here and not with the daylight moods above. It was
   // grouped with them by name, but the arena is BLUE HOUR -- the sun is below
   // the ridge and the key is sky bounce. It measured median 71 with below8 at
@@ -450,6 +461,7 @@ const MOOD_FRAME_TARGETS = {
   // arena tried to reach 86 with a stronger rig and rejected it on measurement
   // as a blown-out dawn. Same call the table already makes for 'meme-plaza'.
   'mountain-dawn': { medianLo: 62, medianHi: 124, below8: 8 },
+  'sunset-stadium': { medianLo: 60, medianHi: 126, below8: 8 },
   'tower-dusk': { medianLo: 62, medianHi: 128, below8: 8 },
   'interior-vault': { medianLo: 60, medianHi: 124, below8: 8 },
   'subway-tunnel': { medianLo: 55, medianHi: 118, below8: 9 },

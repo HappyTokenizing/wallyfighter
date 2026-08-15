@@ -1,5 +1,42 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 28 — the last failing arena band, closed on a SCREENSHOT
+
+`bull-market-colosseum` had been failing since round 17: median 58-75 against a
+`sunset-stadium` band of 100-158. Round 17 deliberately refused to widen it, on the grounds
+that "picking the threshold because it is the file you happen to have open is metric-gaming",
+and required a screenshot before anyone touched the number. This closes it that way.
+
+### The frame
+
+A low sun rakes across the floor from one side casting long shadows; warm amber columns
+against a pink-lavender sky; the S.P.Q.HODL sign lit; BOTH fighters legible (white Wally
+downed left, the ape standing right) and the whole crowd readable in the stands; graded detail
+in the shadowed floor rather than crush. It is a deliberate sunset that puts most of the frame
+in warm shadow, which is what a low sun does.
+
+    four runs: median 69 / 70 / 75 / 95   below8 0.7-3.9 %   clipped 0.000 %   pureBlack 0.000 %
+
+Nothing crushed, nothing blown — a correctly exposed dark scene failing a band copied from
+noon. Identical diagnosis to `mountain-dawn`.
+
+### The change
+
+`sunset-stadium` moves from the daylight group to dusk: **60-126, below8 8**. Floor set at 60
+rather than copying tower-dusk's 62 because the median swings 69-95 on camera position alone;
+a tight band would be flaky, and 60 still leaves a genuinely broken rig failing. Verified:
+median 95, below8 0.738, ok TRUE.
+
+ALL TEN ARENAS NOW PASS THEIR BANDS.
+
+### Method note — CDP cannot screenshot this canvas
+
+`Page.captureScreenshot` returns EMPTY for the game's WebGL canvas, which has no preserved
+drawing buffer. Use the project's own rig: load `?cap=1` (which sets preserveDrawingBuffer),
+then read `renderer.domElement.toDataURL('image/png')` over CDP. IMAGE ONLY — `?cap=1` inflates
+frame timings and must never source a perf number (round 13).
+
+
 ## ROUND 27 — copy-on-write was silently dropping the shader injection
 
 ### The bug (a VISUAL one; the perf half did not pan out)
