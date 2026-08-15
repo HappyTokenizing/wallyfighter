@@ -152,7 +152,7 @@ export class Game {
     P.worst = []         // the worst frames retained with their split
     // Clears BOTH. Zeroing P.ph alone leaves stale arena-entry frames sitting in
     // P.worst, which then get read as if they happened during the fight.
-    P.reset = () => { P.ph.length = 0; P.worst.length = 0 }
+    P.reset = () => { P.ph.length = 0; P.worst.length = 0; P.pending = null }
     // A stall that is neither update nor render submit is one of three things,
     // and these two counters tell them apart without a native profiler:
     //   programs jumped  -> shader compile/link on first use of a material
@@ -233,7 +233,12 @@ export class Game {
           fresh.push(list[i].name || '?')
         }
         if (fresh.length && P.newProgs.length < 200) {
-          P.newProgs.push({ t: +(performance.now() - P.t0).toFixed(0), gap: +gap.toFixed(0), names: fresh })
+          // No `gap` here on purpose: the gap available at this point belongs to
+          // the PREVIOUS frame (see the note below), so recording it next to a
+          // compile that happened in THIS frame is exactly the off-by-one that
+          // made these events look uncorrelated with the hitches they cause.
+          // Match by `t` against `worst[].t` instead.
+          P.newProgs.push({ t: +(performance.now() - P.t0).toFixed(0), names: fresh })
         }
         // Bulk rebuild: diff the globals across the frame and take a light
         // census. The census traverses, so it is paid ONLY on a jump.
@@ -272,19 +277,33 @@ export class Game {
         }
       }
       lastProgs = progs; lastTex = tex
+      // OFF-BY-ONE, AND IT WAS HIDING CAUSES. `gap` is `now - last` measured at
+      // the TOP of the tick, so it is the duration of the frame that just
+      // ENDED — while u / r / steps / dProgs / dTex all describe the frame being
+      // recorded now. Pairing them puts every expensive frame's cost next to the
+      // FOLLOWING frame's causes. That is why boot frames of 142-225 ms reported
+      // `dProgs 0` while a bulk compile event sat 3 ms away, and why a 233 ms
+      // frame showed `r=3.8` in the same run whose `render.max` was 164.9 ms.
+      //
+      // So the gap is attached to the PREVIOUS record, and a frame's record is
+      // only complete (and only pushed to `worst`) once the next tick reports how
+      // long it took.
+      const prevPh = P.ph[P.ph.length - 1]
+      if (prevPh) prevPh[3] = +gap.toFixed(2)
+      const w = P.pending
+      if (w) {
+        w.gap = +gap.toFixed(1)
+        w.unaccounted = +(gap - w.u - w.r).toFixed(1)
+        P.worst.push(w)
+        if (P.worst.length > 240) { P.worst.sort((a, b) => b.gap - a.gap); P.worst.length = 24 }
+      }
       if (P.ph.length >= 4000) P.ph.shift()
-      // Store the gap ALONGSIDE the split, from the same frame of the same loop.
-      // P.f is filled by the profiler's own rAF loop, which is a DIFFERENT loop
-      // from the game's -- pairing the two by index silently compares frames
-      // that are not the same frame.
-      P.ph.push([+u.toFixed(2), +r.toFixed(2), steps, +gap.toFixed(2)])
-      P.worst.push({
+      P.ph.push([+u.toFixed(2), +r.toFixed(2), steps, 0])
+      P.pending = {
         i: P.f.length, t: +(performance.now() - P.t0).toFixed(0),
         u: +u.toFixed(1), r: +r.toFixed(1), steps,
-        gap: +gap.toFixed(1), unaccounted: +(gap - u - r).toFixed(1),
-        dProgs, dTex,
-      })
-      if (P.worst.length > 240) { P.worst.sort((a, b) => b.gap - a.gap); P.worst.length = 24 }
+        gap: 0, unaccounted: 0, dProgs, dTex,
+      }
     }
     /** Median/p90/p99 for each phase, plus the worst frames by rAF gap. */
     P.split = (tailN = 600) => {
