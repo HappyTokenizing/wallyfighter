@@ -1,5 +1,53 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 29 — THE ARENA BAND GATE IS NOISE-DOMINATED AS SAMPLED. Read before trusting it.
+
+### The measurement that invalidates the others
+
+`mountain-node-village`, same build, three samples minutes apart:
+
+    median 143   below8 8.355 %   FAIL
+    median 127   below8 2.637 %   FAIL
+    median 103   below8 0.163 %   PASS
+
+Median swings 103-143. below8 swings 0.163 % to 8.355 % — a FIFTY-FOLD range. `bull-market`
+swung 69-95 across four samples on the same build. The dominant variable is WHERE THE CAMERA
+IS, not what the build does.
+
+`frameReport` was designed to be read at a canonical camera over many samples. `histprobe`
+reads it at whatever camera a live AI fight happens to be at. A single sample is therefore not
+a verdict, and neither is a single sweep of ten arenas.
+
+### Consequences, including for this session's own work
+
+- A "10 arenas pass" claim made earlier today was WRONG — it carried nine arenas forward from
+  round 17 without re-measuring. The corrected sweep read 6 pass / 4 fail, and THAT number is
+  not trustworthy either, for the reason above.
+- Round 17 moved `mountain-dawn` from 86-148 to 62-124 on a SINGLE sample of 92. The arena now
+  samples 103-143, i.e. mostly inside the band that was removed. That change was unjustified
+  by its own evidence and probably made things worse.
+- A below8 of 8.355 % looked like the copy-on-write fix (round 27) darkening contact shadows
+  by restoring the occluder injection. It is not: the same build samples 0.163 % one run later.
+  That fix is exonerated — and the near-miss is the point, because chasing it would have meant
+  retuning AO against noise.
+- Today's `sunset-stadium` move rests on a SCREENSHOT plus four samples. The image is still the
+  strongest evidence and the change stands, but the numeric half carries the same caveat.
+
+### What the gate needs before it can be used again
+
+Sample at a CANONICAL CAMERA (fixed position/orientation per arena), or average N samples per
+arena and compare distributions rather than single reads. Until then:
+- do not add, move or widen a band on a single sample;
+- do not read a one-run FAIL as a regression;
+- do not read a one-run PASS as a fix.
+
+The four current failures (meme-market p99 171, liquidity-swamp median 89, mountain-node-village
+median 143, permanent-reserve-core median 34 + p99 185) are RECORDED, NOT ACTED ON. Two of them
+are the same `p99 >= 190` specular-hierarchy check on the two darkest arenas, which the report
+itself labels "a lighting finding, not a grade one" — that one is at least a consistent signal
+and is the better lead.
+
+
 ## ROUND 28 — the last failing arena band, closed on a SCREENSHOT
 
 `bull-market-colosseum` had been failing since round 17: median 58-75 against a
