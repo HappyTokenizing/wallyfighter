@@ -238,7 +238,15 @@ export class Game {
           // compile that happened in THIS frame is exactly the off-by-one that
           // made these events look uncorrelated with the hitches they cause.
           // Match by `t` against `worst[].t` instead.
-          P.newProgs.push({ t: +(performance.now() - P.t0).toFixed(0), names: fresh })
+          // The pipeline globals are recorded on EVERY compile, not just bulk
+          // ones: the remaining in-fight hitches are single-program compiles at
+          // scattered times (15.4 / 16.5 / 20.7 / 35.4 / 42.9 s), so whatever
+          // triggers them is event-driven, and `before -> after` here names it
+          // without another round of guessing.
+          P.newProgs.push({
+            t: +(performance.now() - P.t0).toFixed(0), names: fresh,
+            gBefore: lastGlobals, gAfter: cheapGlobals(),
+          })
         }
         // Bulk rebuild: diff the globals across the frame and take a light
         // census. The census traverses, so it is paid ONLY on a jump.

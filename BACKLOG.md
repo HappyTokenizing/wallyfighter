@@ -1,5 +1,58 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 25 — CORRECTION: the "254 ms compile" is ~50-62 ms. It was contention.
+
+### The correction
+
+Rounds 23-24 reported the worst in-fight hitch as a 254 ms shader compile inside render
+submit. Measured on a clean machine — `pgrep -f remote-debugging-port` returning 0, single
+browser — the same compiles cost **49-62 ms**, and the worst frame of the run is **70 ms**:
+
+    gap=70  r=68.4  dProgs=0
+    gap=58  r=62.1  dProgs=1
+    gap=54  r=49.4  dProgs=1
+    gap=52  r=48.9  dProgs=1
+    gap med 15.7   p90 22.6   p99 29.5   (no >100 ms frame at all)
+
+The 254 ms figure was inflated by GPU contention from concurrent test browsers — the same
+contamination behind the phantom freeze and the 361 s boot. The headline defect was roughly a
+quarter the size it was reported as. Quote no spike number taken without the pre-check.
+
+### What the compiles actually are — measured, not inferred
+
+`?prof=1` now records the pipeline globals on BOTH sides of every compile, not just bulk ones.
+Result for all five post-bell compiles: **`changed: NOTHING`**. No shadow-map, tone-mapping,
+colour-space, clipping, composer, renderScale, AO/TAA, fog, environment or override-material
+flip. So these are genuine FIRST-USE compiles, not global re-keys — which rules out the whole
+class round 20 was about.
+
+One of them is named: **`screen:767676#own`** at t=21482. That is an arena display panel whose
+material took a copy-on-write PRIVATE copy at runtime (`#own`), giving it a new program key.
+Not a post pass. The remaining four are unnamed, so still likely pass materials.
+
+NEXT LEVER: pre-split the materials that copy-on-write mid-fight, so the private copy (and its
+compile) happens at build time. Same family as rounds 19/20, now with a named instance to
+start from.
+
+### THE MEASUREMENT RIG IS NOW THE BOTTLENECK, AND IT HAS ITS OWN BUG COUNT
+
+Three instrumentation bugs in one session, each of which produced confident wrong data:
+1. profiler off-by-one — every hitch filed under the following frame's causes;
+2. concurrent browsers — phantom freeze, 361 s boot, 254 ms compile;
+3. `fightprof` readiness — treated "`__prof.split` exists" (true from the Game constructor) as
+   "the game is ready", so `goto('match')` fired while LoadingScreen was still up and got
+   overridden. That is the "never reached a fighting phase" abort; earlier runs worked on luck.
+
+Fixing (3) by waiting for the loading screen to hand off then hit a NEW abort — "loading screen
+never handed off" after 60 s — even though `bootprof` sees that handoff at 5.5 s on the same
+build. The difference is that `fightprof` forces a 1920x1080 device-metrics override before
+navigating and `bootprof` does not. Unresolved; the fight rig needs that isolated before it can
+be trusted again.
+
+RULE: the probes deserve the same scrutiny as the game. When a measurement says something
+impossible, suspect the instrument FIRST.
+
+
 ## ROUND 24 — two spike fixes attempted, both MEASURED, both REVERTED. Read before retrying.
 
 Target was the rare in-fight spikes left after round 23 (a 254 ms render submit carrying
