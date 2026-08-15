@@ -1987,12 +1987,30 @@ function planShot(game, camera, shot, idx) {
     rec.ready = true
     const renderer = game?.renderer || null
     if (!renderer || !rec.scene) return
-    // THE shader step. renderer.compile() creates every program this scene
-    // needs; compileAsync additionally waits on KHR_parallel_shader_compile so
-    // the LINK stall lands off the critical path too. Either way the compile
-    // happens here and not on the first frame of the shot.
+    // THE shader step, and it MUST go through Pipeline.warm().
+    //
+    // This used to call renderer.compileAsync/compile directly, which is the
+    // exact mistake warm()'s own header documents: the program key folds in the
+    // BOUND RENDER TARGET, and a bare compile() runs against the canvas. With
+    // the composer live the real frame draws into a linear half-float target,
+    // so compiling against the canvas builds the sRGB+ACES variant of every
+    // material — a whole second program set that the first real frame of the
+    // shot then throws away and recompiles. MatchScreen says it plainly:
+    // "Pipeline.warm() is the only correct way to compile in this build."
+    //
+    // Measured before this: a bulk compile at EVERY shot boundary despite this
+    // prewarm running (t=5523 n=29, t=10413 n=13, t=13765 n=10, t=16238 n=15,
+    // t=20101 n=23, ...), each landing on the next frame as a 140-360 ms hitch.
+    // The prewarm was doing full work and producing programs nothing would use.
+    //
+    // opts.async keeps compileAsync's off-thread LINK behaviour: warm() runs the
+    // same synchronous compile first and then polls for link completion.
     try {
-      if (typeof renderer.compileAsync === 'function') {
+      const pipeline = game?.pipeline || null
+      if (pipeline && typeof pipeline.warm === 'function') {
+        const out = pipeline.warm(rec.scene, camera, { async: true })
+        if (out?.promise?.catch) out.promise.catch(() => { /* lazy compile fallback */ })
+      } else if (typeof renderer.compileAsync === 'function') {
         const p = renderer.compileAsync(rec.scene, camera)
         if (p && typeof p.catch === 'function') p.catch(() => { /* fall through to lazy compile */ })
       } else {

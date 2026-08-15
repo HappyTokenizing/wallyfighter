@@ -69,12 +69,56 @@ while the number of long FRAMES falls. overrunMs measures time past a drain's ow
 not jank the player sees; every frame-level metric improved 24-28 %. Recorded rather than
 dropped, because it is the one number that argues against the change.
 
+### Round 22c — the intro prewarm was compiling the WRONG program variant
+
+Closing the instrumentation gap above (cause counters + light census on the worst frames)
+paid immediately. Every large compile event sat within ~3 ms of a worst frame:
+`t=20101 n=23 -> 225 ms`, `t=30083 n=11 -> 175 ms`, `t=13765 n=10 -> 142 ms`,
+`t=5523 n=29 -> 142 ms`. Shot boundaries were recompiling, despite a prewarm existing.
+
+A WRONG TURN WORTH RECORDING. The light watchdog reported `2p -> 1p -> 2p -> 3p` during the
+intro and it looked like round 20 recurring. It is not: EACH INTRO SHOT BUILDS ITS OWN
+`THREE.Scene` (IntroCinematic ~line 1861), so the watchdog was seeing the active scene change,
+not lights added to one scene. Acting on the first reading would have meant refactoring ten
+light sites in the cinematic for no gain, and risking the intro's look.
+
+THE REAL CAUSE: `shot:compile` called bare `renderer.compileAsync(rec.scene, camera)`.
+Pipeline.warm()'s header documents exactly why that is wrong — the program key folds in the
+BOUND RENDER TARGET, and a bare compile runs against the canvas while the composer draws into
+a linear half-float target, so it builds the sRGB+ACES variant of every material and the first
+real frame of the shot throws it away and recompiles. MatchScreen:967 states the rule:
+"Pipeline.warm() is the only correct way to compile in this build." The intro never followed
+it. The prewarm was doing FULL work and producing programs nothing would ever use — which is
+why hitches survived even though a prewarm was running.
+
+Fix: route it through `pipeline.warm(rec.scene, camera, { async: true })`, falling back to the
+old path only if there is no pipeline.
+
+    two runs:                   before      after
+    frames over 100 ms          15-16       9 / 9
+    frames over 50 ms           104-107     92 / 87
+    total time in >50 ms        8.6-8.8 s   7.1 / 6.8 s
+    p99                         83.3        74.9 / 75.0
+    bulk compile events         14          9 / 9
+    worst frame                 358 ms      333 / 342 ms
+
+### CUMULATIVE boot result this session
+
+    worst single frame     3582 ms -> 333 ms
+    frames over 250 ms     15      -> 1
+    frames over 100 ms     29      -> 9
+    frames over 50 ms      152     -> 87
+    total time in >50 ms   35.3 s  -> 6.8 s
+    p99                    100 ms  -> 75 ms
+    wall clock to title    67.2 s  -> 42.9 s
+    console errors         0       -> 0   (there never were any)
+
 ### Still open
-- 15-16 frames over 100 ms remain, and the worst frame is 358 ms, UNCHANGED by both fixes and
-  reproducible to the millisecond across four runs. It is therefore NOT the drain: max step is
-  ~40 ms and the timer chain no longer runs free. Next step is to capture `dProgs`/`dTex` and a
-  light census on that specific frame — the boot profiler does not currently record them in the
-  worst-frame list, which is the gap to close first.
+- One ~333-342 ms frame survives, `unaccounted`, no compile and no texture step big enough to
+  explain it (max step ~40 ms). Not yet identified.
+- 9 bulk compile events remain. The two at t~350 and t~580 are boot; the rest are shots whose
+  warm has not finished before the cut. Prewarming further ahead is the obvious next lever.
+- 43 s to title is the cinematic's own runtime, not loading (handoff at ~5.3 s). Art call.
 - 43 s to the title is dominated by the INTRO CINEMATIC's own runtime, not loading — the
   loading screen hands off at ~5.5 s (was ~8 s). Shortening that is an art-direction call,
   not a perf one.
