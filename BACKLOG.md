@@ -1,5 +1,48 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 27 — copy-on-write was silently dropping the shader injection
+
+### The bug (a VISUAL one; the perf half did not pan out)
+
+`_splitMaterial()` clones a shared material so a caller can mutate it — the copy-on-write
+behind hit flash, damage tint and the camera's occluder fade. But `onBeforeCompile` and
+`customProgramCacheKey` are assigned as OWN properties (lighting.js injects the analytic
+occluder and fresnel rim through them; also ArenaBase, Gore, Particles,
+institutionalCapitalTower), and three's `Material.copy()` does not carry own function
+properties. VERIFIED EMPIRICALLY against the project's own three build:
+
+    original onBeforeCompile own prop : true
+    CLONE    onBeforeCompile own prop : false          <- hook lost
+    original cacheKey                 : wcsOcc1
+    CLONE    cacheKey                 : onBeforeCompile( /* shaderobject, renderer */ ) {}
+
+So every claimed copy rendered WITHOUT its occluder/rim injection — and copy-on-write fires
+precisely on the mesh being flashed, tinted or faded, i.e. the one the player is looking at.
+The clone also falls back to three's default cache key (which stringifies the PROTOTYPE
+onBeforeCompile), so it is a different program.
+
+FIX: carry both hooks onto the clone in `_splitMaterial()`.
+
+### The perf claim was NOT proven — say so
+
+Post-bell compiles were 4-5 before and 5 after. The named `screen:767676#own` did drop out of
+the list, but the count held because the other compiles are first-use of whatever enters view
+as the fight develops (`cloth:e8e8f0`, three unnamed) — different materials every run, not one
+culprit. The fix is justified by correctness alone. Do not cite it as a frame-time win.
+
+### Harness bug #4 — a synthetic resize DURING loading stalls the boot
+
+`fightprof` dispatched `resize` right after readiness, i.e. while LoadingScreen was still up,
+forcing `renderer.setSize()` plus a pipeline target rebuild mid-load. That was the remaining
+difference from `bootprof` (which never resizes and never stalls) and the cause of the
+intermittent "loading screen never handed off". Resize AFTER the handoff. This is a
+measurement artifact, not a game defect — a player never fires a resize during load.
+
+Running tally of instrumentation bugs this session: profiler off-by-one, concurrent-browser
+contention, readiness-too-early, resize-during-load. The probes have needed more debugging
+than the game.
+
+
 ## ROUND 26 — fight rig fixed, and the best in-fight numbers of the project
 
 ### The rig bug: a device-metrics override applied BEFORE navigation stalls the boot

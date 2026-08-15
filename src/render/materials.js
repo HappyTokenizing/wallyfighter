@@ -1632,6 +1632,30 @@ function _splitMaterial(mat, opts) {
   // clone() copies texture REFERENCES already; this is belt-and-braces against
   // a future three.js that deep-copies, and it documents the intent.
   for (const slot of _CLONE_SHARE_SLOTS) if (mat[slot] !== undefined) clone[slot] = mat[slot]
+  // THE SHADER HOOKS DO NOT SURVIVE clone(), AND THIS CODEBASE LIVES ON THEM.
+  //
+  // three's Material.copy() copies a fixed list of known properties. Both hooks
+  // below are assigned as OWN properties, so a clone silently loses them:
+  //   onBeforeCompile       - lighting.js injects the analytic occluder term and
+  //                           the fresnel rim through it (also ArenaBase, Gore,
+  //                           Particles, institutionalCapitalTower)
+  //   customProgramCacheKey - the matching key suffix, e.g. '|wcsOcc1'
+  //
+  // Losing them costs twice. VISUALLY the claimed copy renders without the
+  // injection, so the one mesh that is currently being faded, flashed or tinted
+  // is also the one mesh missing its contact occlusion and rim — on exactly the
+  // frames a player is looking at it. And for PERFORMANCE the clone no longer
+  // carries the key suffix, so it is a brand-new program: measured as
+  // `screen:767676#own` compiling mid-fight for 33-51 ms, on an arena display
+  // panel the camera had just faded as an occluder.
+  //
+  // Copying the function over keeps `this` bound to the CLONE when three calls
+  // it, which is what both hooks want.
+  for (const hook of ['onBeforeCompile', 'customProgramCacheKey']) {
+    if (Object.prototype.hasOwnProperty.call(mat, hook) && typeof mat[hook] === 'function') {
+      clone[hook] = mat[hook]
+    }
+  }
   clone.userData = { ...mat.userData }
   clone.userData.__wcsShared = false
   clone.userData.__wcsClaimedFrom = mat.userData.__wcsKey || mat.name || ''
