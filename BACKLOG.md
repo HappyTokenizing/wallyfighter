@@ -50,9 +50,30 @@ The game runs normally. The frozen readings came from runs with several Chrome i
 at once. LESSON, and it is the second instrumentation bug of the day: when a measurement says
 something impossible, suspect the instrument first — especially after already finding one.
 
-### Boot-time variance is load, not regression
-Same build measured 43.0 / 42.9 / 43.7 s earlier and 54.4 / 61.6 s later the same day, tracking
-machine load average. Quote boot times only with an `uptime` alongside.
+### Boot-time variance was MY OWN TEST HARNESS, and the rule already existed
+
+Same build measured 43.0 / 42.9 / 43.7 s, then 54.4 / 61.6 s, then 361 s with the title never
+reached. That last one is 8x and is not explainable by load. It is explained by overlap: a
+three-run background job was still going while a foreground probe held its own browser open.
+Two Chrome instances with live WebGL contexts starve each other.
+
+Every impossible reading of the day traces to exactly that — the "frozen game", the 361 s boot,
+the hung `bootcheck` polls. Confirmed by a single run with nothing else alive:
+
+    pre-check: 0 chrome, load 2.57
+    loading @ 507 ms   intro @ 5505 ms   title @ 42937 ms   errors 0
+
+i.e. 43.1 s, matching the clean runs to within noise. No regression ever existed.
+
+THE RULE WAS ALREADY WRITTEN DOWN, in round 13's admissibility protocol: "Real Chrome, no
+?cap=1, ONE TAB, no other live WebGL context." It was broken by running measurements
+concurrently to save wall-clock time. Never run two browser probes at once; check
+`pgrep -f remote-debugging-port` returns 0 before starting one.
+
+WHAT THIS DOES NOT INVALIDATE: every A/B conclusion this session, because those were COUNTS
+(programs after the bell, bulk recompiles, light-count changes) taken back-to-back under
+identical conditions — which is exactly why count-based criteria were chosen while the machine
+was loaded. And the in-fight 8.4 ms median, taken single-browser on a quiet machine.
 
 
 ## ROUND 23 — in-fight: 120 fps steady state, and the last big hitch is ONE shader
