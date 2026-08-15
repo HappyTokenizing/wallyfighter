@@ -1,5 +1,41 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 26 — fight rig fixed, and the best in-fight numbers of the project
+
+### The rig bug: a device-metrics override applied BEFORE navigation stalls the boot
+
+`fightprof` called `Emulation.setDeviceMetricsOverride(1920x1080)` before `Page.navigate`.
+That is the only difference from `bootprof`, which never stalls. Removing it — same script,
+one line — took the run from "loading screen never handed off after 60 s" to reaching the
+bell at 13.1 s. The override is the cause.
+
+FIX FOR THE RIG: apply the override AFTER the game has booted, not before navigating, if a
+1080p measurement is wanted. Numbers below were taken at the window's natural size and are
+therefore NOT comparable with the earlier forced-1080p figures.
+
+### Clean 40 s fight, single browser, pre-check 0 chrome
+
+    gap    med 8.3   p90 16.4   p99 17.6     <- median ON the 8.3 ms vsync floor
+    update med 0.5   p90 1.0    p99 1.8
+    render med 3.1   p90 3.8    p99 5.0
+    frames over 100 ms: 0     over 50 ms: 1     over 33 ms: 6
+    worst: 51, 43, 42, 36, 34, 34, 33, 33 ms
+    steps5 0   lightChanges 1   errors 0
+
+ZERO frames over 100 ms in a 40 s fight, and the single worst frame is 51 ms carrying
+`dProgs 1` — a first-use shader compile. This is the closest the game has been to flawless.
+
+### What remains
+
+Four first-use compiles per fight (t = 17.0 / 21.4 / 43.4 / 52.8 s), costing 33-51 ms each.
+Three are unnamed (pass materials); the fourth is `screen:767676#own` — an arena display panel
+taking a copy-on-write private material at runtime, which gives it a new program key and a
+compile on first draw. Pre-splitting those at build is the next lever.
+
+Also still true: `unacc` max is 28.5 ms and `tex.overrunMs` 3019 over the run, so the surface
+drain is no longer producing anything a player would see.
+
+
 ## ROUND 25 — CORRECTION: the "254 ms compile" is ~50-62 ms. It was contention.
 
 ### The correction
