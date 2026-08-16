@@ -1426,17 +1426,33 @@ export class MatchScreen {
       }
     }
 
+    // SIM SUB-PHASE SPLIT (?prof=1 only, one dead branch otherwise).
+    // Measured on an emulated phone at 4x throttle: a SINGLE sim step costs
+    // 60.2 ms against a 4.7 ms median — a 13x outlier, and with steps/frame
+    // almost always 0 or 1 it is one expensive tick, not catch-up. The frame
+    // profiler can only say "update"; naming the subsystem needs this.
+    const _P = (typeof window !== 'undefined' && window.__prof) || null
+    const _simLap = _P ? {} : null
+    const _t0 = _P ? performance.now() : 0
+    let _mk = _t0
+    const _lap = _P
+      ? (k) => { const n = performance.now(); _simLap[k] = (_simLap[k] || 0) + (n - _mk); _mk = n }
+      : () => {}
+
     const allow = this.phase === 'fight'
     for (const f of this.fighters) f.ctrl.updateAI?.(f, f.foe, allow)
+    _lap('ai')
     // v2.0: the old X-only _aiItemSteer nudge is gone — the Brain routes to
     // items itself in full 2D (§17 'fetch' state via items.nearestGroundItem),
     // and the nudge would clobber its world-X intent while leaving Z intact.
     for (const f of this.fighters) f.update(dt, allow)
+    _lap('fighters')
 
     // Presentation: the striking limb's trail. Fed here, one step after the
     // fighters have posed themselves and one step before particles.update()
     // builds the strip, so the ribbon head is never a frame behind the fist.
     try { this._feedSwingRibbons() } catch { /* presentation only */ }
+    _lap('ribbons')
 
     if (this.phase === 'fight') {
       this._scanHits()
@@ -1444,6 +1460,7 @@ export class MatchScreen {
       this._pushApart()
       if (this.items) this._updateItems(dt)
     }
+    _lap('scans')
 
     // Scripted specials / finishers. Snapshot the length instead of copying the
     // array: a step() that appends a new fx must not run this frame (the old
@@ -1461,6 +1478,7 @@ export class MatchScreen {
       for (let i = 0; i < fx.length; i++) if (fx[i] && !fx[i].done) fx[w++] = fx[i]
       fx.length = w
     }
+    _lap('fx')
 
     // ragdoll recovery
     for (const f of this.fighters) {
@@ -1474,13 +1492,18 @@ export class MatchScreen {
     }
 
     try { this.physics.step(dt) } catch (e) { console.error('[combat] physics.step threw', e) }
+    _lap('physics')
     try { this.ragdolls.update(dt) } catch (e) { console.error('[combat] ragdolls.update threw', e) }
+    _lap('ragdolls')
     try { this.arena.update?.(dt) } catch (e) { console.error('[combat] arena.update threw', e) }
+    _lap('arena')
     // Optional-chained since defect 8: both pools are built on the round-intro
     // frames now, and a handful of intro steps run before their step does. Both
     // are guaranteed present from _beginFight() onward.
     this.props?.update()
+    _lap('props')
     this.particles?.update(dt)
+    _lap('particles')
     // Decal fade / dripping, every phase. Inlined rather than routed through
     // _goreSafe() so the hottest gore call in the build does not allocate a
     // closure 60 times a second; the disable-on-throw contract is identical.
@@ -1494,6 +1517,20 @@ export class MatchScreen {
     }
     // record this fixed frame for the instant replay (fight/finisher/ko only)
     try { this.replay?.captureFrame(this.phase) } catch { /* recorder is optional */ }
+    if (_P) {
+      _lap('replayGore')
+      const total = performance.now() - _t0
+      // Keep only genuinely bad ticks: the median step is ~4.7 ms on a throttled
+      // phone, so 20 ms is already 4x that and anything below it is noise.
+      if (total > 20) {
+        if (!_P.simWorst) _P.simWorst = []
+        if (_P.simWorst.length < 40) {
+          const o = { total: +total.toFixed(1) }
+          for (const k of Object.keys(_simLap)) if (_simLap[k] >= 0.5) o[k] = +_simLap[k].toFixed(1)
+          _P.simWorst.push(o)
+        }
+      }
+    }
 
     // combo drop when the victim is back to neutral. Window is 26 (not 20):
     // un-cancelled rapid lights land ~22 frames apart (startup+active+recovery

@@ -1,5 +1,43 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 32 — phone sim spikes located: it is `f.update()` and the hit scans, NOT physics
+
+### How it was narrowed
+
+After round 31 fixed the texture-band freeze, the worst phone frames became update-dominated.
+Two measurements narrowed it without guessing:
+
+1. STEPS PER FRAME — `{0: 1175, 1: 2483, 2: 107, 4: 1}`, and the worst frame was `u=60.2` with
+   `steps=1`. So it is ONE expensive tick against a 4.7 ms median (a 13x outlier), NOT the
+   accumulator catching up. That killed the pacing theory, which would have had a much cheaper
+   fix (cap steps on touch) and would have been the wrong one.
+2. SIM SUB-PHASE SPLIT — `?prof=1` now records the per-subsystem breakdown of any tick over
+   20 ms into `__prof.simWorst` (AI / fighters / ribbons / scans / fx / physics / ragdolls /
+   arena / props / particles / gore+replay).
+
+### The answer
+
+    {total 51.3,  fighters 48.4,  physics  2.5}
+    {total 39.0,  scans    37.1,  physics  0.5, ragdolls 0.7}
+    {total 35.9,  physics  14.8,  arena   11.7, fighters 7.7}
+
+`f.update()` at 48.4 ms and the hit/grab scans at 37.1 ms. PHYSICS AND RAGDOLLS ARE NOT THE
+CAUSE — which is what I expected going in, and was wrong about. Two fighters cannot cost 48 ms
+to update or 37 ms to scan in steady state, so these are near-certainly LAZY CONSTRUCTION on
+first use of a move (hitbox data, an animation clip, a spring chain) rather than per-frame cost.
+
+### Next step
+
+Sub-instrument `Fighter.update()` and `_scanHits`/`_scanGrabs` the same way, on the same
+emulated phone, and find what is built on demand. The fix will be to build it at match load —
+the same shape as every other first-use problem this session (shader variants, the intro
+prewarm, the heart light). Desktop hides all of it: 48 ms at 4x throttle is ~12 ms unthrottled,
+which never crosses a threshold worth noticing.
+
+### Measurement note
+`__prof.simWorst` keeps the 40 worst ticks over 20 ms, prof-only, one dead branch otherwise.
+
+
 ## ROUND 31 — PHONE FREEZES: fixed the non-preemptible build step. 4 -> 0 frames over 100 ms.
 
 ### The gap in every previous measurement
