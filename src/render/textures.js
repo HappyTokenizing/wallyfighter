@@ -393,6 +393,12 @@ function boxDown1Into(dstRG, dstSize, src, srcSize) {
 export function setTextureQuality(q = {}) {
   if (Number.isFinite(q.size)) DEFAULT_SIZE = clampSize(q.size)
   if (Number.isFinite(q.anisotropy)) DEFAULT_ANISO = Math.max(1, Math.min(16, q.anisotropy | 0))
+  // `bandRows` — rows of the height field per build step, i.e. the size of the
+  // one unit drainQueue() cannot preempt. A slow device wants SMALLER bands: the
+  // total work is unchanged, it is just cut into more interruptible pieces, and
+  // that is the only lever that lowers the worst single frame (no budget can
+  // slice below one band). Clamped to 4 so it can never become pathological.
+  if (Number.isFinite(q.bandRows)) BAND_ROWS = Math.max(4, Math.min(64, q.bandRows | 0))
   if (Number.isFinite(q.budgetMB)) BUDGET_BYTES = Math.max(8, q.budgetMB) * 1024 * 1024
   // Secondary-map resolution, as a fraction of the field size. `1` restores the
   // pre-round-9 behaviour (every map at full size); `0.25` is the knob a genuine
@@ -2060,7 +2066,24 @@ function isPresenting() {
   if (typeof document === 'undefined') return false
   return document.visibilityState === 'visible'
 }
-const BAND_ROWS = 32          // rows of the height field per build step
+// ROWS OF THE HEIGHT FIELD PER BUILD STEP — i.e. the size of the one unit this
+// generator CANNOT preempt. drainQueue() checks its deadline BETWEEN steps, so a
+// tick always costs `budget + whatever step it had already started`, and no
+// budget value can ever slice below one band. That makes this constant, not the
+// budget, the floor on how long a single frame can be blocked.
+//
+// It used to be a flat 32 on every device. Measured in a live fight:
+//     desktop, high tier            maxStepMs  54
+//     emulated phone, low tier, 4x  maxStepMs 157
+// and a real budget phone is often slower than 4x, so 200-400 ms is realistic —
+// which is exactly the "occasional freeze on phones" this is here to fix. The
+// desktop profiles never showed it because the same band is three times cheaper
+// there.
+//
+// So it is now a knob (see setTextureQuality). The work is identical; it is
+// simply cut into more, smaller, interruptible pieces on slow devices. Fewer
+// rows per step costs a little more per-step overhead and nothing visually.
+let BAND_ROWS = 32
 
 const _jobQueue = []
 let _tickTimer = null

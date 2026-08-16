@@ -1,5 +1,63 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 31 — PHONE FREEZES: fixed the non-preemptible build step. 4 -> 0 frames over 100 ms.
+
+### The gap in every previous measurement
+
+Every fight profile this session was DESKTOP, `high` tier, unthrottled. Mobile takes the `low`
+tier (no composer at all) on far slower silicon, so none of the "120 fps, zero frames over
+100 ms" desktop results said anything about a phone. User reported occasional in-fight freezes
+on phones; profiling one is what found it.
+
+### Measured on an emulated phone (390x844 @3x, touch, iOS UA, 4x CPU throttle, `low` tier)
+
+    BEFORE                                    AFTER (two runs)
+    frames >100 ms      4                     0 / 0
+    frames >50 ms      13                     3 / 2
+    frames >33 ms      94                    54 / 44
+    p99                41 ms                 33.5 / 33.7 ms
+    worst frame       133 ms                 91 / 75 ms
+    render max        127 ms                 22.7 ms
+    drain overrun    4628 ms                 2175 / 2179 ms
+    errors              0                     0
+
+### The cause: one build step is not preemptible, and it was a fixed size
+
+`drainQueue()` checks its deadline BETWEEN steps, so a tick always costs
+`budget + whatever step it had already started`. No budget value can slice below one step —
+which makes the STEP SIZE, not the budget, the floor on how long one frame can block.
+
+`BAND_ROWS` (rows of height field per build step) was a hard-coded 32 on every device:
+
+    desktop, high tier              maxStepMs  54
+    emulated phone, low tier, 4x    maxStepMs 157
+
+and real budget phones run slower than 4x, so 200-400 ms is realistic. Desktop never showed it
+because the identical band is three times cheaper there.
+
+### The fix
+
+`BAND_ROWS` is now a `setTextureQuality({ bandRows })` knob, defaulting to **8 on touch and on
+the `low` tier**, 32 elsewhere. Identical work, identical image — the generation is simply cut
+into four times as many interruptible pieces. Keyed off `isTouch` and not only the tier name,
+because a phone can be set to `high` by hand and the CPU is still a phone CPU.
+
+### What this does NOT fix, stated plainly
+
+- The three first-use shader compiles (86-127 ms with `dProgs 1`) are a separate cause needing
+  pre-warming. They did not appear in the after-runs, but that is luck, not a fix.
+- `maxStepMs` is still ~145-157: some build steps are NOT band-limited (the upscale/halve
+  steps around textures.js:2148, 2157, 2196, 2226, 2260). Those did not land during the fight
+  sample, but they are the next non-preemptible unit if one does.
+
+### NEXT LEAD — on phones the bottleneck is now the SIM, not rendering
+
+After the fix the worst frames are update-dominated: `u=59.3`, `47.3`, `33.4` ms of physics,
+AI and animation in a single frame at 4x throttle. The `low` tier reduces VISUAL load
+(crowd 24, propLimit 12, no shadows) but does not reduce simulation cost at all. That is the
+next lever for phones, and it is a different subsystem from anything chased this session.
+
+
 ## ROUND 30 — OPEN RISK: an intermittent loading-screen stall that should be impossible
 
 ### What was seen

@@ -570,6 +570,16 @@ export class Game {
         size: q.textureSize,
         anisotropy: q.anisotropy,
         budgetMB: q.textureBudgetMB,
+        // THE ONE KNOB THAT LOWERS THE WORST FRAME ON A PHONE. A build step is
+        // not preemptible, so a frame always costs `budget + one band` and no
+        // budget can go below a band. Measured in a live fight: 54 ms a band on
+        // this desktop, 157 ms on an emulated phone at 4x throttle — and real
+        // budget phones run slower than that. Cutting the band cuts the freeze;
+        // the total work and the final image are identical.
+        // Tiers may override with `bandRows`; touch defaults LOW even on a tier
+        // that did not ask, because `isTouch` is the better proxy for a slow CPU
+        // than the tier name is (a phone can be set to 'high' by hand).
+        bandRows: q.bandRows ?? (this.isTouch ? 8 : (q.tier === 'low' ? 8 : 32)),
       })
     } catch (e) { console.warn('[game] setTextureQuality failed', e) }
     try {
