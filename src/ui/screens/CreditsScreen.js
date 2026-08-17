@@ -1,7 +1,7 @@
 // Credits — auto-scrolling retro crawl over the 3D backdrop. Hold down/confirm
 // to fast-forward, ESC to bail. Returns to the menu when the crawl completes.
 import { RosterOrder } from '../../characters/index.js'
-import { el, ensureMusic, charName, hintHTML } from '../uiKit.js'
+import { el, ensureMusic, charName, hintHTML, addBackButton } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 
 const SCROLL_SPEED = 58    // px/s
@@ -88,6 +88,8 @@ export class CreditsScreen {
       ${hintHTML(this.game, 'HOLD <b>&darr; / J</b> FAST-FORWARD &nbsp; <b>ESC</b> BACK')}
     `
     this.game.ui.appendChild(this.root)
+    // Touch-only: the keyboard/gamepad 'back' binding does not exist on a phone.
+    addBackButton(this.game, this.root, () => { this.done = true; this.game.audio.sfx('menu_back'); this.game.screens.goto('menu') })
     this.scrollEl = this.root.querySelector('.cred-scroll')
     this.y = innerHeight
     this.scrollEl.style.transform = `translateY(${this.y}px)`

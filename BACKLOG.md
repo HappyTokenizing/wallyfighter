@@ -1,5 +1,84 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 37 — the phone could not leave the character select, and that was the small half
+
+Reported: on a phone you cannot get out of the character list. The cause generalises.
+`InputManager` only ever raises `_menuEdge.back` from a keyboard code or a GAMEPAD
+(`this.edge[p].heavy && this.pads[p] >= 0`), so `menuPressed('back')` is unreachable on a
+touch device and EVERY screen whose only exit ran through it was a one-way door.
+
+### Method
+
+Tap-only reachability rig (`/private/tmp/mobileescape.mjs`): emulated iPhone LANDSCAPE
+812x375 with touch emulation on so `@media (pointer: coarse)` actually applies, driven by
+`Input.dispatchTouchEvent` at real coordinates. Setup by `goto()` is instrumentation; the
+ESCAPE is tap-only — no key events, no `element.click()`. When the back-looking controls
+fail it brute-forces EVERY tappable element, so a failure means "no escape exists", not
+"I didn't find one". A multi-agent audit ran in parallel; every finding was adversarially
+re-verified before being acted on. 37 confirmed.
+
+### Two rig bugs worth remembering (both produced confident, wrong readings)
+
+- First run tested PORTRAIT, where `.wcs-rotate` covers everything by design, and
+  concluded the title screen ignored taps. Orientation is part of the test setup.
+- The rig accepted ANY screen change as "escaped". The back button was landing on the
+  menu and then tap-throughing into Story Mode, and the rig called it a PASS. Assert the
+  DESTINATION, not that something happened.
+
+### Blockers found
+
+- `.sel-diff` declared `z-index: 3; /* over the grid */` while `.sel-grid` is 4, so during
+  Versus CPU's difficulty step all five boxes were hit-tested UNDER the grid:
+  `elementFromPoint` returned `.sel-grid` for every one. No forward, no back — the FIRST
+  main-menu item softlocked a phone until reload. The comment had contradicted the value
+  all along, and keyboard/gamepad never noticed because they do not hit-test.
+- Costume B (select) and the costume preview (gallery) were unreachable: `_toggleCostume()`
+  had exactly one caller, a `heavy` press, and there is no heavy button outside a match.
+- Dead ends with no tap exit: select, settings, gallery, movelist, credits, plus the
+  training / playground / story / arcade pickers. Credits had ZERO tappable elements.
+
+### Tap-through: one gesture, two screens
+
+Title, Loading and Vs advanced on `pointerdown`, swapping the screen BETWEEN finger-down
+and finger-up — so the browser delivered the click to whatever had just appeared under the
+thumb. One tap on the title launched Training. All three now use `click`.
+
+I then made the same mistake in reverse: the new BACK button used `pointerdown`, the menu
+mounted mid-gesture, and because `.menu-list` starts at 5vh under `@media (max-height:520px)`
+every BACK tap launched Story Mode. Caught only by the destination assertion above.
+
+### Fixed
+
+One shared `uiKit.addBackButton()` (touch-only, 44px, safe-area aware, above every screen's
+stacking context) covers all the dead ends; `.sel-diff` z-index 3 -> 6; three screens moved
+to `click`; coarse-pointer floor 40 -> 44 and extended to the screens it never named
+(story rows, training/playground pickers and arrows, replay controls whose only CLOSE was
+~28px); settings steppers given a real box (as centred flex items they stayed ~15px tall no
+matter the horizontal padding); volume sliders, save card, pause chip raised; tutorial SKIP
+moved off the pause chip it was eating; `.mv-legend` and the VS glyph un-overlapped;
+keyboard-only copy branched on touch ([K] SWAP, K KICK, gamepad note, PRESS ANY BUTTON,
+PRESS A KEY / ESC CANCELS); the remap key-capture trap given a tap escape.
+
+### NOT defects (recorded so they are not re-investigated)
+
+- The four "offscreen" main-menu rows are inside `.menu-list { overflow-y: auto }` and
+  scroll into view. My own rig reported these as offscreen — a false positive.
+- Portrait being blocked is the deliberate `.wcs-rotate` gate.
+- Two desktop ESC failures in one run did NOT reproduce across three later runs on
+  identical code: flaky timing under browser contention, not a regression.
+
+### Still open
+
+- TrainingMode layout: frame-data panel pinned at `top: 338px` falls off a 390px screen,
+  and the move-list panel sits inside the touch stick's capture zone so it cannot be
+  scrolled. Needs a real layout pass, not a floor bump.
+- Training/playground legend rows (~19px) sit under the touch button cluster.
+- `MenuList` rows are tagged only `.wcs-btn`, so the 44px floor reaches them only via the
+  screen-specific selectors listed in the coarse block.
+- `ScreenManager`'s 8-frame input grace guards `update()` only, so a DOM tap can still
+  reach a just-mounted screen — the structural fix for the tap-through class.
+
+
 ## ROUND 36 — the detach clone is off the damage frame (round 35's fix, implemented)
 
 ### Should it have been implemented? A second, independent line of evidence said yes.

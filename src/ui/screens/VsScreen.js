@@ -56,7 +56,10 @@ export class VsScreen {
     this._onKey = () => this._go()
     this._onClick = () => this._go()
     addEventListener('keydown', this._onKey)
-    this.root.addEventListener('pointerdown', this._onClick)
+    // 'click', not 'pointerdown' — see TitleScreen. On pointerdown the match
+    // mounted mid-gesture and the click landed on whatever TouchControls button
+    // sat under the thumb, firing a phantom attack on the opening bell.
+    this.root.addEventListener('click', this._onClick)
   }
 
   exit() {

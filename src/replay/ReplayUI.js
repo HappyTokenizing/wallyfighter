@@ -11,7 +11,7 @@
 // Styles are self-contained (injected <style>, rp- prefix). Uses ui.css vars
 // with hard fallbacks so the module never depends on load order.
 import * as THREE from 'three'
-import { el } from '../ui/uiKit.js'
+import { el, touchUI } from '../ui/uiKit.js'
 import { RenderPipeline, renderScene, resetRenderFallback } from '../render/index.js'
 
 const STYLE_ID = 'replay-ui-css'
@@ -162,7 +162,9 @@ export function showInstantReplay(game, { onSkip = null } = {}) {
   root.appendChild(el('div', 'rp-banner', '&#9666;&#9666; INSTANT REPLAY'))
   root.appendChild(el('div', 'rp-rec', 'REPLAY <b>&#9679;</b>'))
   root.appendChild(el('div', 'rp-ko', 'K.O.!'))
-  root.appendChild(el('div', 'rp-skip', 'PRESS ANY BUTTON TO SKIP'))
+  // There are no buttons to press on a phone; the overlay is dismissed by tap.
+  root.appendChild(el('div', 'rp-skip',
+    touchUI(game) ? 'TAP TO SKIP' : 'PRESS ANY BUTTON TO SKIP'))
   ;(game.ui || document.body).appendChild(root)
 
   let done = false

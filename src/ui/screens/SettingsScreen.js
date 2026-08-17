@@ -6,7 +6,7 @@
 // game.input.bindings[0] is the plain merged object InputManager reads every
 // frame, so we mutate it in place — and persist via game.save.set('controls.p1')
 // for the next boot.
-import { el, ensureMusic, formatKey, toast, touchUI, hintHTML } from '../uiKit.js'
+import { el, ensureMusic, formatKey, toast, touchUI, hintHTML, addBackButton } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 import { GameConfig } from '../../config/GameConfig.js'
 
@@ -70,14 +70,16 @@ export class SettingsScreen {
           <h3>CONTROLS — REMAP (P1)</h3>
           <div class="ctl-rows"></div>
           <div class="ctl-status"></div>
-          <div class="pad-note">GAMEPADS: PLUG IN &amp; GO — STANDARD MAPPING, START = PAUSE</div>
+          ${touchUI(this.game) ? '' : '<div class="pad-note">GAMEPADS: PLUG IN &amp; GO — STANDARD MAPPING, START = PAUSE</div>'}
         </div>
       </div>
       ${hintHTML(this.game,
         '<b>↑↓</b> ROW &nbsp; <b>←→</b> ADJUST / PLAYER &nbsp; <b>ENTER</b> SELECT / REBIND &nbsp; <b>ESC</b> BACK',
-        'TAP A ROW TO ADJUST')}
+        'TAP ◀ ▶ TO ADJUST')}
     `
     this.game.ui.appendChild(this.root)
+    // Touch-only: the keyboard/gamepad 'back' binding does not exist on a phone.
+    addBackButton(this.game, this.root, () => { this.game.audio.sfx('menu_back'); this.game.screens.goto('menu') })
 
     this._buildLeftRows(this.root.querySelector('.set-rows'))
     this._buildControlRows(this.root.querySelector('.ctl-rows'))
@@ -314,7 +316,9 @@ export class SettingsScreen {
     status.classList.remove('warn', 'live')
     if (this.capture) {
       status.classList.add('live')
-      status.textContent = `PRESS A KEY FOR P${this.capture.p + 1} ${this.capture.action.toUpperCase()} — ESC CANCELS`
+      status.textContent = touchUI(this.game)
+        ? `CONNECT A KEYBOARD TO REBIND P${this.capture.p + 1} ${this.capture.action.toUpperCase()} — TAP ANYWHERE TO CANCEL`
+        : `PRESS A KEY FOR P${this.capture.p + 1} ${this.capture.action.toUpperCase()} — ESC CANCELS`
     } else if (this.hasConflict) {
       status.classList.add('warn')
       status.textContent = '! DUPLICATE KEYS HIGHLIGHTED — ONE KEY, TWO JOBS'
@@ -336,6 +340,17 @@ export class SettingsScreen {
     // menu navigation / the input buffers while we are rebinding
     this._capHandler = (e) => this._onCaptureKey(e)
     window.addEventListener('keydown', this._capHandler, true)
+    // The remap rows carry no touch gate, so a tap could arm this state on a
+    // phone — where the only documented way out was ESC, i.e. nothing. Rather
+    // than block rebinding outright (a tablet may well have a keyboard
+    // attached), give the armed state a tap escape. Deferred a tick so the tap
+    // that opened it cannot immediately close it.
+    if (touchUI(this.game)) {
+      this._capTapOut = () => { this.game.audio.sfx('menu_back'); this._cancelCapture() }
+      setTimeout(() => {
+        if (this._capTapOut) this.root?.addEventListener('pointerdown', this._capTapOut, { once: true })
+      }, 0)
+    }
     this._updateStatus()
   }
 
@@ -361,6 +376,10 @@ export class SettingsScreen {
     if (this._capHandler) {
       window.removeEventListener('keydown', this._capHandler, true)
       this._capHandler = null
+    }
+    if (this._capTapOut) {
+      this.root?.removeEventListener('pointerdown', this._capTapOut)
+      this._capTapOut = null
     }
     if (this.capture) {
       this.capture.row.node.classList.remove('listening')

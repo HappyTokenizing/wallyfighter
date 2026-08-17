@@ -5,7 +5,7 @@
 // Exported as StoryScreen; registered under the name 'story' by the UI module.
 import { Characters, UnchainedBull } from '../characters/index.js'
 import { ArenaOrder, Arenas } from '../arenas/index.js'
-import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, hintHTML } from '../ui/uiKit.js'
+import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, hintHTML, addBackButton } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 import { TutorialDirector } from './Tutorial.js'
 
@@ -192,6 +192,9 @@ export class StoryScreen {
     this.stage = el('div', 'sm-stage')
     this.root.appendChild(this.stage)
     this.game.ui.appendChild(this.root)
+    // Touch-only: this picker exited only through menuPressed('back'),
+    // which no touch device can raise (InputManager needs a key or a pad).
+    addBackButton(this.game, this.root, () => { this.game.audio?.sfx?.('menu_back'); this.game.screens.goto('menu') })
 
     this.view = ''
     this.list = null

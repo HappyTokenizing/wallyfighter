@@ -126,7 +126,10 @@ const STYLE = `
   .wcs-tut-card.done { border-color: var(--wcs-green, #2bff6a); }
   .wcs-tut-card.done .tcheck { opacity: 1; transform: scale(1);
                                transition: transform 0.16s cubic-bezier(0.2, 1.8, 0.4, 1), opacity 0.1s; }
-  .wcs-tut-skip { position: absolute; top: calc(92px + env(safe-area-inset-top, 0px)); right: 12px;
+  /* Clears the touch PAUSE chip, which is right:10px and spans roughly
+     y66-y154 depending on viewport height. At top:92px this slab sat on
+     top of it and swallowed the taps meant to pause the match. */
+  .wcs-tut-skip { position: absolute; top: calc(160px + env(safe-area-inset-top, 0px)); right: 12px;
                   pointer-events: auto; cursor: pointer;
                   font-family: var(--wcs-font, Impact); font-size: clamp(12px, 1.6vw, 17px);
                   letter-spacing: 2px; color: #fff; text-shadow: 1px 1px 0 #000;
@@ -149,7 +152,7 @@ const STYLE = `
     .wcs-tut-card .tbody { line-height: 2.05; }
     .wcs-tut-card kbd { font-size: 1.1em; padding: 0.06em 0.36em; margin: 0 3px; }
     .wcs-tut-card kbd.wide { font-size: 0.96em; padding: 0.14em 0.5em; }
-    .wcs-tut-skip { top: 70px; }
+    .wcs-tut-skip { top: 118px; } /* below the 44px pause chip at top:66px */
   }
 `
 

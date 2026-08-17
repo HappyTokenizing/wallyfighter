@@ -7,7 +7,7 @@ import { Characters, RosterOrder } from '../../characters/index.js'
 import { Arenas } from '../../arenas/index.js'
 import {
   el, toast, shake, ensureMusic, statBarsHTML,
-  charName, charTitle, charDef, touchUI, hintHTML,
+  charName, charTitle, charDef, touchUI, hintHTML, addBackButton,
 } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 import { heroPortrait } from './PortraitStudio.js'
@@ -82,6 +82,8 @@ export class SelectScreen {
         'TAP A FIGHTER TO LOCK IN')}
     `
     this.game.ui.appendChild(this.root)
+    // Touch-only: the keyboard/gamepad 'back' binding does not exist on a phone.
+    addBackButton(this.game, this.root, () => { this._back() })
     this.headerEl = this.root.querySelector('.sel-header .h2')
     this.panels = [this.root.querySelector('.sel-panel.left'), this.root.querySelector('.sel-panel.right')]
 
@@ -295,6 +297,14 @@ export class SelectScreen {
     this.root.querySelector('.sel-diff').classList.toggle('show', this.phase === 2)
     if (this.phase === 2) this._refreshDiff()
 
+    // The bottom hint bar is written once in enter() and was never rewritten,
+    // so during phase 2 it still read 'TAP A FIGHTER TO LOCK IN' while the
+    // difficulty panel on top of it said 'TAP A LEVEL TO FIGHT' — two
+    // contradictory instructions on screen at once. The panel owns the
+    // instruction while it is up, so the bar stands down.
+    this.hintEl ||= this.root.querySelector('.wcs-hintbar')
+    if (this.hintEl) this.hintEl.style.display = this.phase === 2 ? 'none' : ''
+
     // grid cursor + picked tags (no cursor while the difficulty row has focus)
     this.slots.forEach((slot, i) => {
       slot.classList.toggle('cur-p1', this.phase === 0 && i === this.cursor)
@@ -373,11 +383,24 @@ export class SelectScreen {
         ? ['#4af0ff', '#b45bff', '#ff6a3b']
         : ['#ffd94a', '#2bff6a', '#3b9dff'])
         .map((c) => `<i style="background:${c}"></i>`).join('')
+      // Costume B had exactly one route in: the `heavy` edge check in update().
+      // There is no heavy button outside a match, so on a phone half the
+      // wardrobe was unreachable. On touch the line becomes the control.
+      const touch = touchUI(this.game)
       costumeEl.innerHTML =
-        `COSTUME ${costume ? 'B' : 'A'}` + (data.live ? ' — [K] SWAP' : '') +
+        `COSTUME ${costume ? 'B' : 'A'}` +
+        (data.live ? (touch ? ' — TAP TO SWAP' : ' — [K] SWAP') : '') +
         `<span class="swatches">${chips}</span>`
+      costumeEl.classList.toggle('tappable', touch && !!data.live)
+      // onclick, not addEventListener: _refresh() runs on every cursor move and
+      // would otherwise stack a new listener each time.
+      costumeEl.onclick = (touch && data.live)
+        ? (e) => { e.stopPropagation(); this._toggleCostume() }
+        : null
     } else {
       costumeEl.textContent = ''
+      costumeEl.classList.remove('tappable')
+      costumeEl.onclick = null
     }
 
     if (data.picked) panel.appendChild(el('div', 'ready-stamp', 'LOCKED IN'))

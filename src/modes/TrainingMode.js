@@ -7,7 +7,7 @@
 import * as THREE from 'three'
 import { MatchScreen } from '../combat/MatchScreen.js'
 import { RosterOrder } from '../characters/index.js'
-import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, hintHTML } from '../ui/uiKit.js'
+import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, hintHTML, addBackButton } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 // The dummy: a ControlSource that wants absolutely nothing. AIControl clamps
@@ -174,6 +174,9 @@ export class TrainingScreen {
       ${hintHTML(this.game, '<b>↑↓</b> ROW &nbsp; <b>←→</b> FIGHTER &nbsp; <b>ENTER</b> NEXT/START &nbsp; <b>ESC</b> BACK', 'TAP THE ARROWS ▸ ENTER THE SIM')}
     `
     this.game.ui.appendChild(this.pickRoot)
+    // Touch-only: this picker exited only through menuPressed('back'),
+    // which no touch device can raise (InputManager needs a key or a pad).
+    addBackButton(this.game, this.pickRoot, () => { this.game.audio?.sfx?.('menu_back'); this.game.screens.goto('menu') })
     this.pickRows = [...this.pickRoot.querySelectorAll('.tp-pickrow')]
     this.startBtn = this.pickRoot.querySelector('.tp-start')
     this.pickRows.forEach((node, i) => {

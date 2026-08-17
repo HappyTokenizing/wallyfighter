@@ -9,7 +9,7 @@ import { MatchScreen } from '../combat/MatchScreen.js'
 import { RosterOrder } from '../characters/index.js'
 import { Arenas } from '../arenas/index.js'
 import { GameConfig } from '../config/GameConfig.js'
-import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, touchUI, hintHTML } from '../ui/uiKit.js'
+import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, touchUI, hintHTML, addBackButton } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 class InertControl {
@@ -184,6 +184,9 @@ export class PlaygroundScreen {
       ${hintHTML(this.game, '<b>↑↓</b> ROW &nbsp; <b>←→</b> PICK &nbsp; <b>ENTER</b> NEXT/START &nbsp; <b>ESC</b> BACK', 'TAP THE ARROWS ▸ OPEN THE TOYBOX')}
     `
     this.game.ui.appendChild(this.pickRoot)
+    // Touch-only: this picker exited only through menuPressed('back'),
+    // which no touch device can raise (InputManager needs a key or a pad).
+    addBackButton(this.game, this.pickRoot, () => { this.game.audio?.sfx?.('menu_back'); this.game.screens.goto('menu') })
     this.pickRows = [...this.pickRoot.querySelectorAll('.pg-pickrow')]
     this.startBtn = this.pickRoot.querySelector('.pg-start')
     this.pickRows.forEach((node, i) => {

@@ -4,7 +4,7 @@
 import { RosterOrder } from '../../characters/index.js'
 import {
   el, ensureMusic, statBarsHTML, charDef, charName, charTitle,
-  PortraitRail, hintHTML,
+  PortraitRail, hintHTML, addBackButton, touchUI,
 } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 import { heroPortrait } from './PortraitStudio.js'
@@ -56,6 +56,8 @@ export class GalleryScreen {
         'TAP A FIGHTER TO BROWSE')}
     `
     this.game.ui.appendChild(this.root)
+    // Touch-only: the keyboard/gamepad 'back' binding does not exist on a phone.
+    addBackButton(this.game, this.root, () => { this.game.audio.sfx('menu_back'); this.game.screens.goto('menu') })
     this.card = this.root.querySelector('.gal-card')
     this.portrait = this.root.querySelector('.gal-portrait')
     this.countEl = this.root.querySelector('.gal-count')
@@ -113,7 +115,15 @@ export class GalleryScreen {
 
   _applyCostume() {
     const [letter, note] = COSTUMES[this.costume]
-    this._q('.gal-costume').innerHTML = `COSTUME ${letter} — ${note}<br>[K] SWAP PREVIEW`
+    const costEl = this._q('.gal-costume')
+    const touch = touchUI(this.game)
+    costEl.innerHTML = `COSTUME ${letter} — ${note}<br>${touch ? 'TAP TO SWAP PREVIEW' : '[K] SWAP PREVIEW'}`
+    // Same defect as the select screen: _toggleCostume()'s only caller is a
+    // `heavy` press, and there is no heavy button outside a match, so on touch
+    // the alt preview could not be reached at all. onclick (not
+    // addEventListener) because _applyCostume runs on every rail move.
+    costEl.classList.toggle('tappable', touch)
+    costEl.onclick = touch ? (e) => { e.stopPropagation(); this._toggleCostume() } : null
     // The hue-shift is now only the STAND-IN while the alt-palette model is
     // baking; the real costume render replaces it and the filter comes off.
     this.portrait.style.filter = this.costume ? 'hue-rotate(150deg) saturate(1.25)' : ''

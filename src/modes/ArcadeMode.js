@@ -7,7 +7,7 @@
 // one-fighter picker built from uiKit portraits.
 import { Characters, RosterOrder } from '../characters/index.js'
 import { Arenas } from '../arenas/index.js'
-import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, statBarsHTML, hintHTML } from '../ui/uiKit.js'
+import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, statBarsHTML, hintHTML, addBackButton } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 const COLS = 5
@@ -125,6 +125,9 @@ export class ArcadeScreen {
     this.stage = el('div', 'arc-stage')
     this.root.appendChild(this.stage)
     this.game.ui.appendChild(this.root)
+    // Touch-only: this picker exited only through menuPressed('back'),
+    // which no touch device can raise (InputManager needs a key or a pad).
+    addBackButton(this.game, this.root, () => { this.game.audio?.sfx?.('menu_back'); this.game.screens.goto('menu') })
 
     this.view = ''
     this.list = null

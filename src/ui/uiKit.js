@@ -41,6 +41,43 @@ export function hintHTML(game, keyboardHtml, touchText = '') {
 }
 
 // ---------------------------------------------------------------------------
+// Touch BACK control
+// ---------------------------------------------------------------------------
+
+// Every menu screen's exit ran through `input.menuPressed('back')`, and
+// InputManager only ever raises _menuEdge.back from a keyboard code or from a
+// GAMEPAD (`this.edge[p].heavy && this.pads[p] >= 0`). On a phone with neither,
+// that is unreachable — so select / settings / gallery / movelist / credits
+// were one-way doors: a tap-only audit that brute-forced EVERY tappable element
+// on each screen could not get out of any of them.
+//
+// This is the one shared affordance that fixes all of them. It is touch-only on
+// purpose: desktop keeps its keyboard/gamepad path untouched, and no BACK chrome
+// appears on a screen that never needed it.
+//
+// Call it in enter() AFTER the screen's own markup is in place, so it paints on
+// top; it returns null on desktop, which is a no-op for every caller.
+export function addBackButton(game, root, onBack, label = 'BACK') {
+  if (!touchUI(game) || !root) return null
+  const btn = el('div', 'wcs-backbtn', `<span class="bb-arrow">&#8249;</span>${label}`)
+  // 'click', NOT 'pointerdown'. Measured: on pointerdown the menu mounted
+  // between finger-down and finger-up, and because `.menu-list` starts at 5vh
+  // on short viewports (ui.css @media max-height:520px) the row that appeared
+  // under the button was "Story Mode" — so every BACK tap launched Story Mode
+  // instead of returning to the menu. Same defect as the title screen, in the
+  // opposite direction. A click is dispatched to the element that was present
+  // for the whole gesture, and the new screen mounts with no tap aimed at it.
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    e.preventDefault()
+    try { game.audio?.sfx?.('menu_back') } catch { /* audio optional */ }
+    onBack()
+  })
+  root.appendChild(btn)
+  return btn
+}
+
+// ---------------------------------------------------------------------------
 // Character info lookups (tolerant of locked / missing fighters)
 // ---------------------------------------------------------------------------
 

@@ -35,7 +35,14 @@ export class TitleScreen {
     this._onKey = () => this._advance()
     this._onClick = () => this._advance()
     addEventListener('keydown', this._onKey)
-    this.root.addEventListener('pointerdown', this._onClick)
+    // 'click', NOT 'pointerdown'. On pointerdown this screen swapped itself for
+    // the menu BETWEEN the finger going down and coming up, so the browser then
+    // dispatched the click at whatever menu row had just appeared under the
+    // thumb: one tap on the title launched Training and skipped the menu
+    // entirely. A click fires after the pointer sequence completes, on the
+    // element that was there for the whole gesture, so the menu mounts with no
+    // pending tap aimed at it. Desktop is unaffected (keydown still advances).
+    this.root.addEventListener('click', this._onClick)
   }
 
   exit() {

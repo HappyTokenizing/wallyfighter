@@ -247,7 +247,11 @@ export class LoadingScreen {
     this._onKey = () => this._finish()
     this._onClick = () => this._finish()
     addEventListener('keydown', this._onKey)
-    this.root.addEventListener('pointerdown', this._onClick)
+    // 'click', not 'pointerdown' — see TitleScreen. Skipping on pointerdown
+    // mounted the next screen mid-gesture and handed it the click, so one tap
+    // could skip the loading screen AND blow straight through the title behind
+    // it. The click lands on the element that was there for the whole gesture.
+    this.root.addEventListener('click', this._onClick)
   }
 
   exit() {

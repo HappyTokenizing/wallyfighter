@@ -68,6 +68,38 @@
   overflow: hidden;
   animation: wcs-screen-in 0.2s ease-out;
 }
+/* Touch-only BACK affordance (uiKit.addBackButton). On a phone this is the ONLY
+   way out of select / settings / gallery / movelist / credits — menuPressed('back')
+   needs a keyboard or a gamepad — so it has to outrank every screen's own
+   stacking context (.sel-grid is z-index 4) and clear the notch. Never rendered
+   on desktop, so the keyboard/gamepad path is untouched. */
+.wcs-backbtn {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(10px, env(safe-area-inset-left));
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 88px;
+  min-height: 44px; /* Apple/Android minimum touch target */
+  padding: 0 16px;
+  font-family: inherit;
+  font-size: clamp(13px, 2.2vh, 18px);
+  letter-spacing: 2px;
+  color: #fff;
+  background: linear-gradient(180deg, var(--wcs-panel-hi), var(--wcs-panel-lo));
+  border: 3px solid #000;
+  border-radius: 8px;
+  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.wcs-backbtn:active { transform: translateY(2px); box-shadow: 0 2px 0 rgba(0, 0, 0, 0.55); }
+.wcs-backbtn .bb-arrow { font-size: 1.35em; line-height: 1; }
+
 @keyframes wcs-screen-in {
   from { opacity: 0; transform: scale(1.02); }
   to { opacity: 1; transform: scale(1); }
@@ -782,7 +814,14 @@
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  z-index: 3; /* over the grid — it owns focus while visible */
+  /* MUST outrank .sel-grid (z-index 4). This said 3 while claiming "over the
+     grid" in the same breath, and the grid won: on touch, every .diff-box was
+     occluded by .sel-grid, so elementFromPoint on all five boxes returned
+     .sel-grid and the CPU DIFFICULTY step had no forward AND no back. Versus
+     CPU is the first main-menu item, so the headline mode softlocked a phone
+     until the page was reloaded. Keyboard/gamepad never noticed — they do not
+     hit-test. */
+  z-index: 6; /* over the grid — it owns focus while visible */
   padding: clamp(14px, 2.2vh, 24px) clamp(20px, 3vw, 44px);
   text-align: center;
   background: linear-gradient(180deg, var(--wcs-panel-hi), var(--wcs-panel-lo));
@@ -2471,8 +2510,10 @@
 
 /* pause chip — clear of the health bars and the center timer */
 .wcs-touch-btn.tb-pause {
-  width: 40px;
-  height: 40px;
+  /* 40px was below the 44px floor this stylesheet applies to its own smallest
+     menu button, on the one control that suspends the match. */
+  width: 44px;
+  height: 44px;
   right: 10px;
   top: clamp(66px, 14vh, 110px);
   font-size: 12px;
@@ -2544,24 +2585,92 @@
 /* Menus stay tap-driven on touch — every interactive row keeps a >=40px
    target even where short-viewport media queries shrink the type. */
 @media (pointer: coarse) {
+  /* The shared floor was 40px while the platform guideline (and this
+     stylesheet's own smallest button) is 44px. Raised, and widened to cover the
+     screens the original list simply never named: story chapter rows, the
+     training / playground picker rows and their arrows, and the replay viewer
+     controls — whose only CLOSE was a ~28px target. */
   .menu-list .wcs-btn,
   .res-menu .wcs-btn,
-  .hud-pause .wcs-btn {
-    min-height: 40px;
+  .hud-pause .wcs-btn,
+  .sm-menu .wcs-btn,
+  .tp-pickrow,
+  .rp-btn {
+    min-height: 44px;
     display: flex;
     align-items: center;
   }
   .res-menu .wcs-btn,
-  .hud-pause .wcs-btn { justify-content: center; }
-  .set-row { min-height: 40px; }
-  .set-row .arr { padding: 0 16px; } /* the </> steppers grow fat hit slabs */
-  .sel-diff .diff-box { min-width: 40px; min-height: 40px; }
-  .res-card-save { min-height: 36px; display: flex; align-items: center; }
+  .hud-pause .wcs-btn,
+  .rp-btn { justify-content: center; }
+  /* Picker steppers are the documented way to change fighter here, and the
+     touch hint points straight at them, so they need real targets too. */
+  .tp-pickrow .arr {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .set-row { min-height: 44px; }
+  /* The steppers only ever grew SIDEWAYS. `.set-row` is a flex row with
+     align-items: center, so each `.arr` is a centred flex item that stays one
+     line tall (~15px) no matter how much horizontal padding it gets — a 43x16
+     target where 44x44 is the documented minimum. Give them an explicit box. */
+  .set-row .arr {
+    padding: 0 16px;
+    min-width: 44px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Same omission: the coarse block never mentioned the sliders, so they kept
+     their 16px desktop thumb track on touch. */
+  .set-slider { height: 32px; }
+  .sel-diff .diff-box { min-width: 44px; min-height: 44px; }
+  /* Costume swap is tap-only on touch (SelectScreen wires the handler) — it
+     needs a real target, not a caption. */
+  .sel-costume.tappable {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    cursor: pointer;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-radius: 8px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .sel-costume.tappable:active { transform: translateY(1px); }
+  /* Gallery's costume line is the same tap-only control (GalleryScreen wires it). */
+  .gal-costume.tappable {
+    min-height: 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-radius: 8px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .gal-costume.tappable:active { transform: translateY(1px); }
+  /* was 36px — below this very block's own floor */
+  .res-card-save { min-height: 44px; display: flex; align-items: center; }
 }
 
 /* ------------------------------------- landscape phones (844x390 target) -- */
 
 @media (max-height: 460px) {
+  /* Move list: the legend sat at bottom: 6.6vh and appeared in NO media query,
+     so on a landscape phone it rendered underneath the opaque hint bar and was
+     simply unreadable. Lift it clear of the bar. */
+  .mv-legend { bottom: 11vh; }
+  /* VS splash: the giant rotated glyph overlapped BOTH fighter name plates at
+     this height. Shrink and lift it so the names stay legible — it is a 2.1s
+     transition and the names are the only information on it. */
+  .vs-big { font-size: clamp(60px, 13vw, 120px); transform: translate(-50%, -72%) rotate(-6deg); }
   /* select: header + panels + 2-row grid all inside 390px. Bios yield. */
   .sel-header { top: 1.2vh; }
   .sel-header .h1 { font-size: clamp(18px, 6vh, 30px); }
