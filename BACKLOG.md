@@ -1,5 +1,45 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 34 — the phone sim spike is TWO causes, and one of them is GC
+
+### Why the "worst subsystem" kept moving
+
+Five runs, five different top offenders: fighters 48.4, scans 37.1/51.3, state 44.3, fx 43.7,
+arena 21. A single slow function does not behave like that. A 44 ms state-machine tick for TWO
+fighters is not plausible as work either. The signature fits a PAUSE being attributed to
+whichever block it happened to interrupt.
+
+Tested by sampling `performance.memory.usedJSHeapSize` across each tick
+(`--enable-precise-memory-info`) and recording a fall as `__gcDropMB`:
+
+    {total 46.1, fx      43.7, physics  2.1}                      <- real work, NO gc
+    {total 31.6, physics 12.1, arena   10.0, __gcDropMB 12.9}     <- GC, 12.9 MB freed
+    {total 27.3, fx      25.4, physics  0.9}                      <- real work, NO gc
+
+### So: two causes, and they need different fixes
+
+1. **GC pauses.** Confirmed — one tick freed 12.9 MB mid-fight. That is allocation churn in the
+   hot path, and it explains the rotating attribution: the collector lands wherever it lands.
+   FIX: pool the per-frame allocations. Cheap to find with a heap sampling profile; the
+   `fighterSplit` and sim laps are already in place to confirm the pauses stop.
+2. **`fx` — the scripted specials/finishers loop — is REAL work**, 23.5-43.7 ms per tick and now
+   the top offender in 4 of 5 runs, with no heap drop on those ticks. This is the most
+   consistent genuine cost in the sim.
+   FIX: look at what a special's `step()` does per tick; 25-44 ms for scripted fx on two
+   fighters is far past what a phone can absorb inside a 16.7 ms budget.
+
+### Both are cross-platform
+
+`fx`, the scans and the fighter state machine are shared code — desktop runs them identically.
+The 4x throttle does not create the cost, it makes a ~12 ms desktop spike legible at ~50 ms.
+That is precisely why desktop-only profiling missed all of this: against an 8.3 ms vsync floor
+at 120 fps, a 12 ms scripted-fx tick vanishes into the noise.
+
+### Instrumentation now in place (all `?prof=1` only)
+`__prof.simWorst` records, for any sim tick over 20 ms: the per-subsystem split, the
+`fighterSplit` sub-split, and `__gcDropMB` when the heap fell across the tick.
+
+
 ## ROUND 33 — narrowing the phone sim spike. `scans` is the repeat offender.
 
 ### Two runs, and what is consistent between them

@@ -1432,7 +1432,11 @@ export class MatchScreen {
     // almost always 0 or 1 it is one expensive tick, not catch-up. The frame
     // profiler can only say "update"; naming the subsystem needs this.
     const _P = (typeof window !== 'undefined' && window.__prof) || null
-    if (_P) _P._fLap = null      // per-tick, not cumulative
+    if (_P) {
+      _P._fLap = null            // per-tick, not cumulative
+      const _m0 = (typeof performance !== 'undefined' && performance.memory) || null
+      _P._heapBefore = _m0 ? _m0.usedJSHeapSize : NaN
+    }
     const _simLap = _P ? {} : null
     const _t0 = _P ? performance.now() : 0
     let _mk = _t0
@@ -1528,6 +1532,21 @@ export class MatchScreen {
       // Keep only genuinely bad ticks: the median step is ~4.7 ms on a throttled
       // phone, so 20 ms is already 4x that and anything below it is noise.
       if (total > 20) {
+        // IS THIS REAL WORK OR A GC PAUSE LANDING IN THIS BLOCK? Across four
+        // runs the "worst subsystem" kept moving — fighters, scans, state,
+        // arena, fx — which is the signature of a pause being attributed to
+        // whichever block it interrupts rather than of one slow function. A
+        // 44 ms state-machine tick for TWO fighters is not plausible as work.
+        // usedJSHeapSize FALLING across the tick means the collector ran.
+        const _m = (typeof performance !== 'undefined' && performance.memory) || null
+        if (_m) {
+          const before = _P._heapBefore
+          const after = _m.usedJSHeapSize
+          if (Number.isFinite(before)) {
+            const d = after - before
+            if (d < -262144) _simLap.__gcDropMB = +((-d) / 1048576).toFixed(2)
+          }
+        }
         if (!_P.simWorst) _P.simWorst = []
         if (_P.simWorst.length < 40) {
           const o = { total: +total.toFixed(1) }
