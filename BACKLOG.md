@@ -1,5 +1,54 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 35 — the allocator is NAMED: Gore._detach() deep-clones a bone subtree
+
+### Heap sampling profile, live fight, 35 s, desktop (allocation sites are shared code)
+
+    TOTAL SAMPLED 13.8 MB
+    10.67 MB  copy   (three.js)      <- 77 % of ALL allocation
+     0.48 MB  n      index:1085
+     0.19 MB  Os     (three.js)
+     ...everything else under 0.2 MB
+
+One function is 77 % of the allocation in a fight. Walking the call tree for the callers
+rather than the flat aggregate names it exactly:
+
+    onDamage -> _popAccessory -> _detach -> clone -> copy -> clone -> copy -> ...   5.53 MB
+                                _detach -> clone -> copy -> clone -> copy -> ...   5.14 MB
+
+`Gore._detach()` (src/combat/Gore.js:545) calls `bone.clone(true)` — a RECURSIVE deep clone of
+the bone's whole subtree. The clone/copy ladder in the stack is three.js recursing through it.
+
+### The shape is worse than "allocates a lot"
+
+`_onDamage` guards each threshold with `rec.fired.has(t.key)`, so `_detach` fires at most about
+SIX times a round. 10.67 MB across that is roughly **1-1.7 MB per call** — a synchronous
+multi-megabyte deep clone, executed at a damage threshold, i.e. at the exact dramatic beat
+where a hitch is most visible. It is therefore BOTH:
+  - the source of the GC pauses proven in round 34 (12.9 MB freed in one mid-fight tick), and
+  - a synchronous spike of its own at the moment of the hit.
+
+That also explains why the "worst subsystem" kept rotating across five runs: the collector runs
+shortly after these bursts and lands in whatever block is executing.
+
+### The fix
+
+Pre-build the clones. There are only ~3 detachable candidates per fighter (ACCESSORY_BONES,
+SECONDARY_BONES, forearm) and each fires once per round, so ~6 clones per match. Build them
+during the round intro — where MatchScreen already runs budgeted build steps — and have
+`_detach` take a prepared clone instead of calling `bone.clone(true)` on the damage frame.
+
+Cautions for whoever does it: the clone is re-parented into a `wrap` Group and handed to
+physics as a `gorePart` prop, its transform is reset to identity, and `opts.thumbsUp` adds a
+mesh to it — so the pooled copy must be reset, not reused dirty. `lighting.js:4209` and
+`characters/tired-ape.js:294` both have comments that depend on `_detach` cloning a subtree;
+read those before changing the shape.
+
+### Cross-platform
+Gore is shared code. Desktop pays the same 1-1.7 MB clone; at 120 fps against an 8.3 ms vsync
+floor it is absorbed, on a phone it is not.
+
+
 ## ROUND 34 — the phone sim spike is TWO causes, and one of them is GC
 
 ### Why the "worst subsystem" kept moving
