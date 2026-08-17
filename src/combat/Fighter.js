@@ -1337,6 +1337,16 @@ export class Fighter {
     if (this._flashT0 >= 0) this._flashTick()
     if (this._headPulseFrames > 0 && --this._headPulseFrames === 0) this._headPulseRestore()
 
+    // SUB-PHASE SPLIT (?prof=1 only; one dead branch otherwise). Round 32 put
+    // 48.4 ms of a 51.3 ms sim tick inside f.update() on a throttled phone, and
+    // "fighters" is far too coarse to act on. Accumulates into __prof._fLap,
+    // which MatchScreen folds into the simWorst record and then clears.
+    const _FP = (typeof window !== 'undefined' && window.__prof) || null
+    let _fm = _FP ? performance.now() : 0
+    const _flap = _FP
+      ? (k) => { const n = performance.now(); const L = (_FP._fLap ||= {}); L[k] = (L[k] || 0) + (n - _fm); _fm = n }
+      : () => {}
+
     // cache the resolved move intent once per frame (movement + dirHeld share it)
     this._mi = this._moveIntent()
     // legacy ±1 facing: toward the foe, projected on world X (hysteresis when
@@ -1385,11 +1395,15 @@ export class Fighter {
     this._updateFacing(dt)
 
     this._clampBounds()
+    _flap('state')
 
     if (this.state !== 'ragdoll') {
       this._updateAnimationDrive(dt)
+      _flap('animDrive')
       this.animator.update(dt)
+      _flap('animator')
       this._applyRootMotion()
+      _flap('rootMotion')
     } else {
       // RagdollManager owns every bone now. Remember it, so the spring state is
       // dumped on the way back out instead of resuming with a frame of
@@ -1397,7 +1411,9 @@ export class Fighter {
       this._ragdollWasActive = true
     }
     this._updatePresentation(dt)
+    _flap('presentation')
     this._integrityCheck()
+    _flap('integrity')
   }
 
   // ------------------------------------------------------- animation drive

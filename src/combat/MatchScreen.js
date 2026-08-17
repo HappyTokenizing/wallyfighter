@@ -1432,6 +1432,7 @@ export class MatchScreen {
     // almost always 0 or 1 it is one expensive tick, not catch-up. The frame
     // profiler can only say "update"; naming the subsystem needs this.
     const _P = (typeof window !== 'undefined' && window.__prof) || null
+    if (_P) _P._fLap = null      // per-tick, not cumulative
     const _simLap = _P ? {} : null
     const _t0 = _P ? performance.now() : 0
     let _mk = _t0
@@ -1456,9 +1457,13 @@ export class MatchScreen {
 
     if (this.phase === 'fight') {
       this._scanHits()
+      _lap('scanHits')
       this._scanGrabs()
+      _lap('scanGrabs')
       this._pushApart()
+      _lap('pushApart')
       if (this.items) this._updateItems(dt)
+      _lap('items')
     }
     _lap('scans')
 
@@ -1527,6 +1532,12 @@ export class MatchScreen {
         if (_P.simWorst.length < 40) {
           const o = { total: +total.toFixed(1) }
           for (const k of Object.keys(_simLap)) if (_simLap[k] >= 0.5) o[k] = +_simLap[k].toFixed(1)
+          // Fighter.update()'s own split, when it is the block that blew up.
+          if (_P._fLap) {
+            const f = {}
+            for (const k of Object.keys(_P._fLap)) if (_P._fLap[k] >= 0.5) f[k] = +_P._fLap[k].toFixed(1)
+            if (Object.keys(f).length) o.fighterSplit = f
+          }
           _P.simWorst.push(o)
         }
       }

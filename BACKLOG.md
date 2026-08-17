@@ -1,5 +1,49 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 33 — narrowing the phone sim spike. `scans` is the repeat offender.
+
+### Two runs, and what is consistent between them
+
+    run A  {total 51.3, fighters 48.4, physics  2.5}
+           {total 39.0, scans    37.1}
+           {total 35.9, physics  14.8, arena 11.7, fighters 7.7}
+
+    run B  {total 54.5, scans    51.3, physics 1.8}
+           {total 36.8, physics  14.7, arena 12.8, fighters 7.3,
+                        fighterSplit {animator 4.3, animDrive 1.6}}
+           {total 28.7, fx       26.5}
+
+`scans` is the top spike in BOTH runs (37.1 then 51.3 ms). The `fighters: 48.4` from run A did
+NOT reproduce — run B's fighter split shows the animator at 4.3 ms — so that one is either rare
+or was a one-off. `fx` (scripted specials/finishers) appeared in run B at 26.5 ms and is a new
+candidate. Run B was taken at load average 7.85, so its absolutes are inflated; the RANKING is
+what carries.
+
+### Instrumentation added this round (all `?prof=1` only, one dead branch otherwise)
+
+- `Fighter.update()` split: state / animDrive / animator / rootMotion / presentation / integrity,
+  accumulated into `__prof._fLap` and folded into the `simWorst` record as `fighterSplit`,
+  cleared each tick so every record is one tick and not a running total.
+- The `scans` block split into `scanHits` / `scanGrabs` / `pushApart` / `items`.
+
+### NOT MEASURED YET — and deliberately so
+
+The scans split is built and shipped but UNREAD: machine load hit 9.47 immediately after the
+build, and a reading there would be contaminated the way several readings were earlier today.
+Take it on an idle machine (`pgrep -f remote-debugging-port` == 0 and load under ~3):
+
+    node /private/tmp/mobilefight.mjs 9845 permanent-reserve-core 4
+
+and read `simWorst[].scanHits / scanGrabs / pushApart / items`.
+
+### The hypothesis the split will confirm or kill
+
+Two fighters cannot cost 37-51 ms to scan in steady state. Most likely one of the four is doing
+work proportional to something unbounded — every prop, every debris body, every item — rather
+than to the two fighters, or is building per-move hitbox data on first use. `_pushApart` and
+`_updateItems` are the ones that plausibly touch collections that grow during a match.
+
+
 ## ROUND 32 — phone sim spikes located: it is `f.update()` and the hit scans, NOT physics
 
 ### How it was narrowed
