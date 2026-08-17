@@ -6,6 +6,18 @@
       "url": "http://localhost:5173"
     },
     {
+      "name": "wally-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "/Users/herwig/Desktop/Claude files/wally-crypto-smackdown/node_modules/vite/bin/vite.js",
+        "preview",
+        "--port",
+        "4188",
+        "--strictPort"
+      ],
+      "port": 4188
+    },
+    {
       "name": "wally-dev",
       "runtimeExecutable": "node",
       "runtimeArgs": [

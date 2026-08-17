@@ -76,6 +76,41 @@ import { splatAtlas, atlasTileUV, ATLAS_TILE_STEP, SPLAT_VARIANTS } from './Part
 const ACCESSORY_BONES = ['glasses', 'goggles', 'lens', 'hat', 'mug', 'phones', 'tie', 'sash', 'pack', 'pouch', 'monocle', 'coat', 'robe']
 const SECONDARY_BONES = ['earL', 'earR', 'tail', 'trunk', 'tongue']
 const FOREARM_BONES = ['forearmR', 'forearmL']
+// Draw-order groups for the detach-clone pool. Order matters only in that the
+// cheapest group (accessories) gets prepared first.
+const DETACH_GROUPS = [ACCESSORY_BONES, SECONDARY_BONES, FOREARM_BONES]
+// Seconds between prepared clones. 3 groups x 2 fighters = 6 clones, so the
+// pool is warm ~1.5 s in — comfortably inside the round intro.
+const PREP_INTERVAL = 0.25
+
+/** Copy live local transforms (and material refs) from a bone subtree onto a
+ *  structurally identical clone, allocation-free.
+ *
+ *  A pooled clone froze its children's local transforms at build time, but the
+ *  trunk curls, the ears flap and the hand poses — a detached part must leave
+ *  the body in the pose it had when it was severed, not in the bind pose. The
+ *  structural clone is the expensive half (it allocates a Vector3/Quaternion/
+ *  Matrix4 set per node); re-posing it is just .copy() into objects that
+ *  already exist.
+ *
+ *  Returns false the moment the two trees disagree in shape — the caller then
+ *  falls back to a fresh clone, so a rig that gained or lost a child cannot
+ *  render a mismatched part. */
+function syncPose(src, dst) {
+  const a = src.children
+  const b = dst.children
+  if (a.length !== b.length) return false
+  dst.position.copy(src.position)
+  dst.quaternion.copy(src.quaternion)
+  dst.scale.copy(src.scale)
+  dst.visible = src.visible
+  // Match the inline clone exactly: Object3D.clone() copies the material
+  // REFERENCE, so a part cloned on the damage frame carries whatever material
+  // the bone had at that instant (hit-flash splits included).
+  if (src.isMesh && dst.isMesh) dst.material = src.material
+  for (let i = 0; i < a.length; i++) if (!syncPose(a[i], b[i])) return false
+  return true
+}
 // Never detach: hips, torso, head, armL/R, legL/R, shinL/R (locomotion + core).
 
 const THRESHOLDS = [
@@ -188,6 +223,8 @@ export class GoreSystem {
     this._disposed = false
     // per-fighter gore state: fired thresholds, hidden bones, stumps, part props
     this._recs = new Map()
+    // detach-clone pool pacing (see _prepareDetachClones)
+    this._prepCool = 0
     // make sure the particle pool reads settings.gore live (idempotent)
     try { this.particles?.attachGame?.(this.game) } catch { /* pool optional */ }
 
@@ -299,7 +336,11 @@ export class GoreSystem {
   _rec(fighter) {
     let r = this._recs.get(fighter)
     if (!r) {
-      r = { fighter, fired: new Set(), hidden: [], stumps: [], props: [] }
+      // queues: category draw order (see _firstCandidate); prepared: detach
+      // clones built ahead of the damage frame, keyed by bone name. Prepared
+      // clones SHARE geometry/materials with the fighter — dropping the map is
+      // the whole of their cleanup, never dispose them.
+      r = { fighter, fired: new Set(), hidden: [], stumps: [], props: [], queues: new Map(), prepared: new Map() }
       this._recs.set(fighter, r)
     }
     return r
@@ -447,13 +488,79 @@ export class GoreSystem {
 
   // -------------------------------------------------- detachment internals
 
+  /** Head of this category's draw order, skipping bones already gone.
+   *
+   *  Was: filter the present bones and pick one at random on the damage frame.
+   *  That is uniform-without-replacement in practice (a detached bone is
+   *  invisible, so it never comes up twice), which is exactly what a shuffled
+   *  queue gives — but the queue also tells us WHICH bone is next *before* the
+   *  hit lands, and that is what lets _prepareDetachClones() build the clone
+   *  off the damage frame. Same distribution, one round-trip earlier.
+   *
+   *  Nothing consumes the head explicitly: _detach() sets `bone.visible=false`,
+   *  so the next call shifts past it here. */
   _firstCandidate(fighter, names) {
-    const present = names.filter((n) => {
-      const b = fighter.bones?.[n]
-      return b && b.isObject3D && b.visible
-    })
-    if (!present.length) return null
-    return present[Math.floor(Math.random() * present.length)]
+    const rec = this._rec(fighter)
+    let q = rec.queues.get(names)
+    if (!q) {
+      q = names.filter((n) => {
+        const b = fighter.bones?.[n]
+        return b && b.isObject3D
+      })
+      for (let i = q.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        const t = q[i]; q[i] = q[j]; q[j] = t
+      }
+      rec.queues.set(names, q)
+    }
+    // Scan, never consume. A bone can be invisible for reasons that are not
+    // ours and not permanent — ragdoll and replay both hide bones through the
+    // same visibilityLedger — and shifting the head off would drop it from the
+    // round's candidates for good. Detached bones stay invisible, so a plain
+    // scan already advances past them; at 13 names the scan costs nothing.
+    for (let i = 0; i < q.length; i++) {
+      const b = fighter.bones?.[q[i]]
+      if (b && b.isObject3D && b.visible) return q[i]
+    }
+    return null
+  }
+
+  /** Build the NEXT detach clone ahead of the hit that needs it.
+   *
+   *  `bone.clone(true)` is a recursive deep copy of a bone subtree and it was
+   *  the single largest allocator in the game: a 35 s heap sample put 10.67 MB
+   *  of 13.8 MB total (77%) under `_detach -> clone -> copy`, ~1-1.7 MB per
+   *  call. It ran synchronously on the damage frame, which is why the two laps
+   *  that call into onDamage — `fx` (applyScriptHit) and `scans`
+   *  (_resolveOtgHit) — owned the worst sim steps at 43.7 ms and 51.3 ms, and
+   *  why a 12.9 MB GC drop showed up in a tick right after.
+   *
+   *  Only the queue head of each group can detach next, so at most three
+   *  clones per fighter need to exist, and one clone per PREP_INTERVAL keeps
+   *  the build itself from becoming the spike it replaces. The drip starts as
+   *  soon as update() runs, so it is finished during the round intro and the
+   *  bell is already covered. */
+  _prepareDetachClones(dt) {
+    this._prepCool -= dt
+    if (this._prepCool > 0) return
+    const fighters = this.match?.fighters
+    if (!fighters?.length) return
+    for (const f of fighters) {
+      if (!f?.bones) continue
+      const rec = this._rec(f)
+      for (const names of DETACH_GROUPS) {
+        const n = this._firstCandidate(f, names)
+        if (!n || rec.prepared.has(n)) continue
+        const bone = f.bones[n]
+        if (!bone) continue
+        let clone = null
+        try { clone = bone.clone(true) } catch { clone = null }
+        if (!clone) continue
+        rec.prepared.set(n, clone)
+        this._prepCool = PREP_INTERVAL
+        return // one per interval, never two deep clones in a frame
+      }
+    }
   }
 
   _popAccessory(fighter, rec, dirX, mode) {
@@ -541,7 +648,16 @@ export class GoreSystem {
     bone.getWorldPosition(_v1)
     bone.getWorldQuaternion(_q1)
 
-    const clone = bone.clone(true)
+    // Prefer the clone _prepareDetachClones() built on an earlier frame; only
+    // re-pose it here (cheap) instead of rebuilding the subtree (~1-1.7 MB on
+    // the damage frame). Falls back to the inline clone whenever the pool
+    // missed or the rig no longer matches.
+    let clone = rec.prepared.get(name) || null
+    if (clone) {
+      rec.prepared.delete(name)
+      if (!syncPose(bone, clone)) clone = null
+    }
+    if (!clone) clone = bone.clone(true)
     clone.position.set(0, 0, 0)
     clone.quaternion.identity()
     clone.scale.set(1, 1, 1)
@@ -813,6 +929,7 @@ export class GoreSystem {
         if (rec.hidden.length || rec.stumps.length || rec.props.length) this._restoreParts(rec)
       }
     } else {
+      this._prepareDetachClones(dt)
       const opa = this._aOpacity.array
       const rgh = this._aRough.array
       let dirty = false
@@ -902,6 +1019,10 @@ export class GoreSystem {
     for (const rec of this._recs.values()) {
       this._restoreParts(rec)
       rec.fired.clear()
+      // Bones are visible again, so the draw order has to be re-rolled. The
+      // prepared clones stay: they are structurally still correct and syncPose
+      // re-poses them at use, so round 2 starts with a warm pool.
+      rec.queues.clear()
     }
     this._clearDecals()
   }

@@ -1,5 +1,80 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 36 — the detach clone is off the damage frame (round 35's fix, implemented)
+
+### Should it have been implemented? A second, independent line of evidence said yes.
+
+Round 35 named `Gore._detach() -> bone.clone(true)` from the heap profile alone. Before
+touching it I checked whether the FRAME profiler agreed, and it does — the two call paths
+into `onDamage` are exactly the two laps that owned the worst sim steps:
+
+- `applyScriptHit` (MatchScreen:2842) -> `_goreHit` -> `onDamage` -> `_detach`  == the `fx` lap (43.7 / 25.4 / 23.5 ms)
+- `_resolveOtgHit` (MatchScreen:2314) -> `_goreHit` -> `onDamage` -> `_detach`  == the `scans` lap (37.1 / 51.3 ms)
+
+Top allocator and worst lap are the same code reached two different ways. That is what
+turned "plausible" into "do it".
+
+### What shipped (src/combat/Gore.js)
+
+- `_firstCandidate()` now draws from a per-category queue shuffled ONCE per round instead
+  of picking at random on the damage frame. Same distribution (a detached bone is
+  invisible, so the old random pick was already without-replacement) — but it means we
+  know WHICH bone is next before the hit lands.
+- `_prepareDetachClones(dt)` builds that next clone ahead of time, one per 0.25 s, from
+  `update()`. Three groups x two fighters = at most ~6 live; measured 5 prepared and warm
+  well before the bell.
+- `_detach()` takes the prepared clone and calls `syncPose()` on it instead of cloning.
+- `syncPose()` copies local transforms + material refs onto the existing structure,
+  allocation-free, and returns false on ANY structural disagreement so a drifted rig falls
+  back to the old inline clone rather than rendering a mismatched part.
+
+Trap avoided: the first version consumed the queue head with `shift()`. Ragdoll and replay
+also hide bones through the same `visibilityLedger`, so a temporarily-hidden bone would
+have been dropped from the round's candidates for good. It scans instead of consuming.
+
+### Measured
+
+| | before | after |
+|---|---|---|
+| total sampled allocation, 35 s | 13.8 MB | 3.5 MB |
+| `clone->copy` under `_detach` | 10.67 MB (77% of all allocation) | absent from the profile |
+| sim update p90 / p99 | 4.9-7.0 / 8.1-15.1 ms | 1.7 / 2.8 ms |
+| sim update median | 2.2-2.3 ms | 0.9 ms |
+| worst per-detach cost on the damage frame | 12.5 ms (earR), 38.6 ms (earL) | below the 0.1 ms timer floor |
+
+The per-detach A/B is the confounder-free number: same bones, same instant, best-of-5,
+both arms interleaved. It matters because the heap run happened to see only ONE detach, so
+fight variance explains part of the 13.8 -> 3.5 MB on its own — the A/B does not depend on
+how violent the fight was. Note the cost is NOT proportional to node count (a 20-node
+forearm clones below the timer floor while a 5-node ear costs 12.5 ms), so per-detach
+saving ranges from ~0 to ~39 ms depending on which bone comes up.
+
+### Correctness: proved, not eyeballed
+
+`toDataURL` readback of two forced detaches shows a valid part in the scene and no
+corruption (8 nodes / 3 meshes / 0 missing geometry, in-scene and visible). But "looks
+fine" is a weak claim, and the pose question was the real risk — a pooled clone froze its
+children at build time, and the trunk curls and the ears flap. So both arms were built from
+the same live bone at the same instant and compared node-by-node: type, name, local
+position/quaternion/scale, visibility, geometry identity, material identity.
+
+    trunk 12n / forearmR 4n / mug 7n / earR 6n / forearmR 13n  -> ALL 5 IDENTICAL
+
+### Newly exposed, NOT newly created
+
+`replayGore` is now the worst lap (40.0 / 45.7 ms). It is a mislabelled lap: it wraps
+`this.replay?.captureFrame(this.phase)` (MatchScreen:1528), the instant-replay recorder,
+not gore. It was always there, ranked below the clone spikes. It is the next target.
+
+### Residuals
+
+- Replenishment after a detach still builds a clone on some mid-fight frame. Strictly
+  better than before (it no longer stacks with hit VFX, particle burst, prop spawn, audio
+  and camera shake on one frame) but it is not free. Not in the top-3 worst laps.
+- Up to ~6 prepared clones are retained for the match. Steady retention, not churn.
+- Single runs. `>50 ms` frames went 1 -> 3 between runs and gap p99 17.6 -> 24.8; those are
+  `replayGore`, not gore, and the runs are noisy at that tail.
+
 ## ROUND 35 — the allocator is NAMED: Gore._detach() deep-clones a bone subtree
 
 ### Heap sampling profile, live fight, 35 s, desktop (allocation sites are shared code)
