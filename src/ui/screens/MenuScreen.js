@@ -1,6 +1,6 @@
 // Main menu — chunky beveled list, hover taglines, fake price ticker tape.
 // Items whose screens are not registered yet show a SOON(tm) toast.
-import { el, MenuList, toast, ensureMusic, candlesHTML } from '../uiKit.js'
+import { el, MenuList, toast, ensureMusic, candlesHTML, addBackButton } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
 
 const ITEMS = [
@@ -48,6 +48,9 @@ export class MenuScreen {
       <div class="menu-ticker"><div class="tape">${tape} &nbsp;·&nbsp; ${tape} &nbsp;·&nbsp;</div></div>
     `
     this.game.ui.appendChild(this.root)
+    // onBack (-> title) runs through menuPressed('back'), which no touch device
+    // can raise; the menu is not a dead end but the exit was keyboard-only.
+    addBackButton(this.game, this.root, () => this.game.screens.goto('title'))
     this.hintEl = this.root.querySelector('.menu-hint')
 
     this.list = new MenuList(this.game, this.root.querySelector('.menu-list'), ITEMS, {

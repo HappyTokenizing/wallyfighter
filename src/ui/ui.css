@@ -499,6 +499,23 @@
   }
 }
 /* Very short viewports: the logo yields entirely, the list claims its space. */
+/* Ten rows at the 44px floor need 440px of column; a landscape phone has 375px of
+   viewport and ~323px of list. Measured at 812x375: scrollHeight 577 vs clientHeight
+   323, FIVE rows below the fold including Settings. It scrolls, so it is not a dead
+   end, but half the hub being invisible on the app's own target orientation is not
+   discoverable. Two columns: 5 x 56.4px = 282px, inside the space available.
+   The ::before/::after auto-margin struts must go or they consume a whole column. */
+@media (pointer: coarse) and (max-height: 480px) {
+  .menu-list {
+    flex-flow: column wrap;
+    align-content: flex-start;
+    min-width: min(82vw, 640px);
+    column-gap: 4vw;
+  }
+  .menu-list::before,
+  .menu-list::after { display: none; }
+}
+
 @media (max-height: 520px) {
   .menu-logo { display: none; }
   .menu-list { top: 5vh; bottom: 9vh; }
@@ -705,6 +722,14 @@
   flex-direction: column;
   pointer-events: none;
 }
+/* .sel-panel is pointer-events:none ON PURPOSE — it must never swallow taps aimed
+   at the roster grid behind it. But .sel-costume is a CHILD of it, so the touch
+   costume toggle inherited `none` and its click handler could never fire: the line
+   read 'TAP TO SWAP' while elementFromPoint returned the screen root. Re-enable it
+   for the tappable state only, and OUTSIDE any media query so it tracks the class
+   (set only when touchUI && data.live) rather than the pointer type. Do NOT drop
+   the `none` on .sel-panel — that would break the grid behind it. */
+.sel-costume.tappable { pointer-events: auto; }
 .sel-panel.left { left: var(--sel-panel-inset); border-top: 5px solid var(--wcs-red); }
 .sel-panel.right { right: var(--sel-panel-inset); border-top: 5px solid var(--wcs-blue); }
 .sel-panel canvas {
@@ -2554,6 +2579,23 @@
 @media (orientation: portrait) {
   .wcs-rotate { display: flex; }
 }
+/* A rotation-locked phone can never satisfy this gate, and the overlay is
+   inset:0 / z-index:1300 / pointer-events:auto with no listener anywhere in
+   src — so it was a full product lockout with zero tappable pixels. The escape
+   must beat the media query above, hence !important. */
+.wcs-rotate.dismissed { display: none !important; }
+.rot-skip {
+  margin-top: 6px;
+  min-height: 44px;
+  min-width: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+}
 .rot-phone {
   width: 54px;
   height: 92px;
@@ -2674,6 +2716,33 @@
 /* ------------------------------------- landscape phones (844x390 target) -- */
 
 @media (max-height: 460px) {
+  /* Results: at 812x375 the winner stack ends ~y159 and 55px rows push 'Main
+     Menu' (and 'Character Select' on 6-row results) past the bottom — and
+     `.wcs-screen { overflow: hidden }` means nothing scrolls, so after EVERY
+     match the way back to the menu was painted off-screen. Two columns fits six
+     rows in three lines and clears the polaroid at the same time. */
+  .res-menu {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 8px;
+    min-width: min(64vw, 380px);
+  }
+  .res-menu .wcs-btn { margin: 0.2em 0; }
+  /* HUD meters are bottom-anchored into both thumb zones, and `.wcs-touch`
+     (z-index 10) paints over `.wcs-hud` (no z-index at all), so the local
+     player's SPECIAL readout and item slot sat under the movement thumb. This
+     block already moves announcer/combo/caption and simply never named
+     .hud-meters. Lift them out of the thumb band. */
+  /* Inset horizontally rather than lifted to the top: top-anchoring cleared the
+     thumbs but put the P2 box straight into the pause chip (right:10px,
+     y66-110). The visible stick base is x20-112 and the button cluster is on
+     the right, so a centre band clears both without leaving the designed
+     bottom position. */
+  /* Measured at 812x375: stick base x20-118, button cluster x606-802 (BLOCK is
+     the leftmost at 606). Symmetric 25vw put the P2 box at x430-609 — a 3px
+     clip behind BLOCK. The cluster is wider than the stick, so the insets are
+     asymmetric on purpose: 28vw right ends the band at x585, clear by 21px. */
+  .hud-meters { left: 25vw; right: 28vw; }
   /* Move list: the legend sat at bottom: 6.6vh and appeared in NO media query,
      so on a landscape phone it rendered underneath the opaque hint bar and was
      simply unreadable. Lift it clear of the bar. */

@@ -167,6 +167,12 @@ export class TouchControls {
       '<div class="rot-phone"></div>' +
       '<div class="rot-title">ROTATE DEVICE</div>' +
       '<div class="rot-sub">THIS MARKET ONLY GOES SIDEWAYS</div>')
+    // The gate is unsatisfiable on a rotation-locked device, and nothing in src
+    // ever dismissed it — no listener, no orientationchange handler. Landscape
+    // stays the recommendation; this is the escape hatch, not an invitation.
+    const skip = el('div', 'wcs-btn rot-skip', 'PLAY ANYWAY')
+    skip.addEventListener('click', () => this.rotate.classList.add('dismissed'))
+    this.rotate.appendChild(skip)
     this.game.ui.appendChild(this.rotate)
   }
 

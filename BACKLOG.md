@@ -1,5 +1,118 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 40 — results screen, HUD meters, and the portrait lockout
+
+### The results menu was a dead end after EVERY match
+
+`.wcs-screen` is `overflow: hidden`, so an off-screen row is not "scroll to reach it",
+it is unreachable. Measured 812x375: the winner stack ends ~y159 and 55px rows pushed
+'Main Menu' (plus 'Character Select' on six-row results) past the bottom edge. Two-column
+grid in the landscape block; now 0 buttons off-screen, rows 55px.
+
+### Portrait was a full product lockout, not just a gate
+
+Round 37 recorded `.wcs-rotate` as "the deliberate portrait gate" and moved on. It IS
+deliberate — but `grep -rn 'wcs-rotate|this.rotate' src/` returns only the construction,
+the append, and two CSS rules. No listener, no `orientationchange` handler, no
+`screen.orientation` code anywhere. On a rotation-locked phone the gate can never be
+satisfied and it is `inset:0; z-index:1300; pointer-events:auto` with zero tappable
+pixels — the whole product, unreachable, with no way out. It now carries a 44px
+PLAY ANYWAY escape (`.wcs-rotate.dismissed { display:none !important }` — it has to beat
+the `@media (orientation: portrait)` rule). Landscape stays the recommendation.
+
+### HUD meters: two wrong fixes before the right one, both caught by measuring
+
+`.hud-meters` is bottom-anchored into both thumb zones and `.wcs-touch` (z-index 10)
+paints over `.wcs-hud` (no z-index at all), so the local player's SPECIAL readout sat
+under the movement thumb.
+
+1. Lifted them to the top -> straight into the pause chip (right:10px, y66-116).
+2. Inset symmetrically 25vw -> P2 box x430-609 against BLOCK's left edge at x606. A 3px
+   clip, invisible to inspection, obvious to a rectangle-intersection test.
+3. Measured the real geometry instead of guessing a third time: stick base x20-118,
+   cluster x606-802. `left:25vw; right:28vw` ends the band at x585, clear by 21px.
+
+Asymmetric on purpose — the button cluster is wider than the stick.
+
+### A test-design note worth keeping
+
+The meter check first asserted "meters above the stick band", where the band was the
+stick's 72vh CAPTURE rectangle reaching up to y105. That failed the layout for
+overlapping an invisible rectangle. What occludes a readout is the VISIBLE control, so
+the assertion now intersects the meter boxes against `.wcs-touch-btn` /
+`.wcs-touch-stickbase` / `.wcs-touch-nub` and names what it hit. The first version was
+the test being wrong, not the layout.
+
+Same class of error as round 39's: a check that measured `.hud-meters` on the results
+screen, where it does not exist, reported `missing` and silently asserted NOTHING while
+counting as a pass. Every skipped assertion now has to say so.
+
+### Verified
+
+results 0 off-screen / 55px rows; meters clear of all 7 visible controls; portrait gate
+shows, its escape is 174x50, a tap dismisses it and the page underneath becomes reachable;
+escape audit ALL PASS; desktop keyboard 7/7.
+
+
+## ROUND 39 — the fix that shipped dead, and two things I waved away too early
+
+The two audit verifiers that died in round 38 were re-run (workflow resume, cached
+agents replayed). They found a blocker IN ROUND 37'S OWN FIX.
+
+### Costume B: I added the control, never tapped it, and shipped it dead
+
+`.sel-costume` is a child of `.sel-panel`, which is `pointer-events: none` (ui.css:706,
+deliberately — the panels must never swallow taps aimed at the roster grid). So the
+`onclick` added in round 37 could never fire. Verified live by the verifier and then by
+me: computed `pointer-events: none`, `elementFromPoint` at the control's centre returned
+`.wcs-screen wcs-select`, and a dispatched click left `costumes` at `[0,0]`. The label
+read 'TAP TO SWAP' the whole time — the screen actively instructed an impossible action,
+which is WORSE than the original silent unreachability.
+
+Fix is one line, outside any media query so it tracks the class rather than the pointer
+type: `.sel-costume.tappable { pointer-events: auto; }`. Do NOT remove the `none` from
+`.sel-panel` — that rule is load-bearing for the grid behind it.
+
+THE LESSON: I verified the BACK buttons by tapping them and confirming the destination,
+then added the costume control and verified only that the screen still escaped. Adding a
+control and confirming the control WORKS are different claims. `costumecheck.mjs` now
+asserts the state change: tap -> `costumes [0,0] -> [1,0]`, gallery `costume 0 -> 1`.
+
+### Menu fold: I called this a false positive. It was half right.
+
+Round 37 recorded the offscreen menu rows as "a false positive from my own tooling"
+because `.menu-list` has `overflow-y: auto`. The scrolling part is true — it is not a
+dead end. But ten rows at the 44px floor need 440px of column and a landscape phone has
+~323px of list: measured 812x375, `scrollHeight 577` vs `clientHeight 323`, FIVE rows
+below the fold including Settings, the only route to remapping and Replay Intro. Half the
+hub invisible on the app's own target orientation is a real defect; "it scrolls" is not
+an answer to "you cannot see it exists".
+
+Two columns under `@media (pointer: coarse) and (max-height: 480px)`. The
+`::before`/`::after` auto-margin struts must be disabled or they consume a whole column.
+Now: `column wrap`, 0 rows below the fold, `scrollH 323 == clientH 323` (no scrolling
+needed at all), rows still 53px.
+
+### Also
+
+MenuScreen's `onBack` (-> title) ran through `menuPressed('back')`, keyboard/gamepad only;
+it gets the shared back button. Not a dead end — every row is tappable — but the exit was
+unreachable.
+
+### Verified
+
+costume/gallery/menu checks ALL PASS; escape audit ALL PASS (menu now escapes to title);
+desktop keyboard 7/7. Desktop layout confirmed untouched: without `pointer: coarse` the
+menu still renders single-column at the original row positions.
+
+### Note on measuring touch in the Browser pane
+
+The pane does NOT emulate `pointer: coarse` at 812px wide, so coarse-only rules silently
+do not apply there and tap targets measure at their desktop sizes. Every touch claim in
+rounds 37-39 comes from the CDP rigs with `Emulation.setTouchEmulationEnabled`; the pane
+is only good for looking at the desktop path.
+
+
 ## ROUND 38 — closing round 37's open list (training/playground/story on a phone)
 
 ### The audit finished: 43 confirmed. Two verifiers died mid-run.
