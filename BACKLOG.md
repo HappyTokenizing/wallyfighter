@@ -1,5 +1,74 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 38 — closing round 37's open list (training/playground/story on a phone)
+
+### The audit finished: 43 confirmed. Two verifiers died mid-run.
+
+`verify:menu-title-loading` and `verify:results-gallery` failed with "computer went
+to sleep mid-response", so those two groups' findings are UNVERIFIED — not refuted, not
+confirmed. Treat MenuScreen / TitleScreen / LoadingScreen / ResultsScreen as un-audited.
+
+One verifier independently reproduced the `.sel-diff` z-index blocker by rebuilding the
+phase-2 DOM against a byte-copy of ui.css, then re-probed against the fixed stylesheet and
+found all five boxes returning `.diff-box` — an independent confirmation that the z-index
+was the whole cause, not a partial fix.
+
+### The measurement trap that nearly ended this round early
+
+The first layout pass audited the training and playground PICKERS and reported them clean.
+The panels round 37 flagged do not exist on the picker — they mount when the SESSION
+starts. Auditing only the entry screen would have declared them fixed without ever
+rendering them. The rig now calls `_startMatch()` / `_start()` before auditing.
+
+Second trap, same shape: after collapsing the panels behind a chip, "clean" is not proof —
+hiding everything reads identically. `sheetcheck.mjs` therefore asserts POSITIVELY: the
+chip exists at >=44px, a real tap OPENS the sheet, the panels are then visible with >=44px
+rows, the container fits the viewport AND scrolls, and a second tap closes it.
+
+### What was actually wrong on a phone
+
+Measured at 812x375: the stick capture zone is `left:0 bottom:0 42vw x 72vh` = x0-341,
+y105-375, which CONTAINS `.tp-moves` (left:10 top:120 w238) outright — so it could never be
+scrolled, the stick ate the drag. `.tp-fdata` starts at `calc(120px + 218px)` = 338px on a
+375px screen. `.pg-legend` is right:10 top:64 with ~19px rows, directly under the button
+cluster. And `TouchControls._onScreen` did `this._show(name === 'match' || name ===
+'playground')` — but playground OPENS on its picker, so the cluster buried the picker while
+its own hint read "TAP THE ARROWS". Training already avoided this by waiting for
+`match:start`; playground now emits `playground:start` and gets the same treatment.
+
+Both mode overlays now collapse behind one 44px chip (TOOLS / TOYBOX) in the top strip —
+the only band owned by neither the stick nor the buttons.
+
+### Two bugs I introduced and caught by measuring
+
+- The training sheet used content-box, so 78px of padding was ADDED to its `inset:0`
+  height: 396px on a 375px viewport. `.pg-legend` already had `box-sizing:border-box`,
+  which is exactly why the playground sheet fit and this one did not.
+- `.tp-overlay` is z-index 5 and `.wcs-touch` is 10, so the open sheet sat UNDER the stick
+  capture zone (`touch-action:none`) and could not be scrolled — reintroducing the very
+  defect the sheet exists to fix. Now z-index 41, like the playground sheet.
+
+### Structural fix for the tap-through class
+
+`ScreenManager`'s 8-frame grace existed to stop "the keypress that triggered this
+transition" activating something on the new screen — but it guarded `update()` only, and
+DOM handlers bypass the loop entirely. That is the hole every tap-through went through.
+`goto()` now also freezes pointer input (`.wcs-input-grace`) for the same window, cleared
+in `update()` with a 250ms timer fallback.
+
+### Verified after all of it
+
+escape audit ALL PASS; phase 2 reachable + BACK + difficulty tap starts the fight; sheet
+checks ALL PASS (both sheets z-index 41, fit 375px, scrollH 1307/842 > clientH, rows
+>=44px, toggle both ways); desktop keyboard 7/7 with no touch chrome on desktop.
+
+### Still open
+
+- MenuScreen / TitleScreen / LoadingScreen / ResultsScreen were never verified (above).
+- Credits fast-forward (`isDown` crouch/light) is still keyboard-only; minor.
+- `.tp-inputs` input-history strip is hidden on touch rather than relocated.
+
+
 ## ROUND 37 — the phone could not leave the character select, and that was the small half
 
 Reported: on a phone you cannot get out of the character list. The cause generalises.

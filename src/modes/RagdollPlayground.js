@@ -70,6 +70,27 @@ const STYLE = `
   .pg-legend .row b { color:#37e07a; font-style:normal; }
   .pg-legend .grav { padding:5px 2px 2px; }
   .pg-legend .grav .gl { display:flex; justify-content:space-between; margin-bottom:2px; }
+
+  /* ---------------------------------------------------------------- touch --
+     The legend is right:10px top:64px — directly under the touch button
+     cluster — and its rows are ~19px, well under the 44px floor. They are real
+     tappable actions, not just a key reference, so hiding them would remove
+     the toybox. Collapsed behind one 44px chip instead, same pattern as the
+     training tools sheet. The [K] key chips are also meaningless on a phone. */
+  .pg-legend.pg-touch { display:none; }
+  .pg-legend.pg-touch.sheet-open { display:block; position:absolute; inset:0;
+    width:auto; max-height:none; padding:58px 12px 20px; z-index:41;
+    background:rgba(4,3,12,.94); overflow-y:auto; -webkit-overflow-scrolling:touch; }
+  .pg-legend.pg-touch.sheet-open .row { min-height:44px; padding:6px 2px; }
+  .pg-legend.pg-touch.sheet-open .row .k { display:none; }
+  .pg-toolsbtn { position:absolute; top:6px; left:50%; transform:translateX(-50%);
+    min-width:104px; min-height:44px; display:flex; align-items:center; justify-content:center;
+    z-index:42; pointer-events:auto; cursor:pointer; font-family:inherit;
+    font-size:13px; letter-spacing:2px; color:#fff;
+    background:linear-gradient(180deg,#3a4066,#191d33); border:3px solid #000;
+    border-radius:8px; box-shadow:0 4px 0 rgba(0,0,0,.6);
+    -webkit-tap-highlight-color:transparent; }
+  .pg-toolsbtn:active { transform:translateX(-50%) translateY(2px); box-shadow:0 2px 0 rgba(0,0,0,.6); }
   .pg-legend .grav .gl b { color:#7ecbff; }
   .pg-legend .set-slider { width:100%; }
   .pg-hint { position:absolute; left:50%; bottom:12px; transform:translateX(-50%);
@@ -127,6 +148,8 @@ export class PlaygroundScreen {
     this.pickRoot?.remove()
     this.pickRoot = null
     this.legend?.remove()
+    this.toolsBtn?.remove()
+    this.toolsBtn = null
     this.legend = null
     this.hint?.remove()
     this.hint = null
@@ -256,6 +279,11 @@ export class PlaygroundScreen {
     this.game.audio.sfx('menu_confirm')
     this.pickRoot?.remove()
     this.pickRoot = null
+    // The touch cluster keys off this: it must NOT cover the picker, only the
+    // sandbox. This mode deliberately emits no 'match:start' (see below), so
+    // without its own signal the overlay would either bury the picker or never
+    // appear at all.
+    try { this.game.events?.emit?.('playground:start') } catch { /* no bus */ }
     resetMusicTracker()
 
     const arenaIds = Object.keys(Arenas)
@@ -521,6 +549,15 @@ export class PlaygroundScreen {
       </div>
     `
     this.game.ui.appendChild(this.legend)
+    if (touchUI(this.game)) {
+      this.legend.classList.add('pg-touch')
+      this.toolsBtn = el('div', 'pg-toolsbtn', 'TOYBOX')
+      this.toolsBtn.addEventListener('click', () => {
+        const open = this.legend.classList.toggle('sheet-open')
+        this.toolsBtn.textContent = open ? 'CLOSE' : 'TOYBOX'
+      })
+      this.game.ui.appendChild(this.toolsBtn)
+    }
     this.legend.querySelectorAll('.row').forEach((node) => {
       node.addEventListener('click', () => {
         const act = ACTIONS.find((a) => a.code === node.dataset.code)

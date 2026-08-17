@@ -20,12 +20,26 @@ export class ScreenManager {
     // Input grace: swallow the first few frames of update so the keypress that
     // triggered this transition can't also activate something on the new screen.
     this._graceUntil = (this.game.frame || 0) + 8
+    // ...but update() is only half of it. DOM click/pointer handlers bypass the
+    // loop entirely, which is exactly how one tap used to cross two screens
+    // (title -> menu -> Training). Freeze POINTER input for the same window so
+    // the grace means what its comment always claimed. Cleared in update();
+    // the timer is a belt-and-braces fallback in case update() never runs.
+    try {
+      this.game.ui?.classList.add('wcs-input-grace')
+      clearTimeout(this._graceTimer)
+      this._graceTimer = setTimeout(() => this.game.ui?.classList.remove('wcs-input-grace'), 250)
+    } catch { /* no ui node in headless */ }
     try { next.enter?.(params) } catch (e) { console.error(`[screens] enter("${name}") threw`, e) }
     this.game.events.emit('screen:changed', { name })
   }
 
   update(dt) {
     if (this.game.frame < this._graceUntil) return
+    if (this.game.ui?.classList.contains('wcs-input-grace')) {
+      this.game.ui.classList.remove('wcs-input-grace')
+      clearTimeout(this._graceTimer)
+    }
     this.current?.update?.(dt)
   }
   // `dt` is the REAL frame delta (not the fixed step) and is forwarded to

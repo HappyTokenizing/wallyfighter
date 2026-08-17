@@ -68,6 +68,11 @@
   overflow: hidden;
   animation: wcs-screen-in 0.2s ease-out;
 }
+/* Screen-transition input grace (ScreenManager.goto). For ~8 frames after a
+   screen change nothing is tappable, so the gesture that caused the transition
+   cannot also activate whatever landed under the finger. */
+.wcs-input-grace, .wcs-input-grace * { pointer-events: none !important; }
+
 /* Touch-only BACK affordance (uiKit.addBackButton). On a phone this is the ONLY
    way out of select / settings / gallery / movelist / credits — menuPressed('back')
    needs a keyboard or a gamepad — so it has to outrank every screen's own
@@ -2595,6 +2600,7 @@
   .hud-pause .wcs-btn,
   .sm-menu .wcs-btn,
   .tp-pickrow,
+  .pg-pickrow,
   .rp-btn {
     min-height: 44px;
     display: flex;
@@ -2605,13 +2611,18 @@
   .rp-btn { justify-content: center; }
   /* Picker steppers are the documented way to change fighter here, and the
      touch hint points straight at them, so they need real targets too. */
-  .tp-pickrow .arr {
+  .tp-pickrow .arr,
+  .pg-pickrow .arr {
     min-width: 44px;
     min-height: 44px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
   }
+  /* MenuList tags its rows only `.wcs-btn`, so the per-screen selectors above
+     miss any consumer not explicitly named. Floor them all. Height only —
+     changing `display` here would relayout buttons across the whole game. */
+  .wcs-btn { min-height: 44px; }
   .set-row { min-height: 44px; }
   /* The steppers only ever grew SIDEWAYS. `.set-row` is a flex row with
      align-items: center, so each `.arr` is a centred flex item that stays one

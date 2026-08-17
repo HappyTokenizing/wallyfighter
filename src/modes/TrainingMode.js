@@ -7,7 +7,7 @@
 import * as THREE from 'three'
 import { MatchScreen } from '../combat/MatchScreen.js'
 import { RosterOrder } from '../characters/index.js'
-import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, hintHTML, addBackButton } from '../ui/uiKit.js'
+import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, hintHTML, addBackButton, touchUI } from '../ui/uiKit.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 // The dummy: a ControlSource that wants absolutely nothing. AIControl clamps
@@ -97,6 +97,42 @@ const STYLE = `
   .tp-inputs i { display:block; min-width:18px; padding:2px 4px; text-align:center;
     font-style:normal; font-size:11px; color:#fff; background:rgba(8,6,20,.8);
     border:1px solid #2a2f55; }
+
+  /* ---------------------------------------------------------------- touch --
+     These three panels are a desktop analysis layout and they cannot coexist
+     with the touch controls. Measured at 812x375: the stick capture zone is
+     left:0 bottom:0 42vw x 72vh = x0-341 y105-375, which CONTAINS .tp-moves
+     (left:10 top:120 w238) outright — so it could not even be scrolled, the
+     stick ate the drag. .tp-tools and .tp-fdata sit on the right under the
+     button cluster, and .tp-fdata starts at 338px on a 375px-tall screen, i.e.
+     off the bottom. .tp-inputs sits at bottom:118px, over the controls.
+     On touch they collapse into one tap-opened sheet instead of being
+     scattered underneath the things you play with. */
+  .tp-overlay.tp-touch .tp-panel,
+  .tp-overlay.tp-touch .tp-inputs { display:none; }
+  .tp-toolsbtn { position:absolute; top:6px; left:50%; transform:translateX(-50%);
+    min-width:104px; min-height:44px; display:flex; align-items:center; justify-content:center;
+    z-index:42; pointer-events:auto; cursor:pointer; font-family:inherit;
+    font-size:13px; letter-spacing:2px; color:#fff;
+    background:linear-gradient(180deg,#3a4066,#191d33); border:3px solid #000;
+    border-radius:8px; box-shadow:0 4px 0 rgba(0,0,0,.6);
+    -webkit-tap-highlight-color:transparent; }
+  .tp-toolsbtn:active { transform:translateX(-50%) translateY(2px); box-shadow:0 2px 0 rgba(0,0,0,.6); }
+  .tp-overlay.tp-touch.sheet-open { pointer-events:auto; background:rgba(4,3,12,.94);
+    overflow-y:auto; -webkit-overflow-scrolling:touch; padding:58px 12px 20px;
+    /* MUST outrank .wcs-touch (z-index 10). .tp-overlay is z-index 5, so an
+       open sheet would sit UNDER the stick capture zone (touch-action:none)
+       and could not be scrolled — the very defect this sheet exists to fix. */
+    z-index:41;
+    /* border-box or the 78px of padding is ADDED to the inset:0 height and the
+       sheet runs off the bottom instead of scrolling inside it — measured 396px
+       on a 375px viewport. .pg-legend already had this, which is why the
+       playground sheet fit and this one did not. */
+    box-sizing:border-box; }
+  .tp-overlay.tp-touch.sheet-open .tp-panel { display:block; position:static;
+    width:auto; max-height:none; margin:0 0 10px; font-size:13px; }
+  .tp-overlay.tp-touch.sheet-open .tp-tools .row { min-height:44px; align-items:center; }
+  .tp-overlay.tp-touch.sheet-open .tp-moves .mv { padding:6px 0; }
   .tp-inputs i.dir { color:#7ecbff; }
   .tp-inputs i.btn { color:var(--wcs-gold,#ffd94a); border-color:#4a4468; }
 `
@@ -337,6 +373,18 @@ export class TrainingScreen {
       <div class="tp-inputs"></div>
     `
     this.game.ui.appendChild(this.hudRoot)
+    // Touch: panels off by default, one 44px chip opens them as a sheet. The
+    // chip lives in the top strip, the only band not owned by the stick zone
+    // or the button cluster.
+    if (touchUI(this.game)) {
+      this.hudRoot.classList.add('tp-touch')
+      const btn = el('div', 'tp-toolsbtn', 'TOOLS')
+      btn.addEventListener('click', () => {
+        const open = this.hudRoot.classList.toggle('sheet-open')
+        btn.textContent = open ? 'CLOSE' : 'TOOLS'
+      })
+      this.hudRoot.appendChild(btn)
+    }
     this.movesEl = this.hudRoot.querySelector('.tp-moves')
     this.fdataEl = this.hudRoot.querySelector('.tp-fdata')
     this.inputsEl = this.hudRoot.querySelector('.tp-inputs')

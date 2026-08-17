@@ -75,6 +75,11 @@ export class TouchControls {
     game.events.on('match:start', () => {
       if (this.game.screens.name === 'training') this._show(true)
     })
+    // Playground strips the match flow entirely (no match:start — see
+    // RagdollPlayground._start), so it announces its own sandbox start.
+    game.events.on('playground:start', () => {
+      if (this.game.screens.name === 'playground') this._show(true)
+    })
     // §27: the JUMP button follows settings.jumpEnabled LIVE
     game.events.on('settings:changed', ({ key } = {}) => {
       if (key === 'settings.jumpEnabled') this._applyJumpSetting()
@@ -395,8 +400,11 @@ export class TouchControls {
   // ------------------------------------------------------------ visibility --
 
   _onScreen(name) {
-    // 'training' intentionally not here — it shows on its 'match:start'
-    this._show(name === 'match' || name === 'playground')
+    // Neither 'training' nor 'playground' is here — BOTH open on a picker, and
+    // both wait for their own session-start event below. Showing the cluster on
+    // the screen change buried the playground picker under the stick zone and
+    // five buttons, while its own hint read 'TAP THE ARROWS'.
+    this._show(name === 'match')
   }
 
   _show(on) {
