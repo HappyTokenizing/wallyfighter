@@ -1166,21 +1166,21 @@ const SHADE_STANDOFF = 0.006
 // The crotch station drops 0.564 -> 0.558 for the same reason at the other end.
 const PEAR = [
   0.568, 0.060, 0.062, 0.018,
-  0.585, 0.190, 0.230, 0.014,
-  0.610, 0.310, 0.386, 0.010,
-  0.640, 0.396, 0.494, 0.007,
-  0.680, 0.428, 0.560, 0.004,
-  0.720, 0.438, 0.598, 0.002,
-  0.760, 0.440, 0.620, 0.000,   // widest belly, ±0.310 (§1 corrected)
-  0.830, 0.436, 0.614, 0.000,
-  0.900, 0.428, 0.602, 0.000,
-  0.970, 0.416, 0.586, 0.000,
-  1.040, 0.402, 0.566, 0.000,
-  1.110, 0.386, 0.544, -0.002,
-  1.180, 0.368, 0.520, -0.004,
-  1.240, 0.352, 0.500, -0.004,  // shoulder, ±0.250 (§1 corrected)
-  1.268, 0.352, 0.372, 0.010,   // \
-  1.307, 0.344, 0.318, 0.026,   //  > the neck: rounds up, sheds width fast, and
+  0.585, 0.200, 0.232, 0.014,
+  0.610, 0.330, 0.392, 0.010,
+  0.640, 0.424, 0.505, 0.007,
+  0.680, 0.462, 0.578, 0.004,
+  0.720, 0.474, 0.628, 0.002,
+  0.760, 0.478, 0.672, 0.000,   // widest belly, ±0.336 (was ±0.310)
+  0.830, 0.474, 0.666, 0.000,
+  0.900, 0.466, 0.654, 0.000,
+  0.970, 0.454, 0.638, 0.000,
+  1.040, 0.440, 0.618, 0.000,
+  1.110, 0.424, 0.596, -0.002,
+  1.180, 0.404, 0.570, -0.004,
+  1.240, 0.386, 0.548, -0.004,  // shoulder, ±0.274 (was ±0.250)
+  1.268, 0.380, 0.404, 0.010,   // \
+  1.307, 0.360, 0.334, 0.026,   //  > the neck: rounds up, sheds width fast, and
   1.352, 0.348, 0.306, 0.042,   //    walks its centre forward onto the head's
   1.390, 0.320, 0.246, 0.055,   //    own axis (x 0.075) so it vanishes INSIDE
   1.428, 0.256, 0.186, 0.068,   //    the cranium instead of crossing in front
@@ -2053,26 +2053,27 @@ function buildModel(costume = 0) {
   // must stay INSIDE ±0.310 or the pear stops being the widest thing in the
   // fill. All the outward bow is in the forearm.
   for (const side of [1, -1]) {
-    const arm = pivot(torso, 0.02, 0.15, 0.165 * side)
+    const arm = pivot(torso, 0.02, 0.15, 0.172 * side)
     bones[side === 1 ? 'armL' : 'armR'] = arm
     const armBin = binOf(arm, bins, 'armDressing')
     armBin.add(mesh(splineTube(
-      [[0.004, 0.020, 0], [0.002, -0.090, 0.006 * side],
-        [0.000, -0.200, 0.017 * side], [0.000, -0.300, 0.030 * side]],
-      0.085, LIMB_DIV, (t) => 0.0850 + (0.0800 - 0.0850) * t,
+      [[0.004, 0.020, 0], [0.002, -0.090, 0.010 * side],
+        [0.000, -0.200, 0.034 * side], [0.000, -0.300, 0.058 * side]],
+      0.102, LIMB_DIV, (t) => 0.1020 + (0.0960 - 0.1020) * t,
       { radialSeg: LIMB_RADIAL, roundStart: true, roundEnd: true, capSeg: 4, unique: true }), bodyM))
     // The arm hangs against the flank; this is what puts a soft dark band down
     // the side of the torso where the two nearly touch.
-    addOcc(arm, 0.003, -0.10, 0.008 * side, 0.086)
-    addOcc(arm, 0.000, -0.24, 0.022 * side, 0.082)
+    addOcc(arm, 0.003, -0.10, 0.012 * side, 0.103)
+    addOcc(arm, 0.000, -0.24, 0.036 * side, 0.098)
   }
 
   for (const side of [1, -1]) {
     const arm = bones[side === 1 ? 'armL' : 'armR']
     // The forearm bone rides the END of the upper-arm tube, lateral drift
-    // included (z +0.030), so the two surfaces are concentric at the join and no
+    // included (z +0.058, matching the upper tube's end drift), so the two
+    // surfaces are concentric at the join and no
     // forearm rotation can step the outline. Its FORWARD station is still 0.
-    const fore = pivot(arm, 0, -0.30, 0.030 * side)
+    const fore = pivot(arm, 0, -0.30, 0.058 * side)
     bones[side === 1 ? 'forearmL' : 'forearmR'] = fore
     const foreBin = binOf(fore, bins, 'foreDressing')
     // §4's "very slight outward bow", now 0.058 m of lateral drift and 0.014 m
@@ -2100,9 +2101,9 @@ function buildModel(costume = 0) {
     // it is WIDER than the tube it caps and the limb swells into the mitten
     // instead of stepping into it.
     foreBin.add(mesh(splineTube(
-      [[0.000, 0.000, 0], [0.005, -0.095, 0.030 * side],
-        [0.011, -0.190, 0.082 * side], [0.014, -0.285, 0.148 * side]],
-      0.080, LIMB_DIV, (t) => 0.0800 + (0.0660 - 0.0800) * t,
+      [[0.000, 0.000, 0], [0.005, -0.095, 0.044 * side],
+        [0.011, -0.190, 0.108 * side], [0.014, -0.285, 0.170 * side]],
+      0.096, LIMB_DIV, (t) => 0.0960 + (0.0820 - 0.0960) * t,
       { radialSeg: LIMB_RADIAL, roundStart: true, roundEnd: true, capSeg: 4, unique: true }), bodyM))
 
     // --- hand — §4: "soft mittens. A rounded palm mass with four short stubby
@@ -2116,8 +2117,8 @@ function buildModel(costume = 0) {
     // v2.1: the mitten is 15% bigger with the thicker limb and sits at world
     // (0.034, 0.540, ±0.350). §1 wants the wrist at 0.600 and the fingertips at
     // 0.440; the palm's top is 0.622 and the nubs finish at 0.428.
-    const hx = 0.018, hy = -0.318, hz = 0.148 * side
-    foreBin.add(mesh(superellipsoid(0.076, 0.086, 0.070, 2.7, 2.7, HAND_SEG, { unique: true }),
+    const hx = 0.018, hy = -0.322, hz = 0.170 * side
+    foreBin.add(mesh(superellipsoid(0.092, 0.101, 0.084, 2.7, 2.7, HAND_SEG, { unique: true }),
       bodyM, hx, hy, hz))
     // Four nubs fanned across the palm's depth, the outer two a shade shorter.
     //

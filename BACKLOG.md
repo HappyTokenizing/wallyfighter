@@ -1,5 +1,63 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 41 — Wally's proportions: fuller body, real arms
+
+The brief: body slightly bigger, arms more normal, and he must read as WALLY.
+
+### What the renders showed against the reference sheet
+
+Captured front/side/back/three-quarter through the documented `?cap=1` driver
+(`__viewport` / `__fight` / `__poseCam`) with the framebuffer read back over CDP.
+Against the four supplied studio renders the shipped model was: a TAPERED SLAB
+torso the head dominated, and arms like pipe cleaners ending in nub hands. The
+reference is a rounded egg with thick soft arms roughly two-thirds the leg's
+heft and proper mitten hands.
+
+### Changed
+
+- PEAR table: belly ±0.310 -> ±0.336 (+8.4% width, +9.5% depth), shoulder
+  ±0.250 -> ±0.274, easing to 1.0 at the crotch tip and into the neck rows so
+  the head join and the glasses wrap are untouched.
+- Upper arm 0.085 -> 0.102 (its wall still lands exactly on the new shoulder),
+  forearm 0.080 -> 0.096, hand +18%.
+- Outward drift raised (upper 0.030 -> 0.058, forearm 0.148 -> 0.170) — see below.
+
+Envelope is UNCHANGED: height 2.000, span z 1.055, depth x 0.810, 23 meshes /
+37744 tris, all 17 bones. The ears and trunk still set the bounds, so nothing
+that keys off them moved, and every hitbox in the file is an authored constant.
+
+### Two mistakes the tooling caught, not my eye
+
+1. FIRST PASS SWALLOWED THE ARMS. I widened the body and, thinking "arms hang
+   closer in the reference", REDUCED the outward bow. At ±0.274 against a
+   ±0.336 belly the whole upper limb sat inside the body silhouette and only the
+   hand cleared it. The bow has to grow WITH the torso, not shrink.
+2. THE SLOT. `wally-front.mjs` prints the model's own front fill, and the file
+   documents arm/belly daylight opening at y/H 0.36 (world 0.72). After the
+   first pass it opened only at 0.54 — I had closed a documented feature without
+   noticing, because the render still "looked fine". Tapering the HIP band
+   (0.610-0.720) while keeping the belly full took it back to 0.58.
+
+Residual, stated honestly: 0.58 is not 0.72. Daylight requires the arm's INNER
+edge to clear the body's outer edge, and on a belly this much fuller that would
+need a scarecrow swing. The reference itself shows the arms touching the body
+through the belly band and separating at the hip, which is what ships.
+
+3. CONCENTRICITY. Raising the upper tube's end drift to 0.058 left the forearm
+   pivot at 0.030 — the file explicitly keeps those equal so the two surfaces
+   are concentric at the join and no forearm rotation can step the outline. I
+   broke that invariant and only found it re-reading the comment I had edited
+   around. Pivot re-matched.
+
+### Rig note
+
+`__poseCam` sets `cam.enabled = false` and `cam.frozen = true`, but
+MatchScreen:1358 calls `this.cam.update(dt)` unconditionally and honours
+neither, so the camera snaps back to the wide arena shot and every "portrait"
+comes out as a gameplay frame. The capture rig neutralises `cam.update` from the
+page. Worth fixing in MatchScreen so the documented driver API actually works.
+
+
 ## ROUND 40 — results screen, HUD meters, and the portrait lockout
 
 ### The results menu was a dead end after EVERY match
