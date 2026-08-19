@@ -2057,23 +2057,23 @@ function buildModel(costume = 0) {
     bones[side === 1 ? 'armL' : 'armR'] = arm
     const armBin = binOf(arm, bins, 'armDressing')
     armBin.add(mesh(splineTube(
-      [[0.004, 0.020, 0], [0.002, -0.090, 0.010 * side],
-        [0.000, -0.200, 0.034 * side], [0.000, -0.300, 0.058 * side]],
+      [[0.004, 0.020, 0], [0.002, -0.090, 0.006 * side],
+        [0.000, -0.200, 0.020 * side], [0.000, -0.300, 0.040 * side]],
       0.102, LIMB_DIV, (t) => 0.1020 + (0.0960 - 0.1020) * t,
       { radialSeg: LIMB_RADIAL, roundStart: true, roundEnd: true, capSeg: 4, unique: true }), bodyM))
     // The arm hangs against the flank; this is what puts a soft dark band down
     // the side of the torso where the two nearly touch.
     addOcc(arm, 0.003, -0.10, 0.012 * side, 0.103)
-    addOcc(arm, 0.000, -0.24, 0.036 * side, 0.098)
+    addOcc(arm, 0.000, -0.24, 0.026 * side, 0.098)
   }
 
   for (const side of [1, -1]) {
     const arm = bones[side === 1 ? 'armL' : 'armR']
     // The forearm bone rides the END of the upper-arm tube, lateral drift
-    // included (z +0.058, matching the upper tube's end drift), so the two
+    // included (z +0.040, matching the upper tube's end drift), so the two
     // surfaces are concentric at the join and no
     // forearm rotation can step the outline. Its FORWARD station is still 0.
-    const fore = pivot(arm, 0, -0.30, 0.058 * side)
+    const fore = pivot(arm, 0, -0.30, 0.040 * side)
     bones[side === 1 ? 'forearmL' : 'forearmR'] = fore
     const foreBin = binOf(fore, bins, 'foreDressing')
     // §4's "very slight outward bow", now 0.058 m of lateral drift and 0.014 m
@@ -2101,8 +2101,8 @@ function buildModel(costume = 0) {
     // it is WIDER than the tube it caps and the limb swells into the mitten
     // instead of stepping into it.
     foreBin.add(mesh(splineTube(
-      [[0.000, 0.000, 0], [0.005, -0.095, 0.044 * side],
-        [0.011, -0.190, 0.108 * side], [0.014, -0.285, 0.170 * side]],
+      [[0.000, 0.000, 0], [0.008, -0.095, 0.030 * side],
+        [0.022, -0.190, 0.082 * side], [0.040, -0.285, 0.140 * side]],
       0.096, LIMB_DIV, (t) => 0.0960 + (0.0820 - 0.0960) * t,
       { radialSeg: LIMB_RADIAL, roundStart: true, roundEnd: true, capSeg: 4, unique: true }), bodyM))
 
@@ -2117,7 +2117,7 @@ function buildModel(costume = 0) {
     // v2.1: the mitten is 15% bigger with the thicker limb and sits at world
     // (0.034, 0.540, ±0.350). §1 wants the wrist at 0.600 and the fingertips at
     // 0.440; the palm's top is 0.622 and the nubs finish at 0.428.
-    const hx = 0.018, hy = -0.322, hz = 0.170 * side
+    const hx = 0.042, hy = -0.322, hz = 0.140 * side
     foreBin.add(mesh(superellipsoid(0.092, 0.101, 0.084, 2.7, 2.7, HAND_SEG, { unique: true }),
       bodyM, hx, hy, hz))
     // Four nubs fanned across the palm's depth, the outer two a shade shorter.
@@ -2132,18 +2132,18 @@ function buildModel(costume = 0) {
     // §4's "visible as separated digits" holds from the front as well as in the
     // arms-raised view. Still no knuckles, no nails, no articulation.
     for (let i = 0; i < 4; i++) {
-      const dx = -0.052 + i * 0.03467
-      const short = (i === 0 || i === 3) ? 0.010 : 0
-      foreBin.add(mesh(taperedCapsule(0.0165, 0.0195, 0.030 - short, 3, NUB_RADIAL, { unique: true }),
-        bodyM, hx + dx, hy - 0.090 + short * 0.5, hz + (i - 1.5) * 0.0030 * side,
+      const dx = -0.0614 + i * 0.0409
+      const short = (i === 0 || i === 3) ? 0.012 : 0
+      foreBin.add(mesh(taperedCapsule(0.0195, 0.0230, 0.035 - short, 3, NUB_RADIAL, { unique: true }),
+        bodyM, hx + dx, hy - 0.106 + short * 0.5, hz + (i - 1.5) * 0.0035 * side,
         0, 0, 0))
     }
     // thumb: forward and inboard, canted out of the palm plane
-    foreBin.add(mesh(taperedCapsule(0.0210, 0.0260, 0.018, 3, NUB_RADIAL + 2, { unique: true }),
-      bodyM, hx + 0.070, hy - 0.032, hz - 0.028 * side, 0.30 * side, 0, -0.62))
+    foreBin.add(mesh(taperedCapsule(0.0248, 0.0307, 0.021, 3, NUB_RADIAL + 2, { unique: true }),
+      bodyM, hx + 0.083, hy - 0.038, hz - 0.033 * side, 0.30 * side, 0, -0.62))
     addOcc(fore, 0.005, -0.10, 0.032 * side, 0.079)
     addOcc(fore, 0.012, -0.22, 0.098 * side, 0.073)
-    addOcc(fore, hx, hy, hz, 0.084)     // the mitten — AO in the finger valleys
+    addOcc(fore, hx, hy, hz, 0.099)     // the mitten — AO in the finger valleys
   }
 
   // --- head — §2: "a slightly egg-shaped dome, taller than wide, widest at

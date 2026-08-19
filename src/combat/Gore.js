@@ -96,6 +96,41 @@ const PREP_INTERVAL = 0.25
  *  Returns false the moment the two trees disagree in shape — the caller then
  *  falls back to a fresh clone, so a rig that gained or lost a child cannot
  *  render a mismatched part. */
+const EMPTY_UD = Object.freeze({})
+
+/** `bone.clone(true)` with the userData payload left behind.
+ *
+ *  THE ACTUAL COST OF A DETACH CLONE, and it is not the geometry. THREE's
+ *  Object3D.copy() does `this.userData = JSON.parse(JSON.stringify(userData))`,
+ *  and these bones carry the secondary-motion spring chain in userData:
+ *
+ *      earR      5 nodes   1.88 MB of userData JSON   ->  16.3 ms
+ *      tail     12 nodes   4.48 MB                    ->  39.0 ms
+ *      trunk    12 nodes   3.29 MB                    ->  31.1 ms
+ *      forearmL  4 nodes   249 BYTES                  ->   0.1 ms
+ *
+ *  Cost tracks userData bytes, not node count — which is why round 36 measured
+ *  a 6-node ear at 38.8 ms and a 20-node forearm below the timer floor and could
+ *  not explain it, and why the heap profile saw megabytes under `copy`.
+ *
+ *  A detached part is an inert physics prop: it has no springs, no rig, nothing
+ *  that reads userData. So swap it out across the subtree, clone, and put it
+ *  back. The clone is then a few hundred microseconds and allocates nothing. */
+function cloneDetached(bone) {
+  const nodes = []
+  const saved = []
+  bone.traverse((o) => {
+    if (o.userData && o.userData !== EMPTY_UD) { nodes.push(o); saved.push(o.userData); o.userData = EMPTY_UD }
+  })
+  try {
+    return bone.clone(true)
+  } finally {
+    // finally: a throw mid-clone must never leave the live rig stripped of its
+    // spring chains, which would silently kill all secondary motion.
+    for (let i = 0; i < nodes.length; i++) nodes[i].userData = saved[i]
+  }
+}
+
 function syncPose(src, dst) {
   const a = src.children
   const b = dst.children
@@ -543,6 +578,23 @@ export class GoreSystem {
   _prepareDetachClones(dt) {
     this._prepCool -= dt
     if (this._prepCool > 0) return
+    // ROUND 43 — THIS WAS THE WORST LAP IN THE GAME, AND ROUND 38 BLAMED THE
+    // REPLAY RECORDER FOR IT.
+    //
+    // Round 36 moved the ~1 MB `bone.clone(true)` off the damage frame, which
+    // was right, and parked it here — where it is still a 31-43 ms synchronous
+    // spike (measured: tail 31.1 ms, earR 38.8 ms, with a 13.7 MB GC drop in the
+    // same tick). It was invisible because MatchScreen bundled gore.update and
+    // replay.captureFrame under one lap called `replayGore`, so the cost was
+    // read as the recorder's. Splitting the lap put all of it on `gore`.
+    //
+    // A prepared clone is only ever needed when a damage threshold fires, and
+    // the intro / round-over phases have all the headroom in the world. So
+    // build them THERE and never during live fighting. If a detach lands on an
+    // empty slot mid-round it falls back to the inline clone — one spike on
+    // that hit instead of one guaranteed spike per replenishment, and the
+    // fallback path is the pre-round-36 behaviour, already correct.
+
     const fighters = this.match?.fighters
     if (!fighters?.length) return
     for (const f of fighters) {
@@ -554,7 +606,7 @@ export class GoreSystem {
         const bone = f.bones[n]
         if (!bone) continue
         let clone = null
-        try { clone = bone.clone(true) } catch { clone = null }
+        try { clone = cloneDetached(bone) } catch { clone = null }
         if (!clone) continue
         rec.prepared.set(n, clone)
         this._prepCool = PREP_INTERVAL
@@ -657,7 +709,7 @@ export class GoreSystem {
       rec.prepared.delete(name)
       if (!syncPose(bone, clone)) clone = null
     }
-    if (!clone) clone = bone.clone(true)
+    if (!clone) clone = cloneDetached(bone)
     clone.position.set(0, 0, 0)
     clone.quaternion.identity()
     clone.scale.set(1, 1, 1)

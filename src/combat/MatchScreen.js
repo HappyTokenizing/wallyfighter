@@ -1524,10 +1524,14 @@ export class MatchScreen {
         try { g.dispose?.() } catch { /* already broken */ }
       }
     }
+    // `replayGore` bundled gore.update AND the replay capture under one name,
+    // which is how round 38 mis-attributed a 45 ms lap to the replay recorder
+    // when captureFrame only writes floats into a preallocated ring. Split them.
+    if (_P) _lap('gore')
     // record this fixed frame for the instant replay (fight/finisher/ko only)
     try { this.replay?.captureFrame(this.phase) } catch { /* recorder is optional */ }
     if (_P) {
-      _lap('replayGore')
+      _lap('replay')
       const total = performance.now() - _t0
       // Keep only genuinely bad ticks: the median step is ~4.7 ms on a throttled
       // phone, so 20 ms is already 4x that and anything below it is noise.

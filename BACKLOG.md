@@ -1,5 +1,87 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 43 — the worst lap in the game was mine, and round 38 blamed the wrong system
+
+### The mis-attribution
+
+Round 38 reported `replayGore` as the top remaining sim cost (40.0 / 45.7 ms) and
+recorded it as `replay.captureFrame()` — "the instant-replay recorder, not gore".
+That was read off the lap's NAME. The lap wraps BOTH `gore.update(dt)` and
+`replay.captureFrame()`, and captureFrame only writes floats into a preallocated
+ring buffer: it cannot cost 45 ms.
+
+Split the lap (`gore` | `replay`) and every bad tick lands on gore:
+
+    {"total":43.9,"gore":43.2,"__gcDropMB":13.7}
+    {"total":37.3,"gore":36.8}
+    {"total":35.6,"gore":34.2}
+    {"total":33.6,"gore":31.8}
+
+`replay` does not appear at all. The 13.7 MB GC drop names the culprit outright.
+
+### It was round 36's fix, half-finished
+
+Round 36 moved the ~1 MB `bone.clone(true)` off the DAMAGE frame — correct — and
+parked it in `Gore.update()`, where it is still a 31-43 ms synchronous spike
+(measured this round: tail 31.1 ms, earR 38.8 ms). Round 36 even recorded this as
+a residual and claimed it was "not in the top-3 worst laps". It was number one.
+It stayed hidden because the bundled lap name pointed at the recorder.
+
+Note the cost does NOT track node count — earR is 6 nodes at 38.8 ms while
+forearmL is 20 nodes below the timer floor — so "it's only a few nodes" is not a
+defence for cloning on a live frame.
+
+### First fix was a dodge, and the measurement said so
+
+Gating `_prepareDetachClones` out of the fight phase cut the spikes 4 -> 1, so I
+nearly stopped there. But `preparedLeft` 2 against `detachedProps` 3 meant later
+detaches were falling back to the INLINE clone — the spike had simply moved back
+onto the damage frame, which is where round 36 started. Same cost, worse place.
+
+The question I had skipped: why does cloning a SIX-NODE subtree cost 38 ms?
+
+### Root cause: THREE deep-copies userData as JSON
+
+`Object3D.copy()` runs `this.userData = JSON.parse(JSON.stringify(userData))`,
+and these bones carry the secondary-motion spring chain in userData:
+
+    earR      5 nodes   1.88 MB userData JSON   ->  16.3 ms
+    tail     12 nodes   4.48 MB                 ->  39.0 ms
+    trunk    12 nodes   3.29 MB                 ->  31.1 ms
+    forearmL  4 nodes   249 BYTES               ->   0.1 ms
+
+Cost tracks userData bytes, not node count — which is exactly why round 36
+measured a 6-node ear at 38.8 ms next to a 20-node forearm below the timer floor
+and recorded the anomaly without explaining it, and why the heap profile saw
+megabytes under `copy`.
+
+`cloneDetached()` swaps userData for a frozen empty object across the subtree,
+clones, and restores in a `finally` (a throw mid-clone must never leave the live
+rig stripped of its springs — that would silently kill all secondary motion). A
+detached part is an inert physics prop; nothing on it ever reads userData.
+
+    earR   17.5 ms -> 0.03 ms      tail  39.9 ms -> 0.06 ms
+    trunk  28.0 ms -> 0.06 ms      live rig keeps all 8 spring chains
+
+With the root cause gone the fight-phase gate was deleted: the pool stays warm
+(preparedLeft back to 5) and costs nothing. Live profile after: WORST SIM STEPS
+is EMPTY — no sim step exceeded 20 ms for the whole fight. A detach landing on an empty slot falls back to
+the inline clone — one spike on that hit instead of one guaranteed spike per
+replenishment, and the fallback is the pre-round-36 path, already proven
+equivalent in round 36's node-by-node check.
+
+Gore spikes in the worst-step list: 4 -> 1, and the survivor is an intro-phase
+build. `preparedLeft` 5 -> 2 confirms the pool stops replenishing under fight.
+
+### Honest caveat on this session's absolutes
+
+This run's frame numbers (gap p99 92.6 ms, 29 frames >100) are far worse than the
+clean runs of rounds 36-38 (p99 17-25 ms) because the machine was carrying
+several browsers. Per my own discipline: counts are load-immune, absolutes are
+not. The reliable signals here are the LAP ATTRIBUTION and the spike COUNT, not
+the millisecond totals. A clean-machine re-measure is still owed.
+
+
 ## ROUND 42 — the lens glyph was the wrong glyph
 
 Reference art supplied for the sunglasses. The shipped glyph was a MARKET TICK:
