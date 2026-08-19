@@ -5,7 +5,7 @@
 // flat matte grey: enormous rounded ears wider than anything else on the model,
 // a trunk hanging plumb down the centre line and curling forward at the tip,
 // short stubby tusks, and one graphic accent — black wraparound sunglasses with
-// a white market-tick glyph mirrored across the two lenses.
+// a white lightning-zigzag glyph mirrored across the two lenses.
 //
 // HE WEARS NOTHING. Built to docs/parody/wally-v2-reference.md, which SUPERSEDES
 // docs/parody/wally.md (that brief's tailored suit is gone: no jacket, lapels,
@@ -2882,9 +2882,9 @@ function buildModel(costume = 0) {
     frameDullM))
   }
 
-  // --- THE LENS GLYPH — §3. A bold white rounded squiggle in each lens: short
-  // horizontal, diagonal, short horizontal, reading as a stylised market-chart
-  // tick. Three capsules chained end to end, so the caps AND the joins come out
+  // --- THE LENS GLYPH — §3. A bold white rounded squiggle in each lens:
+  // diagonal, short kick-back, diagonal — the lightning zigzag of the reference
+  // art (it was a flat-ended market tick before, which did not match). Three capsules chained end to end, so the caps AND the joins come out
   // rounded for free. Stroke weight 0.016 (radius 0.008); the node box is
   // 0.086 x 0.051, which with the caps is 0.102 x 0.067 — 55% of the lens
   // width and 60% of its height, centred, exactly as §3 specifies.
@@ -2899,14 +2899,24 @@ function buildModel(costume = 0) {
   // panel's inner edge and 0.023 clear of its top and bottom edges. It cannot
   // reach the trunk root; the shell's bridge is between them.
   //
-  // MIRRORED between the lenses (§3), so the pair is symmetrical about the
-  // trunk. Every node rides the SAME concentric shell as the lens panel, 0.026
+  // REPEATED (not mirrored) between the lenses, matching the reference art.
+  // Placement is per-side; Every node rides the SAME concentric shell as the lens panel, 0.026
   // outside the band line — the panel's own face is at +0.023, so each stroke is
   // half-sunk into the lens and cannot float off it at either end. Every term of
   // the node formula is even in z (lensY takes |z|, the wrap takes z^2), so the
   // two glyphs are exact mirrors by construction. Matte white, no emissive: §3
   // says do not let bloom smear it.
-  const GLYPH = [[-0.0430, -0.0255], [-0.0145, -0.0255], [0.0145, 0.0255], [0.0430, 0.0255]]
+  // REFERENCE MATCH: the supplied glasses art is a LIGHTNING ZIGZAG, not the
+  // market tick this shipped with. The tick ran flat-diagonal-flat (horizontal
+  // end bars, one diagonal between them). The reference is the inverse: both END
+  // strokes are steep diagonals rising to the right, joined by a shorter middle
+  // run that kicks back DOWN — rise, fall, rise. Same node count, same chained
+  // capsules, so caps and joins still come out rounded for free.
+  //
+  // Extents still respect the clip budget documented above: |z| 0.040 + cap
+  // 0.0095 = 0.0495 half-extent against the 0.051 the flat-topped panel run
+  // allows, and |y| 0.030 + cap = 0.0395 against the panel's 0.0565 half-height.
+  const GLYPH = [[-0.0400, 0.0300], [-0.0130, -0.0080], [0.0100, 0.0080], [0.0400, -0.0300]]
   for (const side of [1, -1]) {
     // ROUND 6 nudges the whole tick 3 mm inboard and 2 mm down. §9.6 passed on
     // size and mirroring, with one nit: "both sit slightly high and outboard in
@@ -2915,7 +2925,12 @@ function buildModel(costume = 0) {
     // that reads as the lens — is 0.066 -> 0.184, and the wrap's curvature
     // carries the outer strokes further round the head than the inner ones.
     const node = (n) => {
-      const z = side * (LENS_ZC - 0.003 + n[0])
+      // `side` positions the glyph on its lens; it must NOT flip the glyph's own
+      // direction. The reference art repeats the identical zigzag on both lenses
+      // (same lean), where this used to mirror it about the trunk — so the node
+      // offset is added OUTSIDE the side multiply. wrapAt still takes |z|, so
+      // the shell projection is unaffected.
+      const z = side * (LENS_ZC - 0.003) + n[0]
       return wrapAt(z, n[1] - 0.002, 0.026)
     }
     // radialSeg 20 / capSeg 7: round 3's 12/4 put a 12-gon cross-section and a
@@ -2925,7 +2940,7 @@ function buildModel(costume = 0) {
     // they actually are round, and the overlapping hemispheres at each node do
     // the join for free.
     for (let i = 0; i < GLYPH.length - 1; i++) {
-      shadeBin.add(strut(node(GLYPH[i]), node(GLYPH[i + 1]), 0.008, glyphM, GLYPH_RADIAL, 4))
+      shadeBin.add(strut(node(GLYPH[i]), node(GLYPH[i + 1]), 0.0095, glyphM, GLYPH_RADIAL, 4))
     }
   }
   // Post-guardAlbedo colour, so restoring this hex restores what was rendered.

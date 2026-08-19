@@ -1,5 +1,46 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 42 — the lens glyph was the wrong glyph
+
+Reference art supplied for the sunglasses. The shipped glyph was a MARKET TICK:
+flat-diagonal-flat, i.e. horizontal bars at both ends with one diagonal between
+them. The reference is the inverse — a LIGHTNING ZIGZAG: both end strokes are
+steep diagonals, joined by a shorter middle run that kicks back the other way.
+
+    was   GLYPH = [[-0.0430,-0.0255], [-0.0145,-0.0255], [0.0145,0.0255], [0.0430,0.0255]]
+    now   GLYPH = [[-0.0400, 0.0300], [-0.0130,-0.0080], [0.0100,0.0080], [0.0400,-0.0300]]
+
+Stroke 0.016 -> 0.019, matching the reference's chunkier mark.
+
+### The second error, which the first render exposed
+
+Getting the zigzag right was not enough: it came out FALLING to the right where
+the reference RISES, and the two lenses were mirror images of each other. The
+file mirrored the glyph deliberately ("MIRRORED between the lenses (§3), so the
+pair is symmetrical about the trunk") — but the reference repeats the IDENTICAL
+glyph on both lenses, same lean, no mirroring. So:
+
+    was   const z = side * (LENS_ZC - 0.003 + n[0])
+    now   const z = side * (LENS_ZC - 0.003) + n[0]
+
+`side` now places the glyph on its lens without flipping the glyph's own
+direction. `wrapAt` takes |z| internally, so the shell projection is unaffected.
+
+Clip budget still honoured: |z| 0.040 + cap 0.0095 = 0.0495 against the 0.051 the
+panel's flat-topped run allows; |y| 0.030 + cap = 0.0395 against its 0.0565
+half-height. Verified in render — both glyphs sit wholly inside their panels.
+
+Model unchanged otherwise: 23 meshes / 37744 tris, height 2.000, span z 1.055,
+and costume 1 (the green BULL MARKET variant) still builds.
+
+### Not changed, and worth a decision
+
+The reference lenses are D-shaped — a flat brow with a semicircular BOTTOM edge —
+while the game's are a wraparound visor with a much straighter lower edge. That
+is a silhouette change to the shell, not the "pattern", so it was left alone
+rather than folded into a glyph fix. Flagged to the user.
+
+
 ## ROUND 41 — Wally's proportions: fuller body, real arms
 
 The brief: body slightly bigger, arms more normal, and he must read as WALLY.
