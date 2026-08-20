@@ -4,6 +4,7 @@
 import { RosterOrder } from '../../characters/index.js'
 import { el, ensureMusic, charDef, PortraitRail, hintHTML, addBackButton, touchUI } from '../uiKit.js'
 import { getBackdrop } from '../MenuBackdrop.js'
+import { heroPortrait } from './PortraitStudio.js'
 
 const GLYPHS = {
   forward: '→', back: '←', up: '↑', down: '↓',
@@ -50,6 +51,15 @@ export class MovelistScreen {
     const start = Math.max(0, RosterOrder.indexOf(params.charId ?? 'wally'))
     this.rail = new PortraitRail(this.game, this.root.querySelector('.mv-rail'), RosterOrder, {
       onChange: (id) => this._show(id),
+    })
+    // Same upgrade the gallery does: the rail ships flat doodles from uiKit, so
+    // repaint each thumbnail in place as a lit 3D bust. No node is added,
+    // removed or reordered, so the rail's hover/click/cursor logic is
+    // untouched, and the bust bake is cached per fighter — the gallery and the
+    // mode pickers all share these exact entries, so this costs no extra bakes.
+    this.rail.nodes.forEach((node, i) => {
+      const canvas = node.querySelector('canvas')
+      if (canvas) heroPortrait(this.game, canvas, RosterOrder[i], { framing: 'bust', px: 200 })
     })
     if (start > 0) this.rail.setIndex(start)
   }

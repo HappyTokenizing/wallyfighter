@@ -5,7 +5,8 @@
 // Exported as StoryScreen; registered under the name 'story' by the UI module.
 import { Characters, UnchainedBull } from '../characters/index.js'
 import { ArenaOrder, Arenas } from '../arenas/index.js'
-import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, hintHTML, addBackButton } from '../ui/uiKit.js'
+import { el, MenuList, ensureMusic, charName, charTitle, hintHTML, addBackButton } from '../ui/uiKit.js'
+import { heroPortrait } from '../ui/screens/PortraitStudio.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 import { TutorialDirector } from './Tutorial.js'
 
@@ -445,7 +446,11 @@ export class StoryScreen {
     }
 
     if (!boss) {
-      drawPortrait(canvas, info.charId)
+      // Campaign card is a full opponent reveal, so it gets the VS screen's
+      // treatment rather than the 2D fallback doodle.
+      heroPortrait(this.game, canvas, info.charId, {
+        framing: 'hero', pose: 'entrance', look: 'p2', px: 256, priority: true,
+      })
       foeEl.textContent = `VS ${charName(info.charId)}`
       foetEl.textContent = charTitle(info.charId)
       mountMenu()
@@ -454,7 +459,9 @@ export class StoryScreen {
     }
 
     // --- round 10: the transformation beat -------------------------------
-    drawPortrait(canvas, 'blackish-bull')
+    heroPortrait(this.game, canvas, 'blackish-bull', {
+      framing: 'hero', pose: 'entrance', look: 'p2', px: 256, priority: true,
+    })
     foeEl.textContent = 'VS ???'
     foetEl.textContent = 'SIGNAL LOST'
     this._cue(0.8, () => {
@@ -468,7 +475,9 @@ export class StoryScreen {
       this.game.audio.announcer('THE RESERVE IS UNSTABLE!')
     })
     this._cue(2.3, () => {
-      drawPortrait(canvas, BOSS_ID)
+      heroPortrait(this.game, canvas, BOSS_ID, {
+        framing: 'hero', pose: 'entrance', look: 'p2', px: 256, priority: true,
+      })
       foeEl.textContent = `VS ${charName(BOSS_ID)}`
       foetEl.textContent = charTitle(BOSS_ID)
       this.game.audio.sfx('bell', { pitch: 0.6 })

@@ -7,7 +7,8 @@
 // one-fighter picker built from uiKit portraits.
 import { Characters, RosterOrder } from '../characters/index.js'
 import { Arenas } from '../arenas/index.js'
-import { el, MenuList, ensureMusic, drawPortrait, charName, charTitle, statBarsHTML, hintHTML, addBackButton } from '../ui/uiKit.js'
+import { el, MenuList, ensureMusic, charName, charTitle, statBarsHTML, hintHTML, addBackButton } from '../ui/uiKit.js'
+import { heroPortrait } from '../ui/screens/PortraitStudio.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 const COLS = 5
@@ -236,7 +237,9 @@ export class ArcadeScreen {
     this.slots = RosterOrder.map((id, i) => {
       const slot = el('div', 'arc-slot')
       const canvas = document.createElement('canvas')
-      drawPortrait(canvas, id, { locked: !Characters[id] })
+      heroPortrait(this.game, canvas, id, {
+        framing: 'bust', pose: 'idle', look: 'neutral', locked: !Characters[id], px: 224,
+      })
       slot.appendChild(canvas)
       slot.appendChild(el('div', 'nm', charName(id)))
       slot.addEventListener('mouseenter', () => {
@@ -362,7 +365,9 @@ export class ArcadeScreen {
       ${hintHTML(this.game, '<b>J / ENTER</b> FIGHT &nbsp; <b>ESC</b> ABANDON RUN', 'TAP TO SELECT')}
     `, 'menu')
 
-    drawPortrait(this.stage.querySelector('.arc-card canvas'), rung.charId)
+    heroPortrait(this.game, this.stage.querySelector('.arc-card canvas'), rung.charId, {
+      framing: 'hero', pose: 'entrance', look: 'p2', px: 256, priority: true,
+    })
     this._buildSidePanel()
     if (victory) this.game.audio.sfx('coins_burst')
     if (finale) this.game.audio.announcer('THE FINAL RUNG!')
@@ -389,7 +394,9 @@ export class ArcadeScreen {
       const cls = i < run.rung ? 'done' : i === run.rung ? 'cur' : 'next'
       const row = el('div', `arc-rung ${cls}`)
       const canvas = document.createElement('canvas')
-      drawPortrait(canvas, entry.charId)
+      heroPortrait(this.game, canvas, entry.charId, {
+        framing: 'bust', pose: 'idle', look: 'neutral', px: 224,
+      })
       row.appendChild(canvas)
       row.appendChild(el('div', 'rn', charName(entry.charId)))
       row.appendChild(el('div', 'rw', i < run.rung ? '✓' : i === run.rung ? '◀' : ''))

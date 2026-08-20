@@ -7,7 +7,8 @@
 import * as THREE from 'three'
 import { MatchScreen } from '../combat/MatchScreen.js'
 import { RosterOrder } from '../characters/index.js'
-import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, hintHTML, addBackButton, touchUI } from '../ui/uiKit.js'
+import { el, ensureMusic, resetMusicTracker, charName, charTitle, hintHTML, addBackButton, touchUI } from '../ui/uiKit.js'
+import { heroPortrait } from '../ui/screens/PortraitStudio.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 // The dummy: a ControlSource that wants absolutely nothing. AIControl clamps
@@ -241,7 +242,9 @@ export class TrainingScreen {
     this.pickRows.forEach((node, i) => {
       node.classList.toggle('sel', this.row === i)
       const id = RosterOrder[this.sel[i]]
-      drawPortrait(node.querySelector('canvas'), id)
+      heroPortrait(this.game, node.querySelector('canvas'), id, {
+        framing: 'bust', pose: 'idle', look: 'neutral', px: 224,
+      })
       node.querySelector('.who b').textContent = charName(id)
       node.querySelector('.who i').textContent = charTitle(id)
     })

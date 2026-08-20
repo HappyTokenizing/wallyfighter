@@ -9,7 +9,8 @@ import { MatchScreen } from '../combat/MatchScreen.js'
 import { RosterOrder } from '../characters/index.js'
 import { Arenas } from '../arenas/index.js'
 import { GameConfig } from '../config/GameConfig.js'
-import { el, ensureMusic, resetMusicTracker, drawPortrait, charName, charTitle, touchUI, hintHTML, addBackButton } from '../ui/uiKit.js'
+import { el, ensureMusic, resetMusicTracker, charName, charTitle, touchUI, hintHTML, addBackButton } from '../ui/uiKit.js'
+import { heroPortrait } from '../ui/screens/PortraitStudio.js'
 import { getBackdrop } from '../ui/MenuBackdrop.js'
 
 class InertControl {
@@ -243,7 +244,9 @@ export class PlaygroundScreen {
       node.classList.toggle('sel', this.row === i)
       const idx = i === 0 ? this.sel : this.sel2
       const id = idx >= 0 ? RosterOrder[idx] : null
-      drawPortrait(node.querySelector('canvas'), id, { locked: !id })
+      heroPortrait(this.game, node.querySelector('canvas'), id, {
+        framing: 'bust', pose: 'idle', look: 'neutral', locked: !id, px: 224,
+      })
       node.querySelector('.who b').textContent = id ? charName(id) : 'NONE'
       node.querySelector('.who i').textContent = id ? charTitle(id) : 'SOLO ABUSE SESSION'
     })
