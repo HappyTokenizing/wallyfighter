@@ -1,5 +1,56 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 45 — smoothness over speed-to-bell: the gate now drains fully
+
+Product call from the user: prioritise smoothness and performance above all,
+even if it means longer waiting. Round 44's 8 s texture time-box was me hedging
+against a long wait; that hedge is now explicitly unwanted.
+
+### The measurement that made this safe
+
+The queue DOES converge — but only if something pumps it. Left to its own
+background heartbeat it was still draining **154.5 s** into the session, i.e.
+through the entire first round and into the second. That is the mid-fight
+texture work that costs frames, and it is exactly what the user is asking to be
+rid of.
+
+Full drain with the gate pumping hard, FIGHT press to bell:
+
+    desktop        7.8-8.1 s     surfacesDone TRUE at the bell
+    4x throttle   41.7 s
+    6x throttle   71.8 s
+
+So `WARM_TEX_MS` 8 s -> 45 s. Desktop never reaches the cap (it finishes in ~8);
+the cap only stops a genuinely slow device sitting for over a minute, and
+anything unfinished resumes on the background heartbeat as before.
+
+Load-immune result: surfaces now report DONE at **t=5.7 s, during the intro**,
+against 154.5 s (mid-second-round) before. The texture generator does no work
+during the fight.
+
+### A long wait must not read as a hang
+
+Past 10 s the sub-label carries elapsed seconds:
+`WARMING SURFACES — 26s (first match takes longest)`. Verified rendering under
+throttle rather than assumed — the first screenshot caught an early frame with
+the plain label and I nearly shipped the claim untested.
+
+### What I still cannot prove, third round running
+
+A frame-time delta. Frames >33 ms in the first 6 s of fight, 3 runs per arm:
+
+    gate OFF          5, 2, 110
+    gate ON, boxed   26, 39,  21
+    gate ON, full    21,  1,  19
+
+The 110 in the OFF arm is the whole story: this machine's noise floor is larger
+than the effect. I am NOT claiming a frame-time win from these. The defensible
+claim is mechanical and load-immune — zero texture work during the fight, zero
+to two programs compiling after the bell — plus the reasoning that removing
+in-fight work cannot make frames worse. A clean-machine A/B with many more
+samples remains owed, now for the third round in a row.
+
+
 ## ROUND 44 — the ready gate: hold the bell until the match is actually warm
 
 The round intro was a FIXED ~2 s banner regardless of outstanding work, and

@@ -200,13 +200,24 @@ const WARM_BUDGET_MS = 14
 // A gate that never opens is worse than a hitch. If the work is somehow still
 // outstanding after this, start the fight anyway and let _flushBuild() do what
 // it always did.
-const WARM_MAX_MS = 30000
+const WARM_MAX_MS = 60000
 // Textures are PROGRESSIVE: a surface that has not upgraded yet renders at a
 // lower tier, it does not hitch. The queue also enqueues follow-up work as it
 // drains, so waiting for empty is close to unbounded — at 6x CPU throttle it
 // was still going at 20 s. Give it a generous slice and then let it finish in
 // the background exactly as it always has.
-const WARM_TEX_MS = 8000
+// SMOOTHNESS OVER SPEED-TO-BELL (explicit product call). Measured full-drain
+// wait, FIGHT press to bell, with the gate pumping hard:
+//     desktop        8.1 s   surfacesDone at the bell
+//     4x throttle   41.7 s
+//     6x throttle   71.8 s
+// Left to its own background heartbeat instead, the queue was STILL draining
+// 154 s in — i.e. through the whole first round and into the second, which is
+// precisely the mid-fight texture work that costs frames. So: drain fully.
+// The cap only exists so a genuinely slow device cannot sit here for over a
+// minute; desktop never reaches it, and anything unfinished resumes on the
+// background heartbeat exactly as before.
+const WARM_TEX_MS = 45000
 // Below this the gate closes before anyone could read a bar, so drawing one
 // would just be a flash of chrome between the banner and the bell.
 const WARM_BAR_DELAY_MS = 180
@@ -1828,7 +1839,12 @@ export class MatchScreen {
     const tex = this._warmRemaining().tex
     w.texTotal = Math.max(w.texTotal || 0, tex)
     const texP = 1 - Math.min(1, tex / Math.max(1, w.texTotal))
-    this._paintWarmBar(0.6 + texP * 0.4, 'WARMING SURFACES')
+    // Past ~10 s the player needs to know this is finite and deliberate, not a
+    // hang. Elapsed seconds is the honest signal — the bar's own percentage is
+    // of work DISCOVERED, which can still move sideways.
+    const secs = Math.round(elapsed / 1000)
+    this._paintWarmBar(0.6 + texP * 0.4,
+      secs >= 10 ? `WARMING SURFACES — ${secs}s (first match takes longest)` : 'WARMING SURFACES')
 
     const texElapsed = elapsed - w.texT0
     const capped = elapsed > WARM_MAX_MS
