@@ -23,7 +23,8 @@ import { GoreSystem } from './Gore.js'
 // v2.0 parallel-build module (§21 KO executions) — stub-guarded at every use.
 import { ExecutionPool } from './Executions.js'
 // v3.0 render layer (GRAPHICS_CONTRACT §8): the single render entry point.
-import { renderScene, pumpTextureQueue } from '../render/index.js'
+import { renderScene, pumpTextureQueue, textureQueueStats } from '../render/index.js'
+import { el } from '../ui/uiKit.js'
 // v3.1: the teardown sweep uses ArenaBase's node freer rather than a second,
 // weaker hand-rolled copy. `collectSubtree` snapshots a subtree BEFORE the
 // systems that own it start detaching parts of themselves; `disposeNode` frees
@@ -192,6 +193,23 @@ const INTRO_TEXTURE_BUDGET_MS = 16
 // walks three does per compile call) reasonable.
 // ---------------------------------------------------------------------------
 const BUILD_BUDGET_MS = 6
+// The ready gate (see _armReadyGate). While the bar is up nothing is animating
+// that the player can act on, so the budget is far larger than the intro's —
+// big enough to finish fast, small enough that the bar itself keeps painting.
+const WARM_BUDGET_MS = 14
+// A gate that never opens is worse than a hitch. If the work is somehow still
+// outstanding after this, start the fight anyway and let _flushBuild() do what
+// it always did.
+const WARM_MAX_MS = 30000
+// Textures are PROGRESSIVE: a surface that has not upgraded yet renders at a
+// lower tier, it does not hitch. The queue also enqueues follow-up work as it
+// drains, so waiting for empty is close to unbounded — at 6x CPU throttle it
+// was still going at 20 s. Give it a generous slice and then let it finish in
+// the background exactly as it always has.
+const WARM_TEX_MS = 8000
+// Below this the gate closes before anyone could read a bar, so drawing one
+// would just be a flash of chrome between the banner and the bell.
+const WARM_BAR_DELAY_MS = 180
 const WARM_CHUNK_OBJECTS = 24
 const _now = (typeof performance !== 'undefined' && performance.now)
   ? () => performance.now()
@@ -1039,6 +1057,9 @@ export class MatchScreen {
   }
 
   exit() {
+    // The gate is DOM on game.ui, not on the scene — leaving a match while it
+    // is up (quit, retreat, a story cut) must take the overlay with it.
+    this._killWarmBar()
     this.active = false
     // Abandon whatever is still queued: exit() is about to dispose the scene
     // these steps would build into.
@@ -1339,7 +1360,11 @@ export class MatchScreen {
     // the surface queue does not — a surface that generates late is a soft
     // picture, a ragdoll that builds late is a crash risk. So the build goes
     // first, and while it is still running the surfaces take the smaller slice.
-    if (this.phase === 'intro') {
+    if (this._warming) {
+      // The gate owns the pumping while it is up — a bigger budget, and the
+      // bell waits on it rather than on a timer.
+      this._pumpReadyGate()
+    } else if (this.phase === 'intro') {
       const built = this._pumpBuild(BUILD_BUDGET_MS)
       if (!this._surfacesDone) this._pumpSurfaces(built ? INTRO_TEXTURE_BUDGET_MS : BUILD_BUDGET_MS)
     } else if (this._buildSteps && this._buildSteps.length) {
@@ -1673,7 +1698,161 @@ export class MatchScreen {
     // costs a cache hit to revisit. Round 2+ reuses the same graph, so once is
     // enough there.
     if (n === 1) this.at(t0 + 30, () => this._warmArena('round-intro'))
-    this.at(t0 + 115, () => this._beginFight())
+    this.at(t0 + 115, () => this._armReadyGate())
+  }
+
+  /**
+   * THE READY GATE — hold the bell until the match is genuinely warm.
+   *
+   * The round intro is a FIXED ~2 s of banner regardless of how much work is
+   * outstanding, and _beginFight() then called _flushBuild(), documented as
+   * "one long frame under the FIGHT! caption". On a cold first round that long
+   * frame is the freeze players feel right after pressing FIGHT, and the first
+   * seconds of the fight also carry the shader compiles the budgeted pump never
+   * reached.
+   *
+   * So: if anything is still queued when the banner ends, put a progress bar up
+   * and keep working until it is actually done. A visible bar that takes a
+   * moment is strictly better than a hitch in a fight — and unlike the banner,
+   * the gate can take as long as it needs.
+   *
+   * On a machine that kept up this is a no-op: nothing is queued, no bar is
+   * created, and the bell rings on exactly the frame it always did. Rounds 2+
+   * reuse the same graph, so they never gate either.
+   */
+  _armReadyGate() {
+    // ALWAYS enter the gate, even with nothing queued: the shader compile is
+    // worth doing unconditionally (an unthrottled run still compiled 2 programs
+    // during the fight without it). The BAR, though, is created lazily — only
+    // if the gate is still open after WARM_BAR_DELAY_MS. On a machine that kept
+    // up the compile resolves inside a frame or two, no DOM is ever built, and
+    // the bell rings when it always did.
+    const work = this._warmRemaining()
+    this._warming = {
+      t0: _now(),
+      total: work.total,
+      shown: 0,          // monotonic: a bar that goes backwards reads as broken
+      compileStarted: false,
+      compileDone: false,
+      texT0: null,
+      texTotal: 0,
+    }
+
+  }
+
+  /** Outstanding warm work, in comparable "steps". */
+  _warmRemaining() {
+    const build = (this._buildSteps && this._buildSteps.length) || 0
+    let tex = 0
+    try { const t = textureQueueStats(); tex = (t?.steps || 0) + (t?.pending || 0) } catch { tex = 0 }
+    return { build, tex, total: build + tex }
+  }
+
+  _buildWarmBar() {
+    if (this._warmRoot) return
+    const root = el('div', 'wcs-warm')
+    root.innerHTML = `
+      <div class="warm-panel">
+        <div class="warm-title">PREPARING THE ARENA</div>
+        <div class="warm-track"><div class="warm-fill"></div></div>
+        <div class="warm-sub">WARMING SHADERS AND SURFACES</div>
+      </div>`
+    this.game.ui.appendChild(root)
+    this._warmRoot = root
+    this._warmFill = root.querySelector('.warm-fill')
+    this._warmSub = root.querySelector('.warm-sub')
+  }
+
+  _paintWarmBar(p01, label) {
+    const w = this._warming
+    if (!w || !this._warmFill) return
+    // Clamp monotonic and leave the last sliver for the compile, so the bar
+    // never sits at 100% while the screen is still busy.
+    w.shown = Math.max(w.shown, Math.min(0.99, p01))
+    this._warmFill.style.width = `${(w.shown * 100).toFixed(1)}%`
+    if (label && this._warmSub) this._warmSub.textContent = label
+  }
+
+  _killWarmBar() {
+    try { this._warmRoot?.remove() } catch { /* already gone */ }
+    this._warmRoot = null
+    this._warmFill = null
+    this._warmSub = null
+    this._warming = null
+  }
+
+  /** Driven every frame from update() while the gate is up. */
+  _pumpReadyGate() {
+    const w = this._warming
+    if (!w) return
+    const elapsed = _now() - w.t0
+    if (!this._warmRoot && !w.closing && elapsed > WARM_BAR_DELAY_MS) this._buildWarmBar()
+
+    // ORDER MATTERS, and the first version had it wrong: it waited for the
+    // texture queue before compiling shaders, which put the one item that
+    // actually hitches a fight behind the one item that merely renders at a
+    // lower tier. Build -> COMPILE -> textures.
+
+    // (1) Build steps. The fight may not legally start without these.
+    const built = this._pumpBuild(WARM_BUDGET_MS)
+    if (!built) {
+      const left = this._warmRemaining()
+      w.total = Math.max(w.total, left.total)
+      this._paintWarmBar(0.35 * (1 - Math.min(1, left.build / Math.max(1, w.total))), 'BUILDING THE ARENA')
+      return
+    }
+
+    // (2) Shader programs. This is the one that decides whether the opening
+    // exchange stutters, so it is a hard requirement of the gate.
+    if (!w.compileStarted) {
+      w.compileStarted = true
+      this._paintWarmBar(0.4, 'COMPILING SHADERS')
+      let p = null
+      try {
+        p = this.game.pipeline?.warm?.(this.scene, this.camera, { async: true })?.promise || null
+      } catch (e) { console.warn('[combat] ready-gate warm threw', e); p = null }
+      if (p && typeof p.then === 'function') p.then(() => { w.compileDone = true }, () => { w.compileDone = true })
+      else w.compileDone = true
+      return
+    }
+    if (!w.compileDone) {
+      // Creep so a slow compile never reads as a stalled bar.
+      this._paintWarmBar(0.4 + Math.min(0.18, (elapsed - w.texT0) / 9000), 'COMPILING SHADERS')
+      return
+    }
+    if (w.texT0 == null) { w.texT0 = elapsed; w.texTotal = this._warmRemaining().tex }
+
+    // (3) Textures, time-boxed. Anything unfinished keeps draining in the
+    // background on the same budgeted heartbeat it always used.
+    this._pumpSurfaces(WARM_BUDGET_MS)
+    const tex = this._warmRemaining().tex
+    w.texTotal = Math.max(w.texTotal || 0, tex)
+    const texP = 1 - Math.min(1, tex / Math.max(1, w.texTotal))
+    this._paintWarmBar(0.6 + texP * 0.4, 'WARMING SURFACES')
+
+    const texElapsed = elapsed - w.texT0
+    const capped = elapsed > WARM_MAX_MS
+    if (capped) console.warn(`[combat] ready gate hit its ${WARM_MAX_MS} ms cap — starting anyway`)
+    if (this._surfacesDone || tex <= 0 || texElapsed > WARM_TEX_MS || capped) this._finishReadyGate()
+  }
+
+  /** Land the bar on 100% before the bell. The gate usually exits on the
+   *  texture time-box with work still queued, so without this the bar vanishes
+   *  mid-track and reads as "gave up" rather than "ready". One short beat. */
+  _finishReadyGate() {
+    const w = this._warming
+    if (!w || w.closing) return
+    w.closing = true
+    if (this._warmFill) {
+      this._warmFill.style.width = '100%'
+      if (this._warmSub) this._warmSub.textContent = 'READY'
+    }
+    // Real time, not sim frames: the gate must close even if the sim is stalled.
+    setTimeout(() => {
+      if (!this.active) { this._killWarmBar(); return }
+      this._killWarmBar()
+      this._beginFight()
+    }, 260)
   }
 
   _beginFight() {

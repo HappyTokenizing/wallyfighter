@@ -68,6 +68,61 @@
   overflow: hidden;
   animation: wcs-screen-in 0.2s ease-out;
 }
+/* --- ready gate (MatchScreen._armReadyGate) -------------------------------
+   Shown between the round banner and the bell when warm work is still queued.
+   It sits over the arena rather than replacing it, so the player can see what
+   they are about to fight in while it finishes. z-index clears the HUD and the
+   touch cluster; nothing under it is meant to be tapped while it is up. */
+.wcs-warm {
+  position: absolute;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 3, 12, 0.62);
+  pointer-events: auto;
+  animation: wcs-warm-in 0.18s ease-out;
+}
+@keyframes wcs-warm-in { from { opacity: 0; } to { opacity: 1; } }
+.wcs-warm .warm-panel {
+  min-width: min(64vw, 460px);
+  padding: clamp(14px, 2.4vh, 24px) clamp(18px, 3vw, 34px);
+  text-align: center;
+  background: linear-gradient(180deg, var(--wcs-panel-hi), var(--wcs-panel-lo));
+  border: 4px solid #000;
+  border-radius: 10px;
+  box-shadow: 0 10px 0 rgba(0, 0, 0, 0.55), 0 0 40px rgba(59, 157, 255, 0.28);
+}
+.wcs-warm .warm-title {
+  font-size: clamp(15px, 3.2vh, 26px);
+  letter-spacing: 3px;
+  color: var(--wcs-gold, #ffd94a);
+  text-shadow: 2px 2px 0 #000;
+}
+.wcs-warm .warm-track {
+  margin: clamp(9px, 1.6vh, 15px) 0 clamp(6px, 1.1vh, 10px);
+  height: 16px;
+  border: 3px solid #000;
+  border-radius: 8px;
+  background: rgba(8, 6, 20, 0.85);
+  overflow: hidden;
+}
+.wcs-warm .warm-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #2bff6a, #3b9dff);
+  /* eased, not linear: the bar advances in lumpy real steps and a little
+     smoothing stops each one reading as a stutter */
+  transition: width 0.22s ease-out;
+}
+.wcs-warm .warm-sub {
+  font-family: var(--wcs-mono);
+  font-size: clamp(9px, 1.6vh, 12px);
+  letter-spacing: 2px;
+  color: #9aa5c9;
+}
+
 /* Screen-transition input grace (ScreenManager.goto). For ~8 frames after a
    screen change nothing is tappable, so the gesture that caused the transition
    cannot also activate whatever landed under the finger. */

@@ -1,5 +1,64 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 44 — the ready gate: hold the bell until the match is actually warm
+
+The round intro was a FIXED ~2 s banner regardless of outstanding work, and
+`_beginFight()` then called `_flushBuild()`, which the file itself describes as
+"one long frame under the FIGHT! caption". That long frame is the freeze players
+feel right after pressing FIGHT.
+
+`_armReadyGate()` now owns the tail of the intro: it keeps pumping until the
+match is genuinely warm, shows a progress bar while it does, and only then rings
+the bell.
+
+### Order matters, and the first version had it backwards
+
+v1 waited for the texture queue BEFORE compiling shaders — putting the one item
+that actually hitches a fight behind the one item that merely renders at a lower
+tier. It hit the 20 s cap at 49% under throttle and never reached the compile.
+
+Correct order, now shipped: **build -> compile -> textures**.
+- build steps: hard requirement, the fight cannot legally start without them
+- shader programs: hard requirement, this is what stutters an opening exchange
+- textures: PROGRESSIVE (an un-upgraded surface renders lower-tier, it does not
+  hitch) and close to unbounded, because draining enqueues follow-up work. Time
+  boxed at 8 s, then left to the background heartbeat it always used.
+
+Gate duration under 6x CPU throttle went 20 s (capped, unfinished) -> 8.9 s
+(completed on the texture time-box).
+
+### Two UI details that were worth the effort
+
+- The progress DENOMINATOR is the peak total ever seen, not the total at arm
+  time. Surface jobs enqueue follow-up work, so `remaining` routinely climbs
+  above the opening figure; with a fixed denominator the bar sat near 0% and
+  then snapped to done. Peak-tracking keeps it monotonic and truthful: "of all
+  work discovered so far, this much is finished".
+- The bar is created LAZILY, only if the gate is still open after 180 ms, and it
+  lands on 100% READY for 260 ms before the bell. Without the lazy create, fast
+  machines got a pointless flash of chrome; without the landing beat, the bar
+  vanished mid-track (72%) and read as "gave up" rather than "ready".
+
+The compile itself is unconditional — an unthrottled run still compiled 2
+programs during the fight when the gate skipped on "nothing queued".
+
+### Measured
+
+- 6x throttle: bar appears, holds 8.9 s, BUILDING -> COMPILING -> WARMING
+  SURFACES -> READY, bell after.
+- Unthrottled: NO bar, gate closes in 0.2-0.3 s, bell on the frame it always
+  rang. The feature costs a fast machine nothing.
+
+### What I could NOT prove, stated plainly
+
+A frame-time win on this machine. Interleaved A/B, 3 runs each, frames >33 ms in
+the first 6 s of fight: gate OFF gave 5, 2, 110; gate ON gave 26, 39, 21. The
+noise floor here (a 110 in the OFF arm) swamps the effect. Gate ON is more
+CONSISTENT, but "more consistent across 3 samples" is not a performance claim.
+The defensible results are the mechanical ones above. A clean-machine A/B with
+more samples is owed — and is the same debt round 43 recorded.
+
+
 ## ROUND 43 — the worst lap in the game was mine, and round 38 blamed the wrong system
 
 ### The mis-attribution
