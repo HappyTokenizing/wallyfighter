@@ -2687,6 +2687,63 @@ export class RenderPipeline {
   }
 
   /**
+   * INCREMENTAL warm (round 49). warm({async:true}) was not what it looked
+   * like: compileAsync() runs the whole synchronous compile() first and only
+   * the LINK WAIT is off-thread, so the ready gate still ate 1-2 frames of
+   * ~1 s building 36-46 programs' shader strings in one go — a frozen loading
+   * bar. three's compile() officially takes (object, camera, targetScene):
+   * pass ONE MESH as the object and the full scene as targetScene and it
+   * compiles just that mesh's programs against the scene's real lights, no
+   * reparenting. So: walk the mesh list a time-budgeted slice per frame.
+   * Already-compiled programs are cache hits and cost microseconds, so
+   * re-entry over the same list converges fast.
+   *
+   * Returns true when the pass is complete. Call again next frame otherwise.
+   */
+  warmIncremental(scene, camera, opts = {}) {
+    const r = this.renderer
+    if (!scene || !camera || !r || typeof r.compile !== 'function') return true
+    const budget = Math.max(2, opts.budgetMs ?? 12)
+    if (!this._warmInc || this._warmInc.scene !== scene) {
+      const meshes = []
+      scene.traverseVisible((o) => { if (o.isMesh || o.isPoints || o.isLine) meshes.push(o) })
+      this._warmInc = { scene, meshes, i: 0 }
+    }
+    const st = this._warmInc
+    const composed = !!(this.enabled && this._composer)
+    const rt = composed ? (this._composer.renderTarget1 || null) : null
+    const prevRT = r.getRenderTarget ? r.getRenderTarget() : null
+    const prevTone = r.toneMapping
+    const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+    try {
+      // Same variant discipline as warm(): compile against the render target
+      // and tone mapping the fight will actually use, or the programs built
+      // here are the WRONG variants and the real first frame recompiles.
+      r.toneMapping = composed ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping
+      if (r.setRenderTarget) r.setRenderTarget(rt)
+      while (st.i < st.meshes.length) {
+        const now2 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+        if (st.i > 0 && now2 - t0 > budget) break
+        try { r.compile(st.meshes[st.i], camera, scene) } catch { /* one bad mesh must not stall the gate */ }
+        st.i++
+      }
+    } finally {
+      try { if (r.setRenderTarget) r.setRenderTarget(prevRT) } catch (e) { void e }
+      r.toneMapping = prevTone
+      this._lastToneMapping = prevTone
+    }
+    if (st.i >= st.meshes.length) { this._warmInc = null; return true }
+    return false
+  }
+
+  /** Progress of the current incremental warm, 0..1, for the gate's bar. */
+  warmIncrementalProgress() {
+    const st = this._warmInc
+    if (!st || !st.meshes.length) return 1
+    return st.i / st.meshes.length
+  }
+
+  /**
    * Warm whatever screen is currently being drawn. Used after a rebuild — see
    * setQuality() — where every material's program key just changed underneath
    * a scene the pipeline already has a handle on.

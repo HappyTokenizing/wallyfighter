@@ -229,6 +229,28 @@ export function cachedGeometry(key, factory, opts) {
         })
       } catch { /* frozen geometry: the __shared tag still covers us */ }
     }
+    // THE CLONE TRAP, CLOSED AT THE SOURCE (round 49). BufferGeometry.copy()
+    // ends `this.userData = source.userData` — a clone of a cached geometry
+    // inherits userData BY REFERENCE, reads as __shared, and disposeNode then
+    // skips it forever: a permanent GPU buffer per clone. Round 47 patched the
+    // four call sites a grep could find; the ingot (`g.clone()`) slipped
+    // straight through the pattern. So the cache now installs an own-property
+    // clone() on every shared geometry that hands back a genuinely UNSHARED
+    // copy (fresh userData, no tag) — every present and future call site is
+    // covered, and cloneUnshared() at the sites becomes belt-and-braces.
+    if (typeof geo.clone === 'function' && !Object.prototype.hasOwnProperty.call(geo, 'clone')) {
+      try {
+        Object.defineProperty(geo, 'clone', {
+          value: function () {
+            const out = Object.getPrototypeOf(this).clone.call(this)
+            out.userData = { ...(this.userData || {}) }
+            delete out.userData.__shared
+            return out
+          },
+          writable: true, configurable: true, enumerable: false,
+        })
+      } catch { /* frozen geometry: cloneUnshared at the call sites covers it */ }
+    }
     _cache.set(key, geo)
   }
   return geo

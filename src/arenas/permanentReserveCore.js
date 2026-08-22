@@ -1245,8 +1245,11 @@ function makeHoleTexture() {
 // edge — a razor-cut box edge catches nothing, which is contract §0.4.
 function ingotGeometry() {
   const g = frustum(0.30, 0.42, 0.26, 4, 0.022, { rimSeg: 1, phase: Math.PI / 4 })
-  // frustum() is cached and shared, so transform a private copy.
-  const out = g.clone()
+  // frustum() is cached and shared, so transform a private copy. cloneUnshared,
+  // not clone: a bare clone() inherits the cache's userData.__shared BY
+  // REFERENCE, so this "private copy" read as shared and disposeNode skipped it
+  // — the +1 leaked GPU geometry per match that survived round 47.
+  const out = cloneUnshared(g)
   out.rotateX(Math.PI)              // wide face down (frustum tapers up)
   out.scale(1.65, 1, 0.95)
   out.computeVertexNormals()

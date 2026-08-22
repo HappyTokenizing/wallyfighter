@@ -670,6 +670,13 @@ export class MatchScreen {
     this._preserveForReplay = false
 
     // --- flow state ---
+    // Round 49: the FIRST render of the match scene compiles ~100 programs in
+    // one r-dominated multi-second frame — before the ready gate has run at
+    // all, because the scene starts rendering on intro frame 1. So the scene
+    // is not rendered until the incremental warm has compiled it: the intro
+    // banner plays over black for the first beat, which is a loading screen by
+    // another name, and the first real frame arrives already compiled.
+    this._sceneWarm = false
     this.phase = 'intro'
     this.round = 0
     this.wins = [0, 0]
@@ -1199,6 +1206,11 @@ export class MatchScreen {
   // routes it through game.pipeline (falling back to a direct render if the
   // post stack ever fails).
   render(renderer, dt = 1 / 60) {
+    // No first paint before the incremental warm has compiled the scene — the
+    // first render otherwise builds ~100 programs in one multi-second frame.
+    // The intro banner (DOM) plays over black meanwhile. _sceneWarm is forced
+    // true on any error path in update(), so this cannot wedge the screen.
+    if (!this._sceneWarm) return
     if (this.scene && this.camera) renderScene(this.game || renderer, this.scene, this.camera, dt)
   }
 
@@ -1399,6 +1411,16 @@ export class MatchScreen {
       // bell waits on it rather than on a timer.
       this._pumpReadyGate()
     } else if (this.phase === 'intro') {
+      // Compile BEFORE first paint (see _sceneWarm in enter). Runs ahead of the
+      // build/surface pumps because nothing paints until it finishes.
+      if (!this._sceneWarm) {
+        try {
+          const pl = this.game.pipeline
+          this._sceneWarm = pl?.warmIncremental
+            ? pl.warmIncremental(this.scene, this.camera, { budgetMs: 12 })
+            : true
+        } catch { this._sceneWarm = true }
+      }
       const built = this._pumpBuild(BUILD_BUDGET_MS)
       if (!this._surfacesDone) this._pumpSurfaces(built ? INTRO_TEXTURE_BUDGET_MS : BUILD_BUDGET_MS)
     } else if (this._buildSteps && this._buildSteps.length) {
@@ -1854,20 +1876,24 @@ export class MatchScreen {
 
     // (2) Shader programs. This is the one that decides whether the opening
     // exchange stutters, so it is a hard requirement of the gate.
-    if (!w.compileStarted) {
-      w.compileStarted = true
-      this._paintWarmBar(0.4, 'COMPILING SHADERS')
-      let p = null
-      try {
-        p = this.game.pipeline?.warm?.(this.scene, this.camera, { async: true })?.promise || null
-      } catch (e) { console.warn('[combat] ready-gate warm threw', e); p = null }
-      if (p && typeof p.then === 'function') p.then(() => { w.compileDone = true }, () => { w.compileDone = true })
-      else w.compileDone = true
-      return
-    }
     if (!w.compileDone) {
-      // Creep so a slow compile never reads as a stalled bar.
-      this._paintWarmBar(0.4 + Math.min(0.18, (elapsed - w.texT0) / 9000), 'COMPILING SHADERS')
+      // INCREMENTAL, round 49. warm({async:true}) ran the whole synchronous
+      // compile() up front (only the link wait is async), which froze the bar
+      // for 1-2 frames of ~1 s. warmIncremental() compiles a 12 ms slice of
+      // meshes per frame against the scene's real lights and render target, so
+      // the bar animates THROUGH the compile instead of freezing on it.
+      let done = true
+      try {
+        const pl = this.game.pipeline
+        if (pl?.warmIncremental) {
+          done = pl.warmIncremental(this.scene, this.camera, { budgetMs: 12 })
+          this._paintWarmBar(0.4 + 0.2 * (pl.warmIncrementalProgress?.() ?? 1), 'COMPILING SHADERS')
+        } else if (pl?.warm) {
+          pl.warm(this.scene, this.camera, {})
+        }
+      } catch (e) { console.warn('[combat] ready-gate warm threw', e) }
+      if (!done) return
+      w.compileDone = true
       return
     }
     if (w.texT0 == null) { w.texT0 = elapsed; w.texTotal = this._warmRemaining().tex }

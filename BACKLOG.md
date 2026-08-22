@@ -1,5 +1,59 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 49 — allocation is solved, the clone trap closes at the source, and
+## the first paint waits for its shaders
+
+### Heap check: the GC story is done
+
+35 s live-fight heap sample: **3.2 MB total** (round 35: 13.8 MB), largest single
+allocator 0.35 MB. No dominant allocator remains — the residual >33 ms one-offs
+on this machine sit at its noise floor, not in our code.
+
+### ingotGeometry, and the systemic close
+
+The +1 geometry/match residual was ingotGeometry's `g.clone()` of the cached
+frustum — the comment said "transform a private copy", and the author believed
+it. Same trap as round 47; it slipped that round's grep because the pattern was
+`g.clone()`, not `geometry.clone()`.
+
+So the trap is now closed AT THE CACHE: cachedGeometry() installs an own-property
+clone() on every shared geometry that returns a genuinely unshared copy (fresh
+userData, no __shared tag). Every present and future call site is covered;
+cloneUnshared() at the sites becomes belt-and-braces. Geometries across four
+matches: **170, 170, 170, 171 — flat.**
+
+### The compile burst was never where the gate looked
+
+warm({async:true}) is misleading: compileAsync() runs the WHOLE synchronous
+compile() first — only the link wait is off-thread. And the burst was not even
+in the gate's window: the scene's FIRST RENDER at intro frame 1 compiles ~100
+programs in one r-dominated multi-second frame, before the gate ever arms.
+
+Two changes:
+- Pipeline.warmIncremental(): three's compile() officially accepts
+  (object, camera, targetScene) — compile ONE MESH against the full scene's
+  lights. A 12 ms slice of meshes per frame, correct RT + tone-mapping variants,
+  cache hits on re-entry. The gate uses it instead of the async one-shot.
+- MatchScreen holds the FIRST PAINT until the incremental warm completes
+  (render() returns early; the intro banner plays over black for the first
+  beat — a loading screen by another name). _sceneWarm is forced true on every
+  error path so the hold cannot wedge the screen.
+
+### Clean-machine result (after killing the orphan rig browsers — see ops note)
+
+    median gap      9.8 / 8.9 ms      (two consecutive full matches)
+    frames >33      67 / 85           (was 508 / 1295 at round 46's report)
+    frames >100     3 / 4             (was 7 / 26)
+    max frame       455 / 217 ms      (was 1425 / 1116+)
+
+### Ops note, learned the hard way
+
+CDP rig browsers were orphaning GPU/renderer helpers at 60-130% CPU each — at
+one point ~29 of them — and they were the "machine noise" contaminating every
+absolute measurement for days. pkill by the spawn pattern misses them once the
+master dies; sweep `user-data-dir=/var/folders` repeatedly until the count is
+actually zero before trusting any number.
+
 ## ROUND 48 — the last mid-fight stalls, and the KO becomes a show
 
 Directive: smoothness above all, spend loading time freely; KOs longer and
