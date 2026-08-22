@@ -44,27 +44,42 @@ only if a hazard fires AFTER the match ended. On a clean exit nothing fires.
 The heap falling is the corroboration — those dead closures were pinning their
 match and arena against collection.
 
-### STILL OPEN: ~26 geometries per match
+### STILL OPEN: ~26 geometries per match — THREE HYPOTHESES RULED OUT
 
-Diagnosed precisely, not fixed. A WeakRef tracker (a plain Map first prevented
-the very GC it was measuring — observer effect worth remembering) plus forced
-collection shows ~27 per match created by `BufferGeometry.copy`, i.e.
-`geometry.clone()`, alive and never disposed.
+Diagnosed, not fixed. A WeakRef tracker plus forced GC shows ~27/match created by
+`BufferGeometry.copy` (i.e. `geometry.clone()`) that are never disposed. This is
+a real GPU leak, not a counter artefact: three.js frees the GL buffer only inside
+`dispose()`, so a geometry merely garbage collected keeps its VRAM for the life
+of the context.
 
-The mechanism matters: three.js only decrements
-`renderer.info.memory.geometries` — and only deletes the GL buffer — inside
-`dispose()`. A geometry collected WITHOUT dispose() leaves its VRAM allocated
-forever; JS-side GC cannot reclaim it. So this is a real GPU leak, not a
-counter artefact.
+Ruled out BY MEASUREMENT, each reverted rather than shipped:
 
-I tried the obvious site — `permanentReserveCore`'s contact-AO bake does
-`o.geometry = o.geometry.clone()` and orphans the previous geometry — and
-disposing the unshared originals moved the number NOT AT ALL, so those originals
-are shared-cache geometries and my guard correctly skipped them. That change was
-REVERTED rather than shipped: an edit that cannot be shown to do anything is not
-a fix. The real site is still unidentified; the tracker in
-/private/tmp/geoweak.mjs is the tool to finish it.
+  1. `permanentReserveCore`'s contact-AO bake orphaning the previous geometry via
+     `o.geometry = o.geometry.clone()`. Disposing the unshared originals moved
+     the number NOT AT ALL — they are shared-cache geometries, so the guard
+     correctly skipped every one.
+  2. Merge sources. `mergeParts`' inPlace branch removes meshes from the scene
+     but gated disposal behind `opts.dispose`, WHICH NO CALLER EVER PASSES.
+     Defaulting it on (guarded by isSharedGeometry plus a per-root refcount)
+     also moved nothing — and the reason is instructive: merging runs at BUILD
+     time, before the arena is ever rendered, so those geometries were never
+     uploaded and cannot appear in a counter that only tracks uploaded ones.
+  3. Replay preservation. A match ending with a replay available defers its
+     visual teardown onto `game.__lastReplay`. Forcing that dispose immediately
+     after each match freed ZERO geometries, and `__lastReplay` was not even
+     held at the sample point.
 
+THE CONSTRAINT THAT NARROWS IT: `renderer.info.memory.geometries` counts a
+geometry only once it has been RENDERED. So the leak is something created,
+uploaded (drawn at least one frame) and then dropped without dispose() DURING a
+match — not anything built and discarded at construction. That excludes the
+entire build/merge path and points at per-match runtime clones: gore parts,
+item/prop spawns, decals, ragdoll shapes.
+
+Tools are ready: /private/tmp/geoweak.mjs (WeakRef + forced GC, reports creation
+sites) and /private/tmp/leakid.mjs (per-event + per-pool growth). Note the
+observer effect that cost a pass — a strong Map in the tracker prevents the very
+GC it measures and reported 539/match against a true 27.
 
 ## ROUND 45 — smoothness over speed-to-bell: the gate now drains fully
 
