@@ -1127,7 +1127,22 @@ export class MatchScreen {
       const owned = []
       if (scene) { try { collectSubtree(scene, owned) } catch { /* best effort */ } }
 
-      for (const f of fighters || []) { try { f.dispose(scene) } catch { /* gone */ } }
+      for (const f of fighters || []) {
+        // THE CONTROLLER, BEFORE THE FIGHTER. AIControl.dispose() unbinds the
+        // Brain's nine arena-hazard subscriptions, and NOTHING called it — so
+        // every AI fighter left 9 live listeners on the global bus per match.
+        // Measured 83 -> 173 listeners over six matches (+18/match, i.e. two
+        // brains x nine events), which is the "degrades by the 4th or 5th
+        // opponent" report: every hazard event walks an ever-growing subscriber
+        // list, and each dead closure pins its match and arena against GC.
+        //
+        // Brain DOES unbind itself lazily from _onHazard when it notices the
+        // match went inactive, but that only fires if a hazard happens to be
+        // emitted after the match ended. On a clean exit nothing fires, so
+        // nothing unbinds. Keep that as the backstop; this is the guarantee.
+        try { f.ctrl?.dispose?.() } catch (e) { console.warn('[combat] control dispose threw', e) }
+        try { f.dispose(scene) } catch { /* gone */ }
+      }
       try { props?.dispose() } catch { /* gone */ }
       try { particles?.dispose() } catch { /* gone */ }
       try { arena?.dispose?.() } catch (e) { console.warn('[combat] arena dispose threw', e) }
@@ -1797,7 +1812,12 @@ export class MatchScreen {
     const w = this._warming
     if (!w) return
     const elapsed = _now() - w.t0
-    if (!this._warmRoot && !w.closing && elapsed > WARM_BAR_DELAY_MS) this._buildWarmBar()
+    // ALWAYS show it. This used to wait WARM_BAR_DELAY_MS so a fast machine
+    // never saw a flash of chrome — but the report is "no loading screen was
+    // presented", and the stated preference is smoothness and a visible,
+    // predictable wait over a bell that arrives a beat sooner. A gate you can
+    // see is also a gate you can trust.
+    if (!this._warmRoot && !w.closing) this._buildWarmBar()
 
     // ORDER MATTERS, and the first version had it wrong: it waited for the
     // texture queue before compiling shaders, which put the one item that

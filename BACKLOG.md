@@ -1,5 +1,71 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 46 — the session leak: AI brains never unsubscribed
+
+Report: desktop degrades the longer you play, noticeably by the 4th or 5th
+opponent, and no loading screen appeared before matches.
+
+### The loading screen DOES fire — I had tested the wrong path
+
+Every earlier gate test drove `screens.goto('match')` directly, which skips
+select -> FIGHT -> vs. Driving the REAL flow shows the gate arming and the bar
+appearing. What the user actually hit is the lazy 180 ms delay I added so fast
+machines would not see a flash of chrome: on their desktop the gate closed
+inside it, so nothing drew. Given the stated preference — smoothness and a
+visible, predictable wait over a bell a beat sooner — the bar is now ALWAYS
+shown. Test the path the user takes, not the path that is convenient to script.
+
+### The leak, measured before touching anything
+
+Six back-to-back matches, sampling every pool between them:
+
+    listeners   83 -> 173   (+18/match, +108%)   <- LEAK
+    geometries 676 -> 805   (+26/match,  +19%)   <- LEAK
+    textures   316 -> 348   (one step, then flat)
+    objs/meshes            flat — the scene graph is clean
+
+Per-event counts named it outright: nine `arena:*` hazard events, each +2 per
+match. Two AI brains x nine events = the +18.
+
+`Brain` subscribes to all nine HAZARD_EVENTS and keeps the off-handles, and
+`AIControl.dispose()` correctly calls `_unbindHazards()` — but NOTHING EVER
+CALLED `AIControl.dispose()`. It was dead code. `MatchScreen.exit()` disposed
+fighters and never their controllers.
+
+Brain also unbinds itself lazily from `_onHazard` when it notices the match went
+inactive, which is why this survived: it looks handled, and it IS handled — but
+only if a hazard fires AFTER the match ended. On a clean exit nothing fires.
+
+### Result
+
+    listeners   83 -> 83    FLAT across five matches
+    heap       203 -> 165 MB  (-19%: it now trends DOWN across a session)
+
+The heap falling is the corroboration — those dead closures were pinning their
+match and arena against collection.
+
+### STILL OPEN: ~26 geometries per match
+
+Diagnosed precisely, not fixed. A WeakRef tracker (a plain Map first prevented
+the very GC it was measuring — observer effect worth remembering) plus forced
+collection shows ~27 per match created by `BufferGeometry.copy`, i.e.
+`geometry.clone()`, alive and never disposed.
+
+The mechanism matters: three.js only decrements
+`renderer.info.memory.geometries` — and only deletes the GL buffer — inside
+`dispose()`. A geometry collected WITHOUT dispose() leaves its VRAM allocated
+forever; JS-side GC cannot reclaim it. So this is a real GPU leak, not a
+counter artefact.
+
+I tried the obvious site — `permanentReserveCore`'s contact-AO bake does
+`o.geometry = o.geometry.clone()` and orphans the previous geometry — and
+disposing the unshared originals moved the number NOT AT ALL, so those originals
+are shared-cache geometries and my guard correctly skipped them. That change was
+REVERTED rather than shipped: an edit that cannot be shown to do anything is not
+a fix. The real site is still unidentified; the tracker in
+/private/tmp/geoweak.mjs is the tool to finish it.
+
+
 ## ROUND 45 — smoothness over speed-to-bell: the gate now drains fully
 
 Product call from the user: prioritise smoothness and performance above all,
