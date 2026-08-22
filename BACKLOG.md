@@ -1,5 +1,64 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 47 — the geometry leak: clone() inherits the shared tag
+
+Round 46 ruled out three hypotheses and left one constraint:
+`renderer.info.memory.geometries` counts a geometry only once it has been
+RENDERED, so the leak had to be something that reached the live scene during a
+match and was dropped without dispose().
+
+### The experiment that ended it
+
+Flag every geometry seen in the scene while a match runs, tear down, force GC,
+report the flagged ones that were never disposed, grouped by creation site. One
+site, unambiguous:
+
+    26  /src/arenas/permanentReserveCore.js:219   <- the contact-AO bake clone
+     1  ingotGeometry
+
+Which is the site I had already "fixed" in round 46 and reverted — because I had
+been disposing the ORIGINAL. The leak was the CLONE.
+
+### Root cause, three links
+
+1. `BufferGeometry.copy()` ends with `this.userData = source.userData`. The clone
+   does not get a COPY of userData — it gets THE SAME OBJECT.
+2. `geometry.js:222` tags every cached geometry `userData.__shared = true`.
+3. `ArenaBase.disposeNode` skips anything carrying that tag.
+
+So a clone of a cached geometry reads as shared, teardown skips it forever, and
+because it HAD been rendered the renderer counted it — and three.js frees a GL
+buffer only inside dispose(). Its VRAM was held for the life of the context,
+every match, forever.
+
+### The fix, and the trap inside the fix
+
+`cloneUnshared()` in render/geometry.js: clone, then give the copy its OWN
+userData object with the tag removed. It must be a fresh object —
+`delete clone.userData.__shared` would strip the tag off the SHARED CACHE ENTRY
+itself and make the real shared geometry disposable, converting a leak into a
+use-after-free.
+
+Applied at the measured site plus the three character sites carrying the same
+latent trap (dogey, blackish-bull, crypto-punkd).
+
+### Measured, production build, six matches
+
+    in-scene & never disposed   27/match -> 1/match
+    renderer geometries         +26/match -> +1.5/match  (+19% -> +1%)
+    listeners (round 46)        +18/match -> 0
+    objs / meshes / programs    flat
+
+The residual +1/match is `ingotGeometry`, a different and much smaller site.
+
+### Why three earlier attempts missed it
+
+Each was a plausible reading that the measurement refuted, and each was reverted
+rather than shipped. The one that mattered — round 46's attempt at THIS site —
+failed because it disposed the wrong object of the pair. "The right file" is not
+"the right fix", and only the site-attributed measurement could tell them apart.
+
+
 ## ROUND 46 — the session leak: AI brains never unsubscribed
 
 Report: desktop degrades the longer you play, noticeably by the 4th or 5th

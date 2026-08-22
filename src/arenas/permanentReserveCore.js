@@ -120,8 +120,7 @@ import {
   filletRing, superellipsoid, profileLathe, cachedGeometry,
   mergeStatic, mergeParts, dedupeGeometry, adoptionReport, markDynamic,
   stripBuriedFaces, instanceStatic,
-  emissive,
-} from '../render/index.js'
+  emissive, cloneUnshared,} from '../render/index.js'
 
 // ---------------------------------------------------------------------------
 // PROP CONTACT SHADOWS — the two lines per arena that were never written.
@@ -216,7 +215,10 @@ function bakeContactAO(root, opts = {}) {
       col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = k
     }
     if (!touched) return                             // nothing near the ground
-    const geo = o.geometry.clone()
+    // cloneUnshared, not clone: a plain clone inherits the SOURCE's userData
+    // object, so a copy of a cached geometry reads as __shared and disposeNode
+    // skips it forever. Measured at ~26 leaked GPU geometries per match.
+    const geo = cloneUnshared(o.geometry)
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
     o.geometry = geo
     let mat = matCache?.get(o.material.uuid)

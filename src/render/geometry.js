@@ -238,6 +238,37 @@ export function cachedGeometry(key, factory, opts) {
 export function isSharedGeometry(geo) { return !!geo && _shared.has(geo) }
 
 /**
+ * Clone a geometry so the COPY is genuinely yours to dispose.
+ *
+ * THE TRAP, AND IT COST A GPU LEAK OF ~26 GEOMETRIES PER MATCH.
+ * `BufferGeometry.copy()` ends with `this.userData = source.userData` — the
+ * clone does not get a copy of userData, it gets THE SAME OBJECT. Clone a
+ * cached geometry (which carries `userData.__shared = true`, set above) and the
+ * clone reads as shared too, so `ArenaBase.disposeNode` skips it forever:
+ *
+ *     if (obj.geometry && !obj.geometry.userData?.__shared) obj.geometry.dispose()
+ *
+ * The clone had already been rendered, so `renderer.info.memory.geometries`
+ * counted it, and three.js frees a GL buffer only inside dispose(). Result: its
+ * VRAM is held for the life of the context, every match, forever.
+ *
+ * Note WHY this gives the clone a fresh userData object rather than deleting
+ * the flag: userData is the SOURCE's object. `delete clone.userData.__shared`
+ * would strip the tag off the shared cache entry itself and make the real
+ * shared geometry disposable — turning a leak into a use-after-free.
+ *
+ * The clone is not added to `_shared` and never gets the dispose latch, so the
+ * only thing standing between it and a normal teardown was that inherited tag.
+ */
+export function cloneUnshared(geo) {
+  if (!geo) return geo
+  const out = geo.clone()
+  out.userData = { ...(geo.userData || {}) }
+  delete out.userData.__shared
+  return out
+}
+
+/**
  * releaseGeometry(geo) -> true if it was freed.
  *
  * The ONE legal way to dispose a single cached buffer: it drops the cache slot

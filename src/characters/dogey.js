@@ -16,8 +16,7 @@ import {
   roundedBox, capsule, taperedCapsule, roundedCylinder, roundedCone,
   superellipsoid, sleeve, skirt, jointBall, ball, filletRing, plate, lens,
   loft, splineTube, roundedRectPoints, superellipsePoints, circlePoints,
-  smoothNormals, sole,
-} from '../render/index.js'
+  smoothNormals, sole, cloneUnshared,} from '../render/index.js'
 
 // ---------------------------------------------------------------------------
 // §5 COLOUR SCRIPT. Every channel sits inside the contract's 30..240 sRGB band.
@@ -118,7 +117,9 @@ function edgeNoise(x, y, z) {
  * mutating a cached BufferGeometry would repaint every other caller's mesh.
  */
 function paint(geo, fn) {
-  const g = isSharedGeometry(geo) ? geo.clone() : geo
+  // cloneUnshared: a plain clone of a cached geometry inherits userData.__shared
+  // and can then never be disposed (see cloneUnshared in render/geometry.js).
+  const g = isSharedGeometry(geo) ? cloneUnshared(geo) : geo
   const p = g.getAttribute('position')
   const n = g.getAttribute('normal')
   const out = new Float32Array(p.count * 3)

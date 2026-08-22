@@ -28,8 +28,7 @@ import {
   roundedBox, superellipsoid, ball, jointBall, taperedCapsule, roundedCylinder,
   roundedCone, sleeve, skirt, filletRing, loft, plate, lens, splineTube,
   roundedRectPoints, superellipsePoints, mergeStatic, dedupeGeometry, rotated,
-  profileLathe, taperedBox,
-} from '../render/index.js'
+  profileLathe, taperedBox, cloneUnshared,} from '../render/index.js'
 
 const PI = Math.PI
 const TAU = PI * 2
@@ -467,7 +466,7 @@ function triUV(geo, scale = 0.55) {
   const key = `${geo.uuid}|${scale}`
   const hit = _triUV.get(key)
   if (hit) return hit
-  const g = geo.clone()
+  const g = cloneUnshared(geo)   // never a bare clone() — see render/geometry.js
   const p = g.attributes.position, n = g.attributes.normal
   const uv = new Float32Array(p.count * 2)
   for (let i = 0; i < p.count; i++) {

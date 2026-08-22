@@ -65,8 +65,7 @@ import {
   roundedBox, taperedBox, taperedCapsule, sleeve, weld,
   skirt, loft, profileLathe, filletRing, roundedCylinder,
   plate, superellipsoid, superellipsePoints, roundedRectPoints,
-  mergeParts, markDynamic, GEO,
-} from '../render/index.js'
+  mergeParts, markDynamic, GEO, cloneUnshared,} from '../render/index.js'
 
 // The special-move FX props below are transient, unlit `basic()` geometry, but
 // they are still on camera during every super — and a raw `BoxGeometry` reads
@@ -1118,7 +1117,7 @@ function buildModel(costume = 0) {
 
   // Local vertex warp — the cached geometries are SHARED, so clone first.
   const warp = (geo, fn) => {
-    const g = geo.clone()
+    const g = cloneUnshared(geo) // never a bare clone() — see render/geometry.js
     const pos = g.attributes.position
     const v = new THREE.Vector3()
     for (let i = 0; i < pos.count; i++) {
