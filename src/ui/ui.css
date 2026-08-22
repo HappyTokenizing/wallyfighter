@@ -68,6 +68,24 @@
   overflow: hidden;
   animation: wcs-screen-in 0.2s ease-out;
 }
+/* KO impact flash (MatchScreen._koFlash) — one white pop that decays fast.
+   pointer-events: none, so it can never eat a tap; sits under the HUD captions
+   (z 90 < the caption layer) so K.O.! punches through it. */
+.wcs-koflash {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+  background: #fff;
+  opacity: 0;
+  animation: wcs-koflash 0.62s cubic-bezier(0.05, 0.9, 0.2, 1);
+}
+@keyframes wcs-koflash {
+  0% { opacity: 0.95; }
+  30% { opacity: 0.55; }
+  100% { opacity: 0; }
+}
+
 /* --- ready gate (MatchScreen._armReadyGate) -------------------------------
    Shown between the round banner and the bell when warm work is still queued.
    It sits over the arena rather than replacing it, so the player can see what

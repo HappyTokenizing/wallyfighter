@@ -23,7 +23,7 @@ import { GoreSystem } from './Gore.js'
 // v2.0 parallel-build module (§21 KO executions) — stub-guarded at every use.
 import { ExecutionPool } from './Executions.js'
 // v3.0 render layer (GRAPHICS_CONTRACT §8): the single render entry point.
-import { renderScene, pumpTextureQueue, textureQueueStats } from '../render/index.js'
+import { renderScene, pumpTextureQueue, textureQueueStats, setTextureCombatHold } from '../render/index.js'
 import { el } from '../ui/uiKit.js'
 // v3.1: the teardown sweep uses ArenaBase's node freer rather than a second,
 // weaker hand-rolled copy. `collectSubtree` snapshots a subtree BEFORE the
@@ -1071,6 +1071,9 @@ export class MatchScreen {
     // The gate is DOM on game.ui, not on the scene — leaving a match while it
     // is up (quit, retreat, a story cut) must take the overlay with it.
     this._killWarmBar()
+    // A held texture queue outliving its match would freeze generation for the
+    // rest of the session (menus, portraits, the NEXT match's warm). Always.
+    try { setTextureCombatHold(false) } catch { /* render module gone */ }
     this.active = false
     // Abandon whatever is still queued: exit() is about to dispose the scene
     // these steps would build into.
@@ -1386,6 +1389,11 @@ export class MatchScreen {
     // the surface queue does not — a surface that generates late is a soft
     // picture, a ragdoll that builds late is a crash risk. So the build goes
     // first, and while it is still running the surfaces take the smaller slice.
+    // Texture generation is banned while the round is LIVE: its drain steps are
+    // 10-45 ms of main-thread work outside both profiler laps ("unaccounted"),
+    // i.e. the remaining mid-fight stutter. Everything queued mid-fight drains
+    // in the KO / round-end / intro windows instead. Cheap boolean set.
+    setTextureCombatHold(this.phase === 'fight')
     if (this._warming) {
       // The gate owns the pumping while it is up — a bigger budget, and the
       // bell waits on it rather than on a timer.
@@ -1774,6 +1782,17 @@ export class MatchScreen {
     return { build, tex, total: build + tex }
   }
 
+  /** White impact flash on the KO frame. One div, animated by CSS, removes
+   *  itself — nothing allocated per-frame, nothing retained. */
+  _koFlash() {
+    try {
+      const el2 = document.createElement('div')
+      el2.className = 'wcs-koflash'
+      this.game.ui.appendChild(el2)
+      setTimeout(() => { try { el2.remove() } catch { /* gone */ } }, 700)
+    } catch { /* headless */ }
+  }
+
   _buildWarmBar() {
     if (this._warmRoot) return
     const root = el('div', 'wcs-warm')
@@ -1869,7 +1888,16 @@ export class MatchScreen {
     const texElapsed = elapsed - w.texT0
     const capped = elapsed > WARM_MAX_MS
     if (capped) console.warn(`[combat] ready gate hit its ${WARM_MAX_MS} ms cap — starting anyway`)
-    if (this._surfacesDone || tex <= 0 || texElapsed > WARM_TEX_MS || capped) this._finishReadyGate()
+    if (this._surfacesDone || tex <= 0 || texElapsed > WARM_TEX_MS || capped) {
+      // THE HOLE THIS CLOSES (round 48): draining the surface queue REFILLS
+      // _buildSteps — _pumpSurfaces queues the chunked re-warm on the very
+      // frame it sets _surfacesDone. Exiting on _surfacesDone alone left those
+      // chunks to run POST-BELL at one non-preemptible ~140 ms step per frame:
+      // measured as ~60 frames of 6-9 fps right after FIGHT!, i.e. the exact
+      // freeze this gate exists to prevent. Finish them under the bar.
+      if (!this._pumpBuild(WARM_BUDGET_MS)) { this._paintWarmBar(0.99, 'FINALISING'); return }
+      this._finishReadyGate()
+    }
   }
 
   /** Land the bar on 100% before the bell. The gate usually exits on the
@@ -1933,7 +1961,23 @@ export class MatchScreen {
     this.cap('K.O.!')
     this.say(BAGS.ko.next())
     this.game.audio.sfx('bell')
-    this.setSlowmo(0.3, 0.55)
+
+    // ---- THE KO BEAT (round 48) ------------------------------------------
+    // Freeze-frame -> slow-motion flight -> execution. Three jobs at once:
+    //   * spectacle: the genre-standard impact freeze with a white flash, then
+    //     a much deeper, longer slow-mo so the ragdoll flight and the KO
+    //     cinematic camera actually get screen time;
+    //   * honesty about cost: ragdolls.full() inserts ~15 bodies + constraints
+    //     into the physics world ON this frame (measured 66-90 ms), and the KO
+    //     window carried 150-250 ms GC frames. All of it now lands inside 26
+    //     deliberately FROZEN frames — the expensive work happens behind a
+    //     designed dramatic pause instead of stuttering the flight;
+    //   * pacing: timers tick in SIM frames (frozen under hit-stop, stretched
+    //     under slow-mo), so every downstream cue shifts later automatically.
+    this.hitStopFrames = Math.max(this.hitStopFrames, 26)  // ~0.43 s impact freeze
+    this._koFlash()
+    try { this.cam.kick(loser.pos.x >= winner.pos.x ? 1 : -1, 1.0) } catch { /* stub */ }
+    this.setSlowmo(0.22, 1.6) // real seconds; was 0.3 for 0.55 — the flight is the show
     if (loser.state !== 'ragdoll') {
       // §17: launch along the real winner->loser direction on the plane
       let dx = loser.pos.x - winner.pos.x
@@ -1941,17 +1985,33 @@ export class MatchScreen {
       const dd = Math.hypot(dx, dz)
       if (dd > 1e-4) { dx /= dd; dz /= dd } else { dx = winner.dirX(); dz = winner.dirZ() }
       // NOTE: ragdolls.full scales impulse/spin by the physics preset internally
-      this.forceRagdoll(loser, [dx * 11, 8.5, dz * 11 + (Math.random() - 0.5) * 2], 2.5)
+      // Slightly harder launch than before — at 0.22x it reads as majestic.
+      this.forceRagdoll(loser, [dx * 12.5, 9.5, dz * 12.5 + (Math.random() - 0.5) * 2], 2.8)
     }
-    // getting liquidated spills your bags
-    this.particles.burst('coins', { x: loser.pos.x, y: loser.pos.y + 1.2, z: loser.pos.z }, { n: 18 })
+    // getting liquidated spills your bags — a STORM of them now, staged so the
+    // pools never eat one giant burst: impact coins + shock ring + sparks on
+    // the frozen frame, confetti and a second fountain as the flight peaks.
+    const kp = { x: loser.pos.x, y: loser.pos.y + 1.2, z: loser.pos.z }
+    this.particles.burst('coins', kp, { n: 34 })
+    this.particles.burst('shock', kp, {})
+    this.particles.burst('sparks', kp, { n: 22 })
     this.game.audio.sfx('coins_burst')
+    this.at(8, () => {
+      const p = { x: loser.pos.x, y: loser.pos.y + 1.4, z: loser.pos.z }
+      this.particles.burst('confetti', p, { n: 30 })
+      this.particles.burst('coins', p, { n: 22 })
+      this.game.audio.sfx('coins_burst')
+    })
     try { this.cam.koCinematic(loser) } catch { /* stub */ }
     this._cut()   // #6: the KO camera cuts to its orbit rig — no ghost across it
     if (winner.damageTakenThisRound === 0) {
       this.at(24, () => { this.cap('FLAWLESS PORTFOLIO!'); this.say('FLAWLESS PORTFOLIO!') })
     }
-    this.at(38, () => this._startExecution(winner, loser))
+    // was at(38). In SIM frames: ~21 land inside the 1.6 s slow-mo window
+    // (0.22 x 96 real frames), the rest at full speed — the execution now
+    // begins ~3 s of real time after impact instead of ~1.3 s, all of it
+    // watchable flight under the KO cinematic camera.
+    this.at(52, () => this._startExecution(winner, loser))
   }
 
   _timeUp() {
@@ -2054,7 +2114,8 @@ export class MatchScreen {
     }
     this._replayFinish = finish
     let ok = false
-    try { ok = rp.playInstantReplay({ seconds: 5, slowmo: 0.4, onDone: finish }) } catch (e) {
+    // 7 s at 0.3: the replay is part of the KO spectacle now, not a footnote.
+    try { ok = rp.playInstantReplay({ seconds: 7, slowmo: 0.3, onDone: finish }) } catch (e) {
       console.error('[combat] instant replay failed to start', e)
     }
     this._cut()   // #6: live camera -> replay orbit rig

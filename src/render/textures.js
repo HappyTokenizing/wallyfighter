@@ -2377,6 +2377,21 @@ function drainQueue(budgetMs) {
   return _jobQueue.length
 }
 
+// COMBAT HOLD (round 48). While a round is live the generator does not run AT
+// ALL: its drain steps are 10-45 ms of main-thread work scheduled outside both
+// the update and render laps, which is exactly the "unaccounted" stall the
+// frame profiler kept showing mid-fight. MatchScreen raises the hold for the
+// 'fight' phase only, so everything queued mid-fight (LOD upgrades, late
+// surface requests) drains in the KO/round-end/intro windows instead — the
+// loading-screen philosophy applied to intermissions. exit() ALWAYS clears it:
+// a held queue outliving its match would freeze texture generation forever.
+let _combatHold = false
+export function setTextureCombatHold(on) {
+  const was = _combatHold
+  _combatHold = !!on
+  if (was && !_combatHold) scheduleTick() // release: restart the heartbeat now
+}
+
 function scheduleTick() {
   if (_jobQueue.length === 0) return
   if (_tickRaf === null && typeof requestAnimationFrame === 'function') {
@@ -2409,6 +2424,10 @@ function onTick() {
   const t = now()
   const gap = _lastTick ? t - _lastTick : 0
   _lastTick = t
+  // Combat hold: do nothing and do not re-arm aggressively. isPresenting()
+  // stays true during a fight, so the starved branch below cannot fire either —
+  // the queue simply sleeps until the hold clears.
+  if (_combatHold) { _tickTimer = setTimeout(() => { _tickTimer = null; onTick() }, 400); return }
   if (gap > STARVED_MS && !isPresenting()) {
     // Nothing is presenting frames — rAF is frozen and our only heartbeat is a
     // throttled setTimeout. This is the hidden-tab / capture-rig case

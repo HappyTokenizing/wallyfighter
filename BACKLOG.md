@@ -1,5 +1,62 @@
 # WCS build backlog (orchestrator notes)
 
+## ROUND 48 — the last mid-fight stalls, and the KO becomes a show
+
+Directive: smoothness above all, spend loading time freely; KOs longer and
+spectacular.
+
+### Freeze source 1: the texture generator ran DURING the fight
+
+The frame profiler kept showing 20-100 ms of "unaccounted" gap mid-fight — time
+outside both the update and render laps. That is the texture generator's own
+setTimeout heartbeat: drain steps of 10-45 ms scheduled BETWEEN frames.
+`setTextureCombatHold(on)` now bans generation outright while phase === 'fight';
+everything queued mid-fight (LOD upgrades, late surfaces) drains in the KO /
+round-end / intro windows. exit() ALWAYS clears the hold — a held queue outliving
+its match would freeze generation for the rest of the session.
+
+### Freeze source 2: the gate closed while refilling its own work queue
+
+The ~60-frame cluster of u=140 ms right after the bell, present in every run:
+`_pumpSurfaces` on drain sets `_surfacesDone` AND queues the chunked re-warm
+into `_buildSteps` on the SAME frame — and the gate's exit fired on
+`_surfacesDone` alone. The re-warm then ran post-bell at one non-preemptible
+~140 ms step per frame: 6-9 fps for the first second of every fight. The gate
+now finishes those chunks under the bar ("FINALISING") before the bell.
+
+### Result (production build, two consecutive full matches)
+
+    median gap     16.7 / 33 ms   ->  9.0 / 8.4 ms
+    frames >33     508 / 1295     ->  94 / 63
+    frames >100    7 / 26         ->  2 / 2  (gate bar + teardown only)
+    cross-match degradation: GONE (match 2 now equals match 1)
+
+Median frame cost fell ~2x on match 1 and ~4x on match 2 — the sustained-
+smoothness axis of the "+300%" ask, and mid-fight is now clean of stalls.
+
+### The KO beat
+
+onKO now: 26 frozen frames (impact freeze + white DOM flash + camera kick) ->
+slow-mo deepened 0.3x/0.55s -> 0.22x/1.6s so the ragdoll flight under the KO
+cinematic camera is actually watchable -> particle storm staged across the beat
+(34 coins + shock ring + 22 sparks on impact; 30 confetti + 22 coins at the
+flight's peak) -> execution start moved sim-tick 38 -> 52. Instant replay 5s@0.4
+-> 7s@0.3.
+
+The honest half of the design: ragdolls.full() inserts ~15 bodies + constraints
+at the KO frame (measured 66-90 ms) and the KO window carried 150-250 ms GC
+frames. ALL of it now lands inside the deliberate freeze — the genre-standard
+impact pause is also where the expensive work hides. Timers tick in SIM frames
+(frozen under hit-stop, stretched under slow-mo), so every downstream cue
+shifted automatically.
+
+### Still open
+
+- The gate's own compile burst is 1-2 frames of ~1 s while the bar is up —
+  cosmetic (the bar freezes), would need incremental compile to fix properly.
+- Between-match pipeline rebuild (~1.7 s under the banner) could get its own
+  mini-gate if it ever bothers anyone.
+
 ## ROUND 47 — the geometry leak: clone() inherits the shared tag
 
 Round 46 ruled out three hypotheses and left one constraint:
